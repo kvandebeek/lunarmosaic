@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.DS_Store
+
+# comparison crops and other large working images
+source_images/
