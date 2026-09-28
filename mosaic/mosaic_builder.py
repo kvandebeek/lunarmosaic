@@ -392,7 +392,11 @@ def preview_possible():
 
 
 def has_display():
-    return sys.platform == "darwin" and not os.environ.get("SSH_CONNECTION") or bool(os.environ.get("DISPLAY"))
+    if os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
+        return True
+    if sys.platform == "win32":
+        return True                                   # a Windows desktop session always has one
+    return sys.platform == "darwin" and not os.environ.get("SSH_CONNECTION")
 
 
 # ---------------------------------------------------------------- stage 3: global similarity solve
@@ -1469,7 +1473,7 @@ def run_stages_4_to_8(args, pr, pv, stg, main, pairs, ref, theta, idx, sizes, da
     crop_q = (bbox[0] // q, bbox[1] // q, -(-bbox[2] // q), -(-bbox[3] // q))
     disk_q = cv2.resize(info["disk_small"].astype(np.uint8), (lab.shape[1], lab.shape[0]), interpolation=cv2.INTER_NEAREST) > 0
     contrib, disk_shares = mst.contribution_map(stg.path(stem + "_contributions.png"), final_q, lab, main, {n: data[n]["path"] for n in main},
-                                                quads_q, shares, q, crop_q, font_path="/System/Library/Fonts/Avenir Next.ttc",
+                                                quads_q, shares, q, crop_q, font=ps.system_font("title"),
                                                 disk=disk_q)
     # region map for later inspection/tools: 16-bit PNG at 1/q of the output, index into layout["label_index"]
     cv2.imwrite(stg.path(stem + "_labels.png"), lab[crop_q[1]:crop_q[3], crop_q[0]:crop_q[2]])

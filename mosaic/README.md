@@ -17,9 +17,12 @@ Every command also explains itself: `python3 <command> --help`.
 
 ## Requirements
 
-- macOS on Apple silicon; Homebrew Python 3.14 with numpy and OpenCV (4.13). No other packages are required.
+- macOS, Linux or Windows; Python 3.14 with numpy and OpenCV (4.13). No other packages are required.
+  Developed and measured on macOS (Apple silicon); the other two should work but are untested.
 - Pillow (installed) is used for good-looking text in the preview and movies; without it, OpenCV's font is used.
-- Fonts: Avenir Next and SF Mono (macOS system fonts).
+- Fonts for the preview and movies are found automatically: Avenir Next and SF Mono on macOS, Segoe UI and
+  Consolas on Windows, DejaVu or Liberation on Linux. If none are present Pillow's built-in font is used,
+  which renders plainly but never fails.
 - Disk: about 1.2 GB per 16-bit output TIFF; RAM: peak about 9 GB for a 200 Mpx mosaic.
 
 ## Folder layout

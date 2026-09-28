@@ -1014,7 +1014,7 @@ def panel_colour(i):
     return tuple(int(v) for v in cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)[0, 0])
 
 
-def contribution_map(path_png, final_small, lab, nodes, paths, quads, shares, q, crop_q, font_path=None, disk=None):
+def contribution_map(path_png, final_small, lab, nodes, paths, quads, shares, q, crop_q, font=None, disk=None):
     """Which panel supplied which region: tinted regions, outlines, file names, legend with shares.
     With disk (bool, same grid as lab), only the lunar disk is tinted and shares are of the disk area."""
     try:
@@ -1058,19 +1058,20 @@ def contribution_map(path_png, final_small, lab, nodes, paths, quads, shares, q,
         cx, cy = cen[j]
         wbox = st[j, cv2.CC_STAT_WIDTH]
         labels.append((n, os.path.basename(paths[n]), cx, cy, wbox, i))
+    font_path, font_index = font if font else (None, 0)
     if Image is not None and font_path and os.path.exists(font_path):
         pil = Image.fromarray(canvas[..., ::-1].copy())
         d = ImageDraw.Draw(pil)
         for n, fname, cx, cy, wbox, i in labels:
             rest = fname.replace(n, "…", 1) if n in fname else fname
             size = int(np.clip(wbox / max(len(rest), 1) * 1.6, 9, 22))
-            f1 = ImageFont.truetype(font_path, int(size * 1.4), index=2)
-            f2 = ImageFont.truetype(font_path, size, index=2)
+            f1 = ImageFont.truetype(font_path, int(size * 1.4), index=font_index)
+            f2 = ImageFont.truetype(font_path, size, index=font_index)
             col = panel_colour(i)
             d.text((cx, cy - size * 0.6), n, font=f1, fill=(255, 255, 255), anchor="mm")
             d.text((cx, cy + size * 0.8), rest, font=f2, fill=(col[2], col[1], col[0]), anchor="mm")
-        f3 = ImageFont.truetype(font_path, 26, index=2)
-        f4 = ImageFont.truetype(font_path, 15, index=2)
+        f3 = ImageFont.truetype(font_path, 26, index=font_index)
+        f4 = ImageFont.truetype(font_path, 15, index=font_index)
         lx = img.shape[1] + 30
         d.text((lx, 20), "Contributions", font=f3, fill=(245, 245, 245))
         y = 64

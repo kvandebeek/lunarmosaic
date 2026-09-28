@@ -23,8 +23,43 @@ except ImportError:          # optional: fall back to cv2 text
 W, H = 1920, 1080            # landscape default (kept for callers that need the window size)
 AMBER, WHITE, DIM, GREY = (70, 180, 255), (245, 245, 245), (150, 150, 150), (70, 70, 70)
 RESID = {"good": (190, 210, 30), "mid": (40, 190, 255), "bad": (90, 90, 250)}      # teal / amber / coral (BGR)
-FONTS = {"title": ("/System/Library/Fonts/Avenir Next.ttc", 2), "caps": ("/System/Library/Fonts/Avenir Next.ttc", 5),
-         "mono": ("/System/Library/Fonts/SFNSMono.ttf", 0)}
+# System fonts for each role, tried in order (macOS, Windows, then common Linux packages). The first one that
+# Pillow can open wins; if none can be opened the Pillow default is used, which still renders, only plainer.
+FONT_CANDIDATES = {
+    "title": [("/System/Library/Fonts/Avenir Next.ttc", 2),
+              ("C:/Windows/Fonts/segoeui.ttf", 0),
+              ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 0),
+              ("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf", 0)],
+    "caps":  [("/System/Library/Fonts/Avenir Next.ttc", 5),
+              ("C:/Windows/Fonts/segoeuib.ttf", 0),
+              ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 0),
+              ("/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf", 0)],
+    "mono":  [("/System/Library/Fonts/SFNSMono.ttf", 0),
+              ("C:/Windows/Fonts/consola.ttf", 0),
+              ("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 0),
+              ("/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf", 0)],
+}
+_resolved = {}
+
+
+def system_font(kind):
+    """The first usable (path, index) for a role on this machine, or None when Pillow must fall back."""
+    if kind not in _resolved:
+        found = None
+        if Image is not None:
+            for path, idx in FONT_CANDIDATES[kind]:
+                if os.path.exists(path):
+                    try:
+                        ImageFont.truetype(path, 12, index=idx)
+                        found = (path, idx)
+                        break
+                    except OSError:
+                        continue
+        _resolved[kind] = found
+    return _resolved[kind]
+
+
+FONTS = {k: (system_font(k) or (None, 0)) for k in FONT_CANDIDATES}
 
 _ASCII = {"·": "-", "↔": "<->", "×": "x", "–": "-", "—": "-", "°": " deg", "≥": ">=", "≤": "<=", "…": "...", "→": "->", "±": "+/-"}
 
@@ -77,8 +112,11 @@ class Observatory:
     def _font(self, kind, size):
         key = (kind, size)
         if key not in self.fonts:
-            path, idx = FONTS[kind]
-            self.fonts[key] = ImageFont.truetype(path, size, index=idx)
+            found = system_font(kind)
+            try:
+                self.fonts[key] = ImageFont.truetype(found[0], size, index=found[1]) if found else ImageFont.load_default()
+            except OSError:                       # a font that opened at probe size but not at this one
+                self.fonts[key] = ImageFont.load_default()
         return self.fonts[key]
 
     def text(self, xy, s, kind, size, color, anchor="la"):

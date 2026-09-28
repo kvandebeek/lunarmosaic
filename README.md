@@ -22,7 +22,10 @@ stages and the movies, and [`mosaic/docs/COMMANDS.md`](mosaic/docs/COMMANDS.md) 
 
 ## Requirements
 
-macOS or Linux, Python 3.14 with numpy, OpenCV and Pillow. About 1.2 GB of disk per 16-bit output TIFF;
+macOS, Linux or Windows. Python 3.14 with numpy, OpenCV and Pillow. Developed and measured on macOS
+(Apple silicon); Linux and Windows should work but are untested, so do tell me if they don't.
+
+About 1.2 GB of disk per 16-bit output TIFF;
 peak RAM around 9 GB for a 200 Mpx mosaic.
 
 ## LunarAtlas
