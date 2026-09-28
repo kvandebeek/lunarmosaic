@@ -10,7 +10,6 @@ every step. Developed and measured on the 2026-09-25 full Moon (101 panels, Appl
 |---|---|
 | this README | overview, workflow, outputs, movies, tips, limitations |
 | [`docs/COMMANDS.md`](docs/COMMANDS.md) | **every command with all options and defaults** (generated from `--help`; refresh with `python3 tools/update_docs.py`) |
-| [`docs/mosaic_tool_spec.md`](docs/mosaic_tool_spec.md) | design record: methods, measurements, decisions and corrections (§14 implementation status, §15 finishing) |
 
 Every command also explains itself: `python3 <command> --help`.
 
@@ -37,7 +36,7 @@ Every command also explains itself: `python3 <command> --help`.
   tools/edge_falloff.py      detail vs distance from the frame edge (optics/tilt check)
   tools/update_docs.py       regenerates docs/COMMANDS.md
   design_mockups/            the chosen design (Observatory) and its renderer
-  docs/                      COMMANDS.md, mosaic_tool_spec.md
+  docs/                      COMMANDS.md
 ```
 
 ## Workflow
@@ -198,5 +197,4 @@ python3 $S/tools/edge_falloff.py panels/panel_manifest.json --by side           
 
 ## Maintaining the documentation
 
-After changing any option: `python3 tools/update_docs.py` (rewrites `docs/COMMANDS.md`). Design decisions and
-measurements go into `docs/mosaic_tool_spec.md`.
+After changing any option: `python3 tools/update_docs.py` (rewrites `docs/COMMANDS.md`).
