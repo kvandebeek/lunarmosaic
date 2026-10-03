@@ -1,0 +1,405 @@
+"""Behaviour checks for the LRGB workflow, using known mixed-scale lunar-like detail."""
+import copy
+import hashlib
+import json
+from pathlib import Path
+import sys
+import tempfile
+import threading
+import unittest
+import urllib.error
+import urllib.request
+from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import cv2
+import numpy as np
+import tifffile
+from project import Project, DEFAULT_EDITS
+from lrgb import Image, Scene, register, manual_match, largest_rectangle
+from app import Application, start_server
+from alignment import measure
+from recent import RecentProjects
+import orient
+from atlas_geo import Geometry, NoUsableLimb, similarity as atlas_similarity
+
+
+def detail(size=640):
+    rng = np.random.default_rng(924)
+    texture = rng.random((size, size), dtype=np.float32)
+    texture = cv2.GaussianBlur(texture, (0, 0), 2)*.5+.1
+    for _ in range(350):
+        x, y = rng.integers(15, size-15, 2)
+        radius = int(rng.integers(2, 14))
+        cv2.circle(texture, (int(x), int(y)), radius, float(rng.uniform(.15, .7)), 1)
+    return np.clip(texture, 0, 1)
+
+
+class Workflow(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.l = detail()
+        self.rgb = np.stack([self.l*1.08, self.l, self.l*.92], axis=-1)
+        self.lp, self.cp = self.root/'L.tif', self.root/'RGB.tif'
+        tifffile.imwrite(self.lp, np.round(self.l*65535).astype(np.uint16))
+        tifffile.imwrite(self.cp, np.round(self.rgb*65535).astype(np.uint16), photometric='rgb')
+        self.app = Application()
+        self.app.select(self.root/'moon.lunarmosaic', True, 'Test Moon')
+        self.app.inputs('L', [str(self.lp)])
+        self.app.inputs('RGB', [str(self.cp)])
+
+    def tearDown(self):
+        self.app.close()
+        self.temp.cleanup()
+
+    def built(self):
+        self.assertEqual(self.app.build(['L', 'RGB']), {'L':'built', 'RGB':'built'})
+        p = self.app.project
+        p.data['match'] = manual_match([[30,30],[550,30],[30,550],[550,550]], [[30,30],[550,30],[30,550],[550,550]])
+        p.save()
+        return self.app.get_scene()
+
+    def test_native_build_preserves_sources_and_reopens(self):
+        before = [hashlib.sha256(x.read_bytes()).digest() for x in (self.lp,self.cp)]
+        self.built()
+        self.app.close()
+        p = Project.open(self.root/'moon.lunarmosaic')
+        self.assertEqual(p.data['sets']['L']['state'], 'built')
+        self.assertEqual(p.data['sets']['RGB']['width'], 640)
+        self.assertIsNotNone(p.data['match'])
+        self.assertEqual(before, [hashlib.sha256(x.read_bytes()).digest() for x in (self.lp,self.cp)])
+
+    def test_version_one_migrates_without_changing_existing_edits(self):
+        self.built();p=self.app.project
+        old_keys=('saturation','smoothing','strength','highlights','contrast','rotation','coverage')
+        p.data['edits']={k:p.data['edits'][k] for k in old_keys}
+        p.data['edits']['saturation']=2.3;p.data['version']=1;p.save();self.app.close()
+        restored=Project.open(p.folder)
+        self.assertEqual(restored.data['version'],3)
+        self.assertEqual(restored.data['edits']['saturation'],2.3)
+        self.assertEqual(restored.data['edits']['wavelets'],[0,0,0,0])
+        self.assertFalse(restored.data['edits']['mirror'])
+        self.assertTrue(restored.data['edits']['l_visible'])
+        self.assertTrue(restored.data['edits']['rgb_visible'])
+
+    def test_version_two_migrates_preserving_sharpening_and_match(self):
+        self.built();p=self.app.project
+        p.data['version']=2
+        p.data['edits'].pop('l_visible');p.data['edits'].pop('rgb_visible')
+        p.data['edits']['wavelets']=[.1,.2,.3,.4];p.save()
+        before=copy.deepcopy(p.data['match']);self.app.close();self.app.select(p.folder)
+        restored=self.app.project.data
+        self.assertEqual(restored['version'],3)
+        self.assertEqual(restored['edits']['wavelets'],[.1,.2,.3,.4])
+        self.assertEqual(restored['match'],before)
+        self.assertTrue(restored['edits']['l_visible'])
+
+    def test_visibility_reopens_and_combined_export_uses_visible_layer(self):
+        scene=self.built();p=self.app.project
+        matrix,size,_=scene.geometry(DEFAULT_EDITS)
+        lonly=dict(DEFAULT_EDITS,rgb_visible=False)
+        combined,_=scene.render(matrix,size,lonly)
+        expected,_=scene.render(matrix,size,DEFAULT_EDITS,'luminance')
+        self.assertLess(np.max(np.abs(combined-expected)),1e-6)
+        conly=dict(DEFAULT_EDITS,l_visible=False)
+        output=self.root/'visible-colour.tif';scene.export(output,conly)
+        expected,_=scene.render(matrix,size,DEFAULT_EDITS,'colour')
+        self.assertLess(np.max(np.abs(tifffile.imread(output).astype(np.float32)/65535-expected)),.00002)
+        empty=dict(DEFAULT_EDITS,l_visible=False,rgb_visible=False)
+        preview,_=scene.render(matrix,size,empty)
+        self.assertEqual(float(preview.max()),0)
+        with self.assertRaises(ValueError):self.app.export_options(empty,dict(layer='composite'))
+        self.app.export_options(empty,dict(layer='luminance'))
+        p.data['edits']=conly;p.save();self.app.close();self.app.select(p.folder)
+        self.assertFalse(self.app.project.data['edits']['l_visible'])
+        self.assertTrue(self.app.project.data['edits']['rgb_visible'])
+
+    def test_independent_checks_detect_local_error_and_unknown_regions(self):
+        shifted=cv2.warpAffine(self.rgb,np.array([[1,0,3],[0,1,0]],np.float32),(640,640))
+        rgb=self.rgb.copy();rgb[:,320:]=shifted[:,320:]
+        tifffile.imwrite(self.cp,np.uint16(rgb*65535),photometric='rgb')
+        scene=self.built()
+        checks=measure(scene)
+        left=[s['residual'] for s in checks['samples'] if s['state']=='measured' and s['x']<290]
+        right=[s['residual'] for s in checks['samples'] if s['state']=='measured' and s['x']>360]
+        self.assertGreater(len(left),10);self.assertGreater(len(right),10)
+        self.assertLess(float(np.median(left)),.3)
+        self.assertGreater(float(np.median(right)),2.5)
+        self.assertLess(scene.match_meta['worst'],.001)  # manual point fit alone would miss the local error
+        scene.match[0,2]=280
+        checks=measure(scene)
+        self.assertGreaterEqual(sum(s.get('reason')=='Insufficient shared coverage' for s in checks['samples']),12)
+
+    def test_sharpened_native_export_has_no_tile_seams(self):
+        scene=self.built()
+        edits=dict(DEFAULT_EDITS,wavelets=[1.5,.5,0,0],wavelet_kernel='b3',usm_amount=.4,
+                   usm_radius=1.3,usm_threshold=.005,rotation=19,mirror=True,smoothing=3)
+        m,size,_=scene.geometry(edits,factor=.5)
+        expected,_=scene.render(m,size,edits)
+        out=self.root/'sharpened.tif';scene.export(out,edits,factor=.5)
+        actual=Image(out).pixels(Image(out).raw)
+        self.assertLess(float(np.mean(np.abs(actual-expected))),.0003)
+        self.assertLess(float(np.max(np.abs(actual-expected))),.007)
+        original,_=scene.render(m,size,dict(DEFAULT_EDITS,rotation=19,mirror=True))
+        self.assertGreater(float(np.mean(np.abs(actual-original))),.001)
+        self.assertTrue(scene.sharpening_stats(edits)['enabled'])
+        self.assertIsNotNone(scene.sharpening_stats(edits)['fine_variation'])
+
+    def test_shared_mirror_keeps_all_pixel_centres(self):
+        scene=self.built()
+        m,size,_=scene.geometry(dict(DEFAULT_EDITS,mirror=True))
+        self.assertEqual(size,(640,640))
+        np.testing.assert_allclose(m@[0,0,1],[639,0,1])
+        np.testing.assert_allclose(m@[639,639,1],[0,639,1])
+
+    def test_north_up_transform_and_failure_preserve_sources(self):
+        scene=self.built()
+        for mirror in (False,True):
+            a,t=atlas_similarity(320,320,200,37,mirror)
+            geo=Geometry(0,0,a,t)
+            with patch.object(orient,'locate',return_value=(geo,dict(matches=24,rms_px=.3))):
+                result=orient.solve(self.app.project,log=lambda s:None)
+            edits=dict(DEFAULT_EDITS,rotation=result['rotation'],mirror=result['mirror'])
+            matrix,_,_=scene.geometry(edits)
+            np.testing.assert_allclose(matrix[:2,:2],result['matrix'],atol=1e-12)
+        before=copy.deepcopy(self.app.project.data['edits'])
+        with patch.object(orient,'locate',side_effect=NoUsableLimb('no limb')):
+            with self.assertRaises(ValueError):orient.solve(self.app.project,log=lambda s:None)
+        self.assertEqual(self.app.project.data['edits'],before)
+
+    def test_native_tiff_byte_order_planar_and_white_zero(self):
+        pixels=np.round(self.l*65535).astype(np.uint16)
+        big=self.root/'big-endian.tif'
+        tifffile.imwrite(big,pixels,byteorder='>')
+        im=Image(big)
+        self.assertTrue(im.mapped)
+        self.assertLess(float(np.max(np.abs(im.pixels(im.raw)[...,0]-self.l))),.00002)
+        white=self.root/'white-zero.tif'
+        tifffile.imwrite(white,65535-pixels,photometric='miniswhite')
+        im=Image(white)
+        self.assertLess(float(np.max(np.abs(im.pixels(im.raw)[...,0]-self.l))),.00002)
+        planar=self.root/'planar.tif'
+        tifffile.imwrite(planar,np.moveaxis(np.uint16(self.rgb*65535),-1,0),photometric='rgb',planarconfig='separate')
+        im=Image(planar)
+        self.assertLess(float(np.max(np.abs(im.pixels(im.raw)-self.rgb))),.00002)
+
+    def test_mixed_scale_rotation_translation(self):
+        expected = np.vstack([cv2.getRotationMatrix2D((320,320), 8, 2.29), [0,0,1]])
+        expected[:2,2] += [65,40]
+        target = cv2.warpAffine(self.l, expected[:2], (1500,1450))
+        tifffile.imwrite(self.lp, np.round(target*65535).astype(np.uint16))
+        result = register(self.lp,self.cp)
+        m = np.array(result['matrix'])
+        corners = np.array([[80,80,1],[520,80,1],[80,520,1],[520,520,1]])
+        error = np.linalg.norm((corners@m.T-corners@expected.T)[:,:2], axis=1)
+        self.assertLess(float(error.max()), .7)
+        self.assertAlmostEqual(result['scale'],2.29,places=2)
+        self.assertGreater(result['inliers'],100)
+
+    def test_smoothing_retains_luminance_detail(self):
+        scene = self.built()
+        m, size, _ = scene.geometry(DEFAULT_EDITS)
+        a,_ = scene.render(m,size,DEFAULT_EDITS)
+        edits = dict(DEFAULT_EDITS,smoothing=8)
+        b,_ = scene.render(m,size,edits)
+        la = cv2.cvtColor(a,cv2.COLOR_RGB2LAB)[...,0]
+        lb = cv2.cvtColor(b,cv2.COLOR_RGB2LAB)[...,0]
+        self.assertLess(float(np.mean(np.abs(la-lb))),.15)
+        grey,_ = scene.render(m,size,dict(edits,strength=0))
+        self.assertLess(float(np.max(np.ptp(grey,axis=2))),.002)
+
+    def test_gaps_stay_grey_and_common_crop_avoids_holes(self):
+        scene = self.built()
+        scene.match[0,2] = 220
+        rgb, info = scene.render(np.eye(3),(640,640),DEFAULT_EDITS)
+        self.assertGreater(info['missing_colour'],30)
+        self.assertLess(float(np.max(np.ptp(rgb[:,:200],axis=2))),.002)
+        _,size,box = scene.geometry(dict(DEFAULT_EDITS,coverage='common'))
+        self.assertGreaterEqual(box[0],220)
+        self.assertLess(size[0],420)
+        mask=np.ones((12,20),bool);mask[3:9,7:12]=False
+        x0,y0,x1,y1=largest_rectangle(mask)
+        self.assertTrue(mask[y0:y1,x0:x1].all())
+
+    def test_tiff_png_quantization_and_shared_rotation(self):
+        scene = self.built()
+        edits = dict(DEFAULT_EDITS,rotation=17,smoothing=4,saturation=1.7)
+        matrix,size,_=scene.geometry(edits)
+        expected,_=scene.render(matrix,size,edits)
+        for ext in ('tif','png'):
+            path=self.root/f'export.{ext}'
+            scene.export(path,edits)
+            decoded=Image(path).pixels(Image(path).raw)
+            self.assertEqual(decoded.shape,expected.shape)
+            self.assertLess(float(np.mean(np.abs(decoded-expected))),.00025)
+            self.assertLess(float(np.max(np.abs(decoded[250:260]-expected[250:260]))),.003)
+
+    def test_cancel_does_not_publish_or_overwrite(self):
+        scene=self.built();out=self.root/'cancel.tif'
+        with self.assertRaises(InterruptedError):
+            scene.export(out,DEFAULT_EDITS,cancelled=lambda:True)
+        self.assertFalse(out.exists())
+        self.assertFalse(list(self.root.glob('.cancel-*')))
+        with self.assertRaises(ValueError):scene.export(self.lp,DEFAULT_EDITS)
+        scene.export(out,DEFAULT_EDITS)
+        before=out.read_bytes()
+        with self.assertRaises(ValueError):scene.export(out,DEFAULT_EDITS)
+        self.assertEqual(out.read_bytes(),before)
+
+    def test_failed_set_keeps_other_mosaic(self):
+        self.lp.unlink()
+        result=self.app.build(['L','RGB'])
+        self.assertEqual(result,{'L':'failed','RGB':'built'})
+        self.assertIsNone(self.app.project.data['sets']['L']['mosaic'])
+        self.assertTrue(self.app.project.path('derived/RGB.tif').is_file())
+
+    def test_partial_import_keeps_valid_panels_and_reports_bad_files(self):
+        bad=self.root/'unreadable.tif';bad.write_bytes(b'not an image')
+        self.app.inputs('RGB',[str(self.cp),str(self.lp),str(bad)],allow_partial=True)
+        s=self.app.project.data['sets']['RGB']
+        self.assertEqual(s['inputs'],[str(self.cp.resolve())])
+        self.assertEqual({v['name'] for v in s['skipped']},{'L.tif','unreadable.tif'})
+        before=copy.deepcopy(s)
+        with self.assertRaises(ValueError):self.app.inputs('RGB',[str(bad)],allow_partial=True)
+        self.assertEqual(s,before)
+        self.assertEqual(bad.read_bytes(),b'not an image')
+
+    def test_recent_history_lists_without_mutating_projects_and_clears_only_history(self):
+        self.built();p=self.app.project
+        history=RecentProjects(self.root/'history'/'recent.json')
+        history.remember(p.folder);history.remember(p.folder)
+        p.data['sets']['L']['state']='building';p.save()
+        before=(p.folder/'project.json').read_bytes()
+        self.assertEqual(len(history.read()),1)
+        summary=history.summaries()[0]
+        self.assertEqual(summary['panels'],{'L':1,'RGB':1})
+        self.assertGreater(summary['bytes'],0)
+        self.assertEqual((p.folder/'project.json').read_bytes(),before)
+        history.write([])
+        self.assertEqual(history.summaries(),[])
+        self.assertTrue(p.path('derived/L.tif').exists())
+        self.assertEqual((p.folder/'project.json').read_bytes(),before)
+
+    def test_export_preview_coverage_override_matches_output_without_changing_project(self):
+        scene=self.built();p=self.app.project
+        before=copy.deepcopy(p.data)
+        srv=start_server(0,app=self.app,token='preview-token')
+        t=threading.Thread(target=srv.serve_forever,daemon=True);t.start()
+        try:
+            req=urllib.request.Request(srv.url()+f'api/export-preview?id={p.data["id"]}&coverage=common&factor=0.5&layer=luminance',headers={'X-LA-Token':'preview-token'})
+            with urllib.request.urlopen(req) as r:info=json.load(r)
+            self.assertTrue(info['preview'].startswith('data:image/png;base64,'))
+            edits,layer,factor=self.app.export_options(p.data['edits'],dict(coverage='common',factor=.5,layer='luminance'))
+            output=self.root/'preview-match.tif';scene.export(output,edits,factor,layer)
+            a=tifffile.imread(output)
+            self.assertEqual(a.shape[:2],(info['height'],info['width']))
+            self.assertEqual(info['raw_bytes'],a.nbytes)
+            self.assertEqual(p.data,before)
+            with self.assertRaises(ValueError):self.app.export_options(p.data['edits'],dict(factor=.1))
+        finally:
+            srv.shutdown();srv.server_close();t.join()
+
+    def test_manual_fit_rejects_collinear_points(self):
+        with self.assertRaises(ValueError):manual_match([[1,1],[2,2],[3,3]],[[1,1],[2,2],[3,3]])
+        with self.assertRaises(ValueError):Project.validate_edits(dict(DEFAULT_EDITS,strength=float('nan')))
+
+    def test_layer_exports_share_grid_and_jpeg_is_readable(self):
+        scene=self.built()
+        edits=dict(DEFAULT_EDITS,coverage='common',rotation=9)
+        shapes=[]
+        for layer in ('composite','luminance','colour'):
+            out=self.root/f'{layer}.tif'
+            scene.export(out,edits,factor=.5,layer=layer)
+            image=tifffile.imread(out);shapes.append(image.shape)
+            if layer=='luminance':self.assertLess(np.ptp(image.astype(int),axis=2).max(),120)
+        self.assertEqual(shapes[0],shapes[1]);self.assertEqual(shapes[1],shapes[2])
+        scene.export(self.root/'small.jpg',edits,factor=.5)
+        self.assertEqual(Image(self.root/'small.jpg').raw.shape,shapes[0])
+
+    def test_upload_validates_mono_and_survives_project_move(self):
+        srv=start_server(0,app=self.app,token='upload-token')
+        t=threading.Thread(target=srv.serve_forever,daemon=True);t.start()
+        # Reset the references, so the upload is the complete L input set.
+        self.app.project.data['sets']['L']['inputs']=[]
+        self.app.project.save()
+        pid=self.app.project.data['id']
+        raw=self.lp.read_bytes()
+        def upload(key,name,body):
+            req=urllib.request.Request(srv.url()+f'api/upload?id={pid}&set={key}&name={name}',
+                data=body,headers={'X-LA-Token':'upload-token'})
+            return urllib.request.urlopen(req)
+        try:
+            with self.assertRaises(urllib.error.HTTPError):upload('RGB','mono.tif',raw)
+            self.assertFalse(list((self.app.project.folder/'sources'/'RGB').glob('*')))
+            with upload('L','panel.tif',raw) as r: self.assertEqual(r.status,200)
+            relative=self.app.project.data['sets']['L']['inputs'][0]
+            self.assertTrue(relative.startswith('sources/'))
+            old=self.app.project.folder;self.app.close()
+            new=self.root/'moved.lunarmosaic';old.rename(new)
+            self.app.select(new)
+            self.assertTrue(Path(self.app.project.input_paths('L')[0]).is_file())
+            self.assertEqual(self.app.build(['L']),{'L':'built'})
+        finally:
+            srv.shutdown();srv.server_close();t.join()
+
+    def test_second_process_lease_and_interrupted_recovery(self):
+        other=Application()
+        with self.assertRaises(ValueError):other.select(self.app.project.folder)
+        other.close()
+        self.app.project.data['sets']['L']['state']='building';self.app.project.save();self.app.close()
+        p=Project.open(self.root/'moon.lunarmosaic')
+        self.assertEqual(p.data['sets']['L']['state'],'interrupted')
+
+    def test_missing_colour_reopens_luminance_without_stale_common_crop(self):
+        self.built();p=self.app.project
+        p.data['edits'].update(coverage='common',l_visible=False);p.save();self.app.close()
+        p.path('derived/RGB.tif').rename(p.path('derived/RGB.moved.tif'))
+        self.app.select(p.folder)
+        restored=self.app.project
+        self.assertEqual(restored.data['sets']['RGB']['state'],'missing')
+        self.assertIsNone(restored.data['match'])
+        self.assertEqual(restored.data['edits']['coverage'],'full')
+        self.assertTrue(restored.data['edits']['l_visible'])
+        pixels,info=self.app.get_scene().preview(restored.data['edits'])
+        self.assertEqual((info['width'],info['height']),(640,640))
+        self.assertLess(np.ptp(pixels,axis=2).max(),.001)
+
+    def test_http_auth_stale_edits_and_native_viewport(self):
+        self.built()
+        srv=start_server(0,app=self.app,token='test-token')
+        t=threading.Thread(target=srv.serve_forever,daemon=True);t.start()
+        base=srv.url()
+        def request(path,data=None,token=True,origin=None):
+            headers={'X-LA-Token':'test-token'} if token else {}
+            if origin:headers['Origin']=origin
+            if data is not None:headers['Content-Type']='application/json'
+            req=urllib.request.Request(base+path,data=None if data is None else json.dumps(data).encode(),headers=headers)
+            return urllib.request.urlopen(req)
+        try:
+            with self.assertRaises(urllib.error.HTTPError):request('api/state',token=False)
+            with self.assertRaises(urllib.error.HTTPError):request('api/state',origin='https://evil.example')
+            p=self.app.project.data
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                request('api/edits',dict(id=p['id'],revision=-1,edits=DEFAULT_EDITS))
+            self.assertEqual(caught.exception.code,409)
+            with request(f'api/viewport?id={p["id"]}&x=20&y=30&w=400&h=300&scale=1') as r:
+                image=cv2.imdecode(np.frombuffer(r.read(),np.uint8),cv2.IMREAD_UNCHANGED)
+                self.assertEqual(image.shape,(300,400,3))
+            with request(f'api/layer-thumbnail?id={p["id"]}&set=L') as r:
+                image=cv2.imdecode(np.frombuffer(r.read(),np.uint8),cv2.IMREAD_UNCHANGED)
+                self.assertLessEqual(max(image.shape[:2]),96)
+                self.assertEqual(int(np.ptp(image,axis=2).max()),0)
+        finally:
+            srv.shutdown();srv.server_close();t.join()
+
+
+if __name__=='__main__':
+    suite=unittest.defaultTestLoader.loadTestsFromTestCase(Workflow)
+    class Percent(unittest.TextTestResult):
+        def startTest(self,test):
+            print(f'[{self.testsRun/ suite.countTestCases():.0%}] {test._testMethodName}',flush=True)
+            super().startTest(test)
+    result=unittest.TextTestRunner(verbosity=1,resultclass=Percent).run(suite)
+    print('[100%] LRGB workflow checks complete')
+    raise SystemExit(not result.wasSuccessful())

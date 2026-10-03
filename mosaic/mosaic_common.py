@@ -20,6 +20,21 @@ RNG_SEED = 20260925     # fixed seed: identical input gives identical output
 DEFAULT_EXTS = ("tif", "tiff", "png", "jpg", "jpeg")
 
 
+def physical_memory():
+    """Physical RAM in bytes on the supported desktop platforms."""
+    if sys.platform == 'win32':
+        import ctypes
+        class Status(ctypes.Structure):
+            _fields_ = [('length', ctypes.c_ulong), ('load', ctypes.c_ulong)] + [
+                (name, ctypes.c_ulonglong) for name in ('total', 'avail', 'page', 'avail_page', 'virtual', 'avail_virtual', 'extended')]
+        s = Status()
+        s.length = ctypes.sizeof(s)
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(s)):
+            raise OSError('Cannot query physical memory.')
+        return int(s.total)
+    return os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')
+
+
 class HelpFormatter(argparse.RawDescriptionHelpFormatter, argparse.ArgumentDefaultsHelpFormatter):
     """--help keeps the description's line breaks and shows every option's default."""
 

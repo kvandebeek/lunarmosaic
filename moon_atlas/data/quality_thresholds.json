@@ -1,0 +1,15 @@
+{
+ "version": "2026-09-28",
+ "labelled": 80,
+ "saturated_largest_patch": 0.00479,
+ "edge_width_px": 22.1655,
+ "undershoot": null,
+ "overshoot": null,
+ "mare_noise": null,
+ "jpeg_blocking": 1.4721,
+ "posterisation": null,
+ "min_fine_detail": null,
+ "chroma": 20.6535,
+ "fringe_rel": 0.7518,
+ "notes": "min_fine_detail not used: it depends on the sampling (oversampled close-ups and unsharpened stacks score low without being bad); it caught 1 of 9 rejects, which cannot be located anyway"
+}

@@ -62,11 +62,11 @@ python3 $S/lunar_finish.py mosaic.tif -o mosaic_finished.tif --record finish.mp4
 #    the result is turned north up, east right as the last step (--keep-orientation to skip)
 ```
 
-Defaults can be set per machine in LunarAtlas's `.env` (see its `.env.example`):
+Defaults can be set per machine in this repository's `.env` (see `.env.example`):
 - **lunar_finish:** `LUNAR_FINISH_WAVELETS=pixinsight`, `LUNAR_FINISH_NORTH_UP`, highlights, saturation and contrast.
 - **mosaic_builder:** `MOSAIC_MODEL`, `MOSAIC_WORKERS` and `MOSAIC_NORTH_UP`.
 
-Every option with a sensible default is a setting (60 in all, with ranges: `python3 <LunarAtlas>/tool_settings.py --check`). Command-line options override `.env`. On/off options have both forms (`--preview` / `--no-preview`, `--display-tif` / `--no-display-tif`), and lunar_finish has `--north-up` and `--no-wavelets` to override its `.env` choices.
+Every option with a sensible default is a setting (52 in all, with ranges: `python3 <LunarMosaic>/tool_settings.py --check`). Command-line options override `.env`. On/off options have both forms (`--preview` / `--no-preview`, `--display-tif` / `--no-display-tif`), and lunar_finish has `--north-up` and `--no-wavelets` to override its `.env` choices.
 
 The tools never move, rename or modify input files: an output path (including the derived `_display.tif`, layout files,
 movies and log) that names an input is refused before any work starts. Outputs are written under hidden temporary names

@@ -8,6 +8,7 @@ import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace as NS
+from unittest import mock
 
 import cv2
 import numpy as np
@@ -206,9 +207,30 @@ def mesh_model_round_trip():
     assert 0.1 < np.abs(shift).max() <= 1.51, f"mesh displacement {np.abs(shift).max():.2f} px not applied"
 
 
+def atlas_limb_failure_falls_back():
+    """The current vendored atlas reports missing limbs as NoUsableLimb, not SystemExit."""
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(mb.__file__)), 'moon_atlas'))
+    import atlas_geo
+    import atlas_closeup
+
+    def no_limb(*args, **kwargs):
+        raise atlas_geo.NoUsableLimb('no usable limb')
+
+    geo = NS(A=np.array([[1.0, 0.0], [0.0, -1.0]]), north_angle=0.0)
+    with mock.patch.object(atlas_geo, 'locate', no_limb), \
+         mock.patch.object(atlas_closeup, 'locate_closeup', return_value=(geo, {'matches': 20})), \
+         mock.patch.object(mb, 'canvas_preview', return_value=np.ones((20, 20), np.float32)):
+        result = lf.north_up(np.full((20, 20, 3), 0.4, np.float32), 1,
+                             '2026-09-25-2110_0-panel.tif')
+        assert isinstance(result, dict) and result['size'][0] > 0, result
+        matrix, reason = mb.north_up(None, None, None, None, None, 1,
+                                     lambda *args: (None, None, (20, 20)), None)
+        assert matrix is None and reason == 'no usable limb', (matrix, reason)
+
+
 for fn in (bridge_drop, fine_all_fallback, photometry_no_overlap, pyramid_levels_and_border0, proxy_non_divisible, finish_cancel,
            contrast_curve_monotonic, no_gaps_at_panel_edges, lit_peaks_beyond_terminator_kept, json_safe_and_bounded_map,
-           mesh_model_round_trip, sky_pedestal_neutralised):
+           mesh_model_round_trip, sky_pedestal_neutralised, atlas_limb_failure_falls_back):
     test(fn)
 print(f"\n{'ALL OK' if not FAILED else 'FAILED: ' + ', '.join(FAILED)}")
 sys.exit(1 if FAILED else 0)

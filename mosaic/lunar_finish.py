@@ -35,7 +35,7 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import atlas_link  # noqa: E402   (puts the LunarAtlas checkout on sys.path)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import tool_settings as ts  # noqa: E402
 import mosaic_common as mc  # noqa: E402
 import preview_style as ps  # noqa: E402
@@ -193,7 +193,7 @@ def process_region(bgr, y0, x0, ctx, p):
 def north_up(small_final, F, input_path=None):
     """Where lunar north is in the finished image (moon_atlas on the reduced copy), and the turn that puts it up:
     dict(M, rot, mirror, north_was, identity, T full-resolution affine, size), or a reason string."""
-    sys.path.insert(0, atlas_link.MOON_ATLAS)
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "moon_atlas"))
     try:
         import atlas_geo
     except ImportError as e:
@@ -201,7 +201,7 @@ def north_up(small_final, F, input_path=None):
     grey = small_final.mean(axis=2).astype(np.float32)
     try:
         geo, _ = atlas_geo.locate(grey, log=lambda *a: None)
-    except SystemExit as e:
+    except (SystemExit, atlas_geo.NoUsableLimb) as e:
         # no limb (a close-up mosaic): search the input blind, lit by the Sun at its panels' capture time
         from atlas_ephem import capture_time
         when = capture_time(input_path) if input_path else None

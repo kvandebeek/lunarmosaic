@@ -18,7 +18,7 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import atlas_link  # noqa: E402   (puts the LunarAtlas checkout on sys.path)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import tool_settings as ts  # noqa: E402
 import mosaic_common as mc  # noqa: E402
 
@@ -367,7 +367,7 @@ def main():
           f"{'relative + single-image' if args.relative else 'single-image'}", flush=True)
     if args.relative:
         est = sum(os.path.getsize(p) for p in files) / 3 * 1.1 / 1e9   # float16 luminance ≈ 1/3 of 16-bit RGB
-        pr_ram = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 1e9
+        pr_ram = mc.physical_memory() / 1e9
         if est > 0.6 * pr_ram:
             print(f"      WARN relative mode keeps luminance in RAM: ~{est:.1f} GB of {pr_ram:.0f} GB", flush=True)
 

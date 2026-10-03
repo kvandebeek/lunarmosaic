@@ -1,9 +1,17 @@
 __pycache__/
 *.pyc
 .DS_Store
+.env
+*.lunarmosaic/
+.venv/
+
+# Reference maps, catalogue, and elevation are fetched on demand.
+moon_atlas/data/*
+!moon_atlas/data/quality_thresholds.json
 
 # comparison crops and other large working images
 source_images/
 
 # internal working notes, not part of the published docs
 mosaic/docs/mosaic_tool_spec.md
+moon_atlas/REMAINING_WORK.md

@@ -24,7 +24,7 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import atlas_link  # noqa: E402   (puts the LunarAtlas checkout on sys.path)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import tool_settings as ts  # noqa: E402
 import mosaic_common as mc  # noqa: E402
 import mosaic_stages as mst  # noqa: E402
@@ -602,7 +602,7 @@ def show_layout(pv, main, pairs, ref, theta, idx, sizes, proxies, f, offset, can
 def north_up(main, theta, idx, sizes, proxies, f, geometry, log):
     """Canvas map M (2 × 2) that turns the mosaic to lunar north up, east right (the IAU view, never mirrored),
     measured by moon_atlas on a small preview composite. None (with a reason) when the Moon cannot be located."""
-    sys.path.insert(0, atlas_link.MOON_ATLAS)
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "moon_atlas"))
     try:
         import atlas_geo
     except ImportError as e:
@@ -612,7 +612,7 @@ def north_up(main, theta, idx, sizes, proxies, f, geometry, log):
     grey = canvas_preview(main, P0, sizes, proxies, f, cv0, fs)
     try:
         geo, q = atlas_geo.locate(grey, log=lambda *a: None)
-    except SystemExit as e:
+    except (SystemExit, atlas_geo.NoUsableLimb) as e:
         return None, str(e)
     M, rot, mirror = atlas_geo.north_up_matrix(geo)
     return M, dict(north_was_deg=round(geo.north_angle, 2), was_mirrored=mirror, rotation_deg=round(rot, 2),
@@ -799,7 +799,7 @@ def pipeline(args, pr, pv, stg):
     if len(kinds) > 1:
         pr.warn("mixed bit depths / channel counts: all data is converted to 16-bit RGB")
     total_px = sum(w * h for w, h, _, _ in heads.values())
-    ram = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    ram = mc.physical_memory()
     est_ram = total_px * 2 * 1.15 + 2e9           # float16 luminance of all panels + working sets (stages 1–3)
     free = shutil.disk_usage(out_dir).free
     need_disk = total_px * 6 / 3 + 0.5e9            # rough: canvas ≈ 1/3 of the summed panel area; rechecked after stage 3
