@@ -359,9 +359,10 @@ change, exact Lab (D17), isolated so it is measured on its own.
    `sharpen.layer_noise`).
 3. Add `rgb_to_lab` and `lab_to_rgb` to `filters.py` (float32, the constants of §4.3) and switch every Lab
    conversion in `lunar_finish.py` to them. Run `golden.py --report` to record rms / p99.9 / max against the
-   phase-0 fixtures (expect tens of ADU rms: that is OpenCV's error leaving), then `golden.py --capture --exact`
-   to write `golden_*_exact.tif`. Phase 2 compares against these, and `golden.py` switches to them by itself.
-   The builder keeps its own conversions.
+   phase-0 fixtures (expect tens of ADU rms: that is OpenCV's error leaving), then `golden.py --capture` to
+   write `golden_*_exact.tif`. Phase 2 compares against these, and `golden.py` switches to them by itself.
+   The builder keeps its own conversions. **Done:** 68–79 ADU rms; mono spread 34 → 0 ADU; float64 in chunks was
+   needed (float32 left saturated colours 0.49 ADU off per round trip).
 
 **Accept.** After step 2, golden outputs reproduced bit-exactly; after step 3, T-LAB passes and the measured
 difference is recorded; both suites green.
@@ -395,7 +396,9 @@ highlights, contrast, saturation), with `lunar_finish.py` as a runner and matchi
 4. The movie and the facts: `movie()` and the facts read fixed stage keys today (`small_st["orig"]`,
    `["contrast"]`, `f"colour{k}"`, `["final"]`, `["turned"]`, `info["C_pass"]`). Replace them with the ordered
    snapshots from `run_chain`, labelled by block type ("wavelets", "highlights", "colour pass 1", …), and compute
-   each fact only for the block types present.
+   each fact only for the block types present. Take the snapshots **on the reduced copy**: converting every
+   stage at full resolution only to downsample it costs about 0.35 s per Mpx with exact Lab (measured in phase 1:
+   2 s → 8 s on 16.8 Mpx).
 5. Add `--chain FILE.json` and `--write-chain FILE.json` (dump the chain the flags would run).
 
 **Accept.**
@@ -909,6 +912,7 @@ movie stay outside the chain.
 | Pose residuals (D15) | similarity 1.19, affine 0.97, cubic 0.55 px RMS held out, 25 Sep | `mosaic_stages.py:66` |
 | RGB shift (D16) | truth +0.30/−0.20: centroid −0.006/+0.046; with red blurred σ 1.2: phase correlation ×3 0.375/−0.221, Lucas–Kanade 0.311/−0.173 | review |
 | T-ATWT | re-decomposition 11–268 % error on correct code; reconstruction 3.6e-7 | review |
-| Mono through `lunar_finish` today | output channel spread 34 ADU on a perfectly mono input; one OpenCV float Lab round trip alone: 70.5 ADU, with \|a*\|, \|b*\| up to 0.125 on grey | phase 0 |
+| Mono through `lunar_finish` | phase 0: output channel spread 34 ADU on a perfectly mono input (one OpenCV float Lab round trip alone: 70.5 ADU, \|a*\|, \|b*\| up to 0.125 on grey); phase 1, exact Lab: 0 ADU | phases 0, 1 |
+| Exact Lab (D17) | round trip ≤ 0.004 ADU on greys, lunar colours, near-black; 0.05 on saturated colours (float32: 0.49); grey \|a*\|, \|b*\| < 1e-13; output vs the OpenCV-era code 68–79 ADU rms | phase 1 |
 | Builder determinism | three full builds (fine alignment 50 tiles, mesh 876 tiles) bit-identical; layouts equal apart from `created` | phase 0 |
 | Fine-alignment tile placement | 256 px tiles, centres ≥ 176 px inside both panels → overlaps ≥ 352 px; default proxy factor 4 → too few keypoints below ~1000 px panels | phase 0 |

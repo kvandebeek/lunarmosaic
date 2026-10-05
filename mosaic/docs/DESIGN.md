@@ -396,7 +396,7 @@ diverges:
 | Missing | — | White balance, sub-pixel RGB shift, deconvolution, limb fade, daylight sky model, named previews |
 | Build recovery | Interrupted builds restart | Resume from completed stages |
 | Luminance sets | One set; pairs outside a 0.97–1.03 scale ratio are rejected | Several sets and scales per stream, selected in tiers by measured resolution |
-| Lab conversion | OpenCV's float conversion (round trip off by 66 ADU rms) | Exact float math with the same constants |
+| Lab conversion | OpenCV's float conversion in the application (round trip off by 66 ADU rms); exact in `lunar_finish` since phase 1 | Exact float math with the same constants |
 
 That table is the migration list for the chain editor.
 
@@ -441,6 +441,29 @@ Completed afterwards:
 
 Full discovery now passes **60 tests** (53 above, one new regression, three golden, three determinism) in
 23 s; `run_all.py` passes all six suites.
+
+### Phase 1 — 2026-10-05
+
+Filters moved into their own module, then exact Lab.
+
+1. **`mosaic/filters.py`** holds the numerical filters, moved byte-for-byte from `lunar_finish.py` (checked against
+   the committed file); the golden fixtures reproduced bit-exactly after the move. `lunar_finish.py`, `sharpen.py`
+   and `lrgb.py` import from it, so the application no longer loads the finishing CLI — and the builder behind
+   it — just to reach the wavelets.
+2. **Exact CIE Lab** (`rgb_to_lab`, `lab_to_rgb`, plan D17) replaces all five OpenCV Lab conversions in
+   `lunar_finish.py`: float64 arithmetic in chunks, OpenCV's constants. Round trips within 0.004 ADU on greys,
+   lunar colours and near-black, 0.05 on saturated colours; a neutral grey's |a*|, |b*| is below 1e-13.
+3. **Effect on output** (`golden.py --report`): 68–79 ADU rms against the phase-0 fixtures — OpenCV's conversion
+   error leaving, not a change of method. **Mono output is now exactly mono: channel spread 34 ADU → 0.** The
+   fixtures were re-captured as `golden_*_exact.tif`, and the mono check is now 1 ADU.
+4. **Cost:** 2 s → 8 s on a 16.8 Mpx image, so about +70 s on a 200 Mpx mosaic. Most of it is six
+   full-resolution Lab conversions per pixel made only to feed the movie's reduced frames; phase 2 takes those
+   snapshots on the reduced copy instead.
+5. The printed colour facts no longer show "nan" on one-hue images (a median over no pixels, which the phase-0
+   code also printed); they say there are no pixels off the lunar hues.
+6. The application (`lrgb.py`, `sharpen.py`) keeps OpenCV's Lab until phase 4 rebuilds its renderer on chains.
+
+Tests: `lab_checks.py` (T-LAB) added; all seven suites pass.
 
 ### Changes made 2026-10-05 to `lunar_finish.py`
 

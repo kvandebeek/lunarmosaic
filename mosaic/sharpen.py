@@ -1,8 +1,7 @@
-"""L-only sharpening. Native exports reuse the finishing CLI's wavelet kernels."""
+"""L-only sharpening. Native exports reuse the shared wavelet filters (filters.py)."""
 import cv2
 import numpy as np
-# layer_noise is re-exported, not used here: lrgb.Scene.noise_levels calls sharpen.layer_noise.
-from lunar_finish import KERNELS, atrous, layer_noise, wavelet_margin, wavelet_sharpen
+from filters import KERNELS, atrous, wavelet_margin, wavelet_sharpen
 
 
 def enabled(edits):

@@ -45,132 +45,27 @@ import mosaic_common as mc  # noqa: E402
 import preview_style as ps  # noqa: E402
 import mosaic_builder as mb  # noqa: E402   (Recorder, Preview, frame helpers)
 
-LUNAR_BANDS = ((45, 115), (225, 295))      # orange–yellow and blue hue bands (Lab hue angle, degrees)
+from filters import (bgr_to_lab, guided_self, lab_to_bgr, layer_noise, lunar_weight, s_curve,  # noqa: E402
+                     shoulder, unsharp, wavelet_gain, wavelet_margin, wavelet_sharpen)
+
 MOVIE = {"opening": 2.0, "card": 1.2, "wipe": 2.0, "hold": 0.8, "fade": 1.0, "final": 2.0, "turn": 2.6}
 
-
-# ---------------------------------------------------------------- adjustments
-
-def guided_self(I, r, eps):
-    """Self-guided filter (He et al.): smoothing that keeps strong edges (limb, crater rims) sharp."""
-    k = (2 * r + 1, 2 * r + 1)
-    mean = lambda x: cv2.boxFilter(x, -1, k, normalize=True, borderType=cv2.BORDER_REFLECT)
-    mI = mean(I)
-    var = mean(I * I) - mI * mI
-    a = var / (var + eps)
-    b = mI - a * mI
-    return mean(a), mean(b)
-
-
-def shoulder(x, knee, top, h):
-    """Soft highlight roll-off: identity below knee; the knee-to-top span is lowered by a fraction h at the top.
-    Smooth (slope 1 at the knee), monotonic for h < 0.5, and continues with slope 1 - 2h above top."""
-    span = max(top - knee, 1e-6)
-    u = np.clip((x - knee) / span, 0, None)
-    y = np.where(u <= 1, x - h * span * u * u, (top - h * span) + (1 - 2 * h) * (x - top))
-    return np.where(x > knee, y, x)
-
-
-def s_curve(x, m, c):
-    """Very gentle S-curve pivoting at m: 0 -> 0, m -> m, 1 -> 1; midtone slope 1 + c."""
-    lo = np.clip(x / max(m, 1e-6) - 1, -1, 0)
-    hi = np.clip((x - m) / max(1 - m, 1e-6), 0, 1)
-    y_lo = m * (1 + lo + c * lo * (1 - lo * lo))
-    y_hi = m + (1 - m) * (hi + c * hi * (1 - hi * hi))
-    return np.where(x <= m, y_lo, y_hi)
-
-
-KERNELS = {"linear": np.array([1, 2, 1], np.float32) / 4,          # PixInsight "Linear Interpolation (3)"
-           "b3": np.array([1, 4, 6, 4, 1], np.float32) / 16}     # PixInsight "B3 Spline (5)"
 # the user's PixInsight setting for unsharpened stacks, as saved on 2026-10-05 (ATrousWaveletTransform, dyadic,
 # 4 layers, linear (3), layer 1 bias +2.3, target RGB/K, no noise reduction or deringing)
 WAVELET_PRESETS = {"pixinsight": dict(biases=(2.3, 0.0, 0.0, 0.0), kernel="linear")}
-
-
-def atrous(L, n, kernel="linear"):
-    """À-trous wavelet layers (finest first, dyadic scales 1, 2, 4, … px) and the smooth residual;
-    L = sum(layers) + residual."""
-    k0 = KERNELS[kernel]
-    layers, c = [], L.astype(np.float32)
-    for k in range(n):
-        s = 2 ** k
-        ker = np.zeros((len(k0) - 1) * s + 1, np.float32)
-        ker[::s] = k0
-        c2 = cv2.sepFilter2D(c, -1, ker, ker, borderType=cv2.BORDER_REFLECT)
-        layers.append(c - c2)
-        c = c2
-    return layers, c
-
-
-def wavelet_margin(n):
-    return 2 * (2 ** n - 1) + 2          # support of the coarsest layer (B3: 2 · s per level), in px
-
-
-def wavelet_gain(bias):
-    """PixInsight ATrousWaveletTransform's layer gain for a bias, measured on PixInsight 1.9.5 by least-squares fits
-    of its output on the input's layers: biases 0.1, 0.5, 1, 2.3, 5 give gains 2, 6, 11, 24, 51; -0.5 gives 1/6."""
-    return 1 + 10 * bias if bias >= 0 else 1 / (1 + 10 * -bias)
-
-
-def wavelet_sharpen(L, biases, noise, denoise, kernel="linear", gains=None):
-    """Layer k is multiplied by wavelet_gain(biases[k]), or by gains[k] when the gains are given directly. With
-    denoise[k] > 0 the part of each coefficient within denoise[k] × noise[k] keeps weight 1, so the grain is not
-    amplified."""
-    gains = [wavelet_gain(b) for b in biases] if gains is None else gains
-    layers, out = atrous(L, len(gains), kernel)
-    for w, g, sd, d in zip(layers, gains, noise, denoise):
-        t = d * sd
-        core = np.sign(w) * np.maximum(np.abs(w) - t, 0) if t > 0 else w
-        out = out + w + (g - 1) * core
-    return out
-
-
-def usm_sigma(radius):
-    """Photoshop's Gaussian for an Unsharp Mask radius, measured on Photoshop 2026 at radius 1, 2 and 4 px
-    (σ = 1.080, 2.096, 4.132). The factor is held at 1 above about 10 px, beyond the measured range."""
-    return radius * max(1.0, 1.080 - 0.0339 * np.log(radius))
-
-
-def unsharp(x, amount, radius, threshold):
-    """Photoshop's Unsharp Mask on one channel (amount as a fraction, threshold in 0–255 levels): the threshold is
-    subtracted from the difference, not used as a cut-off."""
-    d = x - cv2.GaussianBlur(x.astype(np.float32), (0, 0), usm_sigma(radius))
-    return x + amount * np.sign(d) * np.maximum(np.abs(d) - threshold / 255.0, 0)
-
-
-def layer_noise(L, n, kernel="linear", tile=32):
-    """Noise level (robust σ) of each wavelet layer: the median over the 10 % flattest tiles of a crop."""
-    layers, _ = atrous(L, n, kernel)
-    sz = (max(1, L.shape[1] // tile), max(1, L.shape[0] // tile))
-    act = cv2.resize(np.abs(layers[min(2, n - 1)]), sz, interpolation=cv2.INTER_AREA)
-    lum = cv2.resize(L, sz, interpolation=cv2.INTER_AREA)
-    on = lum > 0.05
-    flat = on & (act <= np.percentile(act[on], 10)) if on.any() else np.ones_like(act, bool)
-    return [float(np.median(cv2.resize(np.abs(w), sz, interpolation=cv2.INTER_AREA)[flat])) * 1.2533 for w in layers]
-
-
-def lunar_weight(hue, floor=0.15, ramp=30.0):
-    """1 on the lunar hue bands, falling (cosine) to `floor` over `ramp` degrees outside them."""
-    w = np.zeros_like(hue)
-    for lo, hi in LUNAR_BANDS:
-        inside = ((hue - lo) % 360) <= ((hi - lo) % 360)
-        d = np.minimum(np.abs(((hue - lo + 180) % 360) - 180), np.abs(((hue - hi + 180) % 360) - 180))
-        wb = np.where(inside, 1.0, np.where(d < ramp, 0.5 * (1 + np.cos(np.pi * np.minimum(d, ramp) / ramp)), 0.0))
-        w = np.maximum(w, wb)
-    return floor + (1 - floor) * w
 
 
 def process_region(bgr, y0, x0, ctx, p):
     """Apply all three adjustments to a region (float32 BGR 0–1) whose top-left is (y0, x0) in the full image.
     Returns {'orig', 'high', 'colour', 'final'} as float32 BGR."""
     h, w = bgr.shape[:2]
-    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2Lab)
+    lab = bgr_to_lab(bgr)
     L0 = lab[..., 0] / 100.0
     if p.wavelets:
         # as PixInsight on an RGB/K target: every channel on its own, on the stored values (not on lightness)
         sharp = np.dstack([wavelet_sharpen(bgr[..., c], p.wavelets, ctx["wnoise"], p.wavelet_denoise, p.wavelet_kernel)
                            for c in range(3)])
-        lab = cv2.cvtColor(np.clip(sharp, 0, 1).astype(np.float32), cv2.COLOR_BGR2Lab)
+        lab = bgr_to_lab(np.clip(sharp, 0, 1))
     L = lab[..., 0] / 100.0
     q = ctx["q"]
     X, Y = np.meshgrid(np.arange(x0, x0 + w, dtype=np.float32), np.arange(y0, y0 + h, dtype=np.float32))
@@ -201,7 +96,7 @@ def process_region(bgr, y0, x0, ctx, p):
         L3 = unsharp(L2, *p.usm)
         stages.append(("sharp", L3, a * fk, b * fk))
     for name, Lx, ax, bx in stages:
-        o = cv2.cvtColor(np.dstack([np.clip(Lx, 0, 1) * 100, ax, bx]).astype(np.float32), cv2.COLOR_Lab2BGR)
+        o = lab_to_bgr(np.dstack([np.clip(Lx, 0, 1) * 100, ax, bx]))
         o = np.clip(o, 0, 1)
         o[sky] = bgr[sky]
         out[name] = o
@@ -309,7 +204,7 @@ def run(args, pv, stg):
     args.mono = bool(np.abs(small - small[..., 1:2]).max() < 2e-3)
     if args.mono:
         args.saturation_passes = 0
-    Ls = cv2.cvtColor(small, cv2.COLOR_BGR2Lab)[..., 0] / 100.0
+    Ls = bgr_to_lab(small)[..., 0] / 100.0
     raw = (Ls > 0.05).astype(np.uint8)
     n_, lab_, st_, _ = cv2.connectedComponentsWithStats(raw)
     if n_ > 1:
@@ -399,12 +294,13 @@ def run(args, pv, stg):
 
     # what changed (measured on the reduced copies, disk only)
     def lab_stats(bgr):
-        lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2Lab)
+        lab = bgr_to_lab(bgr)
         Ld = cv2.erode((lab[..., 0] > 5).astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
         C = np.hypot(lab[..., 1], lab[..., 2])
         hue = (np.degrees(np.arctan2(lab[..., 2], lab[..., 1])) + 360) % 360
         onaxis = lunar_weight(hue) > 0.9
-        return {"L": lab[..., 0][Ld], "C_axis": float(np.median(C[Ld & onaxis])), "C_off": float(np.median(C[Ld & ~onaxis])),
+        med = lambda sel: float(np.median(C[sel])) if sel.any() else None     # None: no such pixels (one-hue images)
+        return {"L": lab[..., 0][Ld], "C_axis": med(Ld & onaxis), "C_off": med(Ld & ~onaxis),
                 "p999": float(np.percentile(lab[..., 0][Ld], 99.9)), "std": float(lab[..., 0][Ld].std())}
     S = {k: lab_stats(small_st[k]) for k in keys}
     last_col = f"colour{args.saturation_passes}" if args.saturation_passes else "high"
@@ -424,7 +320,9 @@ def run(args, pv, stg):
         print("      colour: a mono image, so there is no colour to saturate (colour stages skipped)")
     else:
         print(f"      colour ({args.saturation_passes} passes × {args.saturation:g}): chroma on lunar hues " +
-              " → ".join(f"{c:.2f}" for c in info["C_pass"]) + f" · elsewhere {info['C_off'][0]:.2f} → {info['C_off'][1]:.2f} (Lab units)")
+              " → ".join("—" if c is None else f"{c:.2f}" for c in info["C_pass"]) +
+              (" · no pixels off the lunar hues" if None in info["C_off"] else
+               f" · elsewhere {info['C_off'][0]:.2f} → {info['C_off'][1]:.2f}") + " (Lab units)")
     print(f"      contrast: brightness spread (std) L {info['std'][0]:.2f} → {info['std'][1]:.2f}")
     if args.usm:
         # fine-detail energy on the full-resolution centre crop: a direct measure of the sharpening
@@ -492,7 +390,8 @@ def movie(args, pv, small_st, ctx, info, img16, scale, W, H):
         steps.append((f"Lunar colour · pass {k} of {args.saturation_passes}", "more saturation on the Moon's blue and orange hues only",
                       tone(small_st[prev_key]), tone(small_st[f"colour{k}"]),
                       [("saturation", f"× {args.saturation:g} on lunar hues"), ("greens · purples", f"× {1 + (args.saturation - 1) * 0.15:.2f}"),
-                       ("chroma", f"{c0:.2f} → {c1:.2f}"), ("limb", f"protected {args.limb_taper:g} px")]))
+                       ("chroma", "—" if None in (c0, c1) else f"{c0:.2f} → {c1:.2f}"),
+                       ("limb", f"protected {args.limb_taper:g} px")]))
         prev_key = f"colour{k}"
     steps.append(("A touch of contrast", "a gentle S-curve on brightness",
                   tone(small_st[prev_key]), tone(small_st["contrast"]),

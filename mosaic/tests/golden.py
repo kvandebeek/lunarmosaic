@@ -7,7 +7,10 @@ reach the run (the owner's sets LUNAR_FINISH_WAVELETS=pixinsight) and `--usm` ha
     python mosaic/tests/golden.py                  compare the current code with the stored fixtures
     python mosaic/tests/golden.py --report         the same, printing rms / p99.9 / max in ADU
     python mosaic/tests/golden.py --capture        (re)write the fixtures from the current code
-    python mosaic/tests/golden.py --capture --exact    write the phase-1 set, after exact Lab (D17)
+
+Since phase 1 (exact Lab, D17) the fixtures are `golden_<case>_exact.tif`; `--capture` writes that set (`--exact`
+is accepted as an alias). The phase-0 set, made with OpenCV's Lab, lives in the phase-0 commit; the exact set
+differed from it by 68–79 ADU rms, which is OpenCV's conversion error leaving.
 
 Fixtures are 16-bit RGB, zlib-compressed. The test compares the whole image exactly; `--report` also gives
 the T-GOLD statistics over the disk, excluding interior pixels whose input L* < 1, which the old code froze
@@ -173,11 +176,11 @@ class Golden(unittest.TestCase):
 if __name__ == '__main__':
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--capture', action='store_true', help='(re)write the fixtures from the current code')
-    ap.add_argument('--exact', action='store_true', help='with --capture: write the phase-1 exact-Lab set')
+    ap.add_argument('--exact', action='store_true', help='alias kept for the plan text; --capture always writes the exact set')
     ap.add_argument('--report', action='store_true', help='print rms / p99.9 / max against the stored fixtures')
     args = ap.parse_args()
     if args.capture:
-        capture(args.exact)
+        capture(True)
     elif args.report:
         report()
     else:

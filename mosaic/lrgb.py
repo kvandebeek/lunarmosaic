@@ -13,6 +13,7 @@ import zlib
 import cv2
 import numpy as np
 import tifffile
+from filters import layer_noise
 import sharpen
 
 # Single source of truth for the JPEG ceiling: the server enforces it in Scene.export(),
@@ -254,7 +255,7 @@ class Scene:
             crop = self.l.pixels(self.l.raw[y:y+512, x:x+512])
             self.sample_light = sharpen.lightness(crop)
         if kernel not in self.noise:
-            self.noise[kernel] = sharpen.layer_noise(self.sample_light, 4, kernel)
+            self.noise[kernel] = layer_noise(self.sample_light, 4, kernel)
         return self.noise[kernel]
 
     def sharpening_stats(self, edits):
