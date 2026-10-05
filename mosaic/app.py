@@ -21,7 +21,9 @@ import webbrowser
 import cv2
 import numpy as np
 import tifffile
+import block_catalog
 import chain
+import filters
 import measurements as ms
 from project import Project, STREAMS, CANVAS_CAP_MPX, clean_optics, luminance_scales
 import project as projects
@@ -38,6 +40,21 @@ from atlas_view import start_server
 from atlas_paths import file_lock
 
 UI = ROOT / 'mosaic' / 'ui'
+UI_FILES = {'mosaic.css': 'text/css', 'mosaic.js': 'text/javascript', 'chains.js': 'text/javascript',
+            'previews.js': 'text/javascript', 'save.js': 'text/javascript'}
+
+
+def json_safe(o):
+    """Readouts for the interface: numpy arrays and scalars as lists and numbers."""
+    if isinstance(o, dict):
+        return {str(k): json_safe(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [json_safe(v) for v in o]
+    if isinstance(o, np.ndarray):
+        return json_safe(o.tolist())
+    if isinstance(o, np.generic):
+        return o.item()
+    return o
 
 
 class StatisticsWorker:
@@ -290,6 +307,7 @@ class Application:
                             s.update(state='failed', error='Build the luminance mosaic first: colour is placed onto it.')
                             p.save()
                     else:
+                        self.update_job(set='RGB', progress=0, stage=0, title='Placing colour panels')
                         try:
                             self.place_colour()
                         except Exception:
@@ -743,10 +761,93 @@ class Application:
         with self.lock:
             if baseline != (p.data['geometry']['rotation'], p.data['geometry']['mirror']):
                 raise ValueError('Rotation changed during the search. Your newer orientation was kept; run north-up again to apply it.')
-            p.edits = dict(p.edits, rotation=result['rotation'], mirror=result['mirror'])
+            old = dict(p.data['geometry'])
+            p.set_geometry(dict(rotation=result['rotation'], mirror=result['mirror']))
+            self.move_previews(old, p.data['geometry'])
             p.data['orientation'] = result
             p.save()
         return result
+
+    def move_previews(self, old, new):
+        """When rotation or mirror change, each preview keeps its size and follows its centre (plan §4.2)."""
+        p = self.project
+        previews = p.data['chain']['previews']
+        if not previews or (old['rotation'], old['mirror']) == (new['rotation'], new['mirror']):
+            return
+        scene = self.get_scene()
+        A = scene.geometry(dict(old, coverage='full'))[0]
+        B = scene.geometry(dict(new, coverage='full'))[0]
+        _, (w, h), _ = scene.geometry(dict(new, coverage='full'))
+        M = B @ np.linalg.inv(A)
+        for v in previews:
+            c = M @ [v['x'] + v['w'] / 2, v['y'] + v['h'] / 2, 1]
+            v['x'] = int(np.clip(round(c[0] - v['w'] / 2), 0, max(0, w - v['w'])))
+            v['y'] = int(np.clip(round(c[1] - v['h'] / 2), 0, max(0, h - v['h'])))
+
+    def preview_op(self, o):
+        """/api/previews: add, update (name, position, size) or delete a preview rectangle, in view px."""
+        p = self.project
+        previews = p.data['chain']['previews']
+        op, v = o.get('op'), o.get('preview') or {}
+        if not isinstance(v, dict):
+            raise ValueError('Describe the preview as an object.')
+        if op == 'delete':
+            p.data['chain']['previews'] = [x for x in previews if x['id'] != v.get('id')]
+            return
+        if op == 'add':
+            taken = {x['id'] for x in previews}
+            v = dict(v, id=next(f'p{n:02d}' for n in range(1, 1000) if f'p{n:02d}' not in taken))
+            v.setdefault('name', f'Preview {len(previews) + 1}')
+        elif op == 'update':
+            old = next((x for x in previews if x['id'] == v.get('id')), None)
+            if old is None:
+                raise ValueError('Unknown preview.')
+            v = dict(old, **v)
+        else:
+            raise ValueError('Unknown preview operation.')
+        name = str(v.get('name') or '').strip()[:60] or 'Preview'
+        try:
+            x, y, w, h = (int(v[k]) for k in ('x', 'y', 'w', 'h'))
+        except (KeyError, TypeError, ValueError):
+            raise ValueError('A preview is x, y, w and h in view pixels.') from None
+        if x < 0 or y < 0 or not 16 <= w <= 4096 or not 16 <= h <= 4096:
+            raise ValueError('A preview is 16 to 4096 pixels on each side, inside the view.')
+        clean = dict(id=v['id'], name=name, x=x, y=y, w=w, h=h)
+        p.data['chain']['previews'] = [clean if x_['id'] == clean['id'] else x_ for x_ in previews] if op == 'update' \
+            else previews + [clean]
+
+    def analysis(self):
+        """/api/analysis: every enabled block's readouts (Appendix A) and the probe they came from."""
+        with self.lock:
+            scene, doc = self.get_scene(), chain.normalised(self.project.chain_doc())
+        st = scene.stats(doc)
+        keys = dict(highlights=('knee', 'top', 'affected'), contrast=('m',), curves=('histogram',),
+                    white_balance=('B', 'W', 'g', 'ratios', 'pixels', 'note'), rgb_shift=('crops', 'estimates', 'r', 'b'),
+                    deconvolution=('mono', 'dering_threshold', 'first_dark_ring_px'),
+                    wavelets=('noise', 'cutoff', 'suggested_layer'))
+        out = {}
+        for path in chain.PATHS:
+            for e in chain.enabled(doc, path):
+                b = st.blocks.get(e['id'], {})
+                info = dict(st.readouts.get(e['id'], {}), **{k: b[k] for k in keys.get(e['type'], ()) if k in b})
+                if e['type'] == 'wavelets':
+                    info['gains'] = [filters.wavelet_gain(x) for x in e['params']['biases']]
+                out[e['id']] = json_safe(info)
+        return dict(blocks=out, probe=list(st.probe) if st.probe else None)
+
+    def placement(self):
+        """/api/placement: the colour placement, panel by panel, for the match popover."""
+        with self.lock:
+            st = self.project.stream('colour')
+            report = st.get('report')
+        if not report:
+            return dict(panels=[], summary=None)
+        doc = json.loads(self.project.path(report).read_text('utf-8'))
+        rows = [dict(name=n, state=e['state'], reason=e.get('reason'), model=e.get('model'), tiles=e.get('tiles'),
+                     held_out_rms=e.get('held_out_rms'), rgb_shift={c: e['rgb_shift'][c]['why'] for c in 'rb'})
+                for n, e in sorted(doc['panels'].items())]
+        return dict(panels=rows, summary=doc['summary'], k=doc['k'], scale_source=doc['scale_source'],
+                    photometry=dict(overlaps=doc['photometry']['overlaps'], notes=doc['photometry']['notes']))
 
     def get_scene(self):
         if self.scene is None:
@@ -755,11 +856,11 @@ class Application:
             self.scene = Scene(self.project)
         return self.scene
 
-    def export_options(self, edits, options):
-        edits = copy.deepcopy(edits)
+    def export_options(self, geometry, layers, options):
+        geometry = dict(geometry)
         if options.get('coverage') is not None:
-            edits['coverage'] = options['coverage']
-        Project.validate_edits(edits)
+            geometry['coverage'] = options['coverage']
+        Project.validate_geometry(geometry)
         layer = options.get('layer', 'composite')
         factor = float(options.get('factor', 1))
         if layer not in ('composite', 'luminance', 'colour'):
@@ -768,9 +869,9 @@ class Application:
             raise ValueError('Export scale must be 1, 1/2 or 1/4.')
         if layer == 'colour' and self.get_scene().match is None:
             raise ValueError('Match the colour mosaic before exporting this layer.')
-        if layer == 'composite' and not edits['l_visible'] and (not edits['rgb_visible'] or self.get_scene().match is None):
+        if layer == 'composite' and not layers['l_visible'] and (not layers['rgb_visible'] or self.get_scene().match is None):
             raise ValueError('Enable a layer in the workspace before exporting the combined image.')
-        return edits, layer, factor
+        return geometry, layer, factor
 
     def get(self, h, path):
         parsed = urlsplit(h.path)
@@ -778,8 +879,21 @@ class Application:
         try:
             if path == '/':
                 h.file(str(UI/'index.html'), 'text/html')
-            elif path in ('/mosaic.css', '/mosaic.js'):
-                h.file(str(UI/path[1:]), 'text/css' if path.endswith('css') else 'text/javascript')
+            elif path[1:] in UI_FILES:
+                h.file(str(UI/path[1:]), UI_FILES[path[1:]])
+            elif path == '/api/blocks':
+                h.json(dict(blocks=block_catalog.catalog(), paths=list(chain.PATHS)))
+            elif path == '/api/analysis':
+                self.require(dict(id=query.get('id', [''])[0]))
+                h.json(self.analysis())
+            elif path == '/api/placement':
+                self.require(dict(id=query.get('id', [''])[0]))
+                h.json(self.placement())
+            elif path == '/api/chain-file':
+                with self.lock:
+                    p = self.require(dict(id=query.get('id', [''])[0]))
+                    doc = p.chain_doc()
+                h.reply(json.dumps(doc, indent=2).encode(), 'application/json')
             elif path == '/api/state':
                 h.json(self.status())
             elif path == '/api/recent':
@@ -789,37 +903,40 @@ class Application:
                 with self.lock:
                     p = self.require(dict(id=query.get('id', [''])[0]))
                     options = {key:query[key][0] for key in ('coverage', 'layer', 'factor') if key in query}
-                    edits, layer, factor = self.export_options(p.edits, options)
+                    layers, doc = p.layers, p.chain_doc()
+                    geometry, layer, factor = self.export_options(p.data['geometry'], layers, options)
                     scene = self.get_scene()
-                rgb, info = scene.preview(edits, layer)
-                _, (w, height), _ = scene.geometry(edits, factor)
+                rgb, info = scene.preview(doc, geometry, layers, layer)
+                _, (w, height), _ = scene.geometry(geometry, factor)
                 _, png = cv2.imencode('.png', np.round(rgb[..., ::-1]*255).astype(np.uint8))
                 h.json(dict(width=w, height=height, raw_bytes=w*height*6,
                             missing_colour=info['missing_colour'],
                             jpeg_max_side=lrgb.JPEG_MAX_SIDE, jpeg_max_pixels=lrgb.JPEG_MAX_PIXELS,
-                            composition=layer if layer != 'composite' else 'LRGB' if edits['l_visible'] and edits['rgb_visible'] and scene.match is not None else 'luminance' if edits['l_visible'] else 'colour',
+                            composition=layer if layer != 'composite' else 'LRGB' if layers['l_visible'] and layers['rgb_visible'] and scene.match is not None else 'luminance' if layers['l_visible'] else 'colour',
                             preview='data:image/png;base64,'+base64.b64encode(png).decode('ascii')))
             elif path == '/api/preview':
                 with self.lock:
-                    self.require(dict(id=query.get('id', [''])[0]))
-                    scene = self.get_scene()
-                    edits = self.project.edits
+                    p = self.require(dict(id=query.get('id', [''])[0]))
+                    scene, doc, geometry, layers = self.get_scene(), p.chain_doc(), dict(p.data['geometry']), p.layers
                 view = query.get('view', ['composite'])[0]
                 if view not in lrgb.VIEWS:
                     raise ValueError('Unknown view.')
-                rgb, info = scene.preview(edits, view)
+                rgb, info = scene.preview(doc, geometry, layers, view)
                 ok, png = cv2.imencode('.png', np.round(rgb[..., ::-1]*255).astype(np.uint8))
                 h.reply(png.tobytes(), 'image/png')
             elif path == '/api/geometry':
                 with self.lock:
-                    self.require(dict(id=query.get('id', [''])[0]))
-                    _, info = self.get_scene().preview(self.project.edits)
-                    h.json(info)
+                    p = self.require(dict(id=query.get('id', [''])[0]))
+                    scene, geometry = self.get_scene(), dict(p.data['geometry'])
+                matrix, (w, height), box = scene.geometry(geometry)
+                full, (fw, fh), _ = scene.geometry(dict(geometry, coverage='full'))
+                h.json(dict(width=w, height=height, matrix=matrix.tolist(), full=dict(matrix=full.tolist(), width=fw, height=fh),
+                            box=list(box), matched=scene.match is not None, missing_colour=scene.missing_colour(geometry),
+                            sets=json_safe(scene.set_legend)))
             elif path == '/api/viewport':
                 with self.lock:
-                    self.require(dict(id=query.get('id', [''])[0]))
-                    scene = self.get_scene()
-                    edits = self.project.edits
+                    p = self.require(dict(id=query.get('id', [''])[0]))
+                    scene, doc, geometry, layers = self.get_scene(), p.chain_doc(), dict(p.data['geometry']), p.layers
                 x, y, scale = [float(query.get(k, ['0'])[0]) for k in ('x', 'y', 'scale')]
                 w, height = [int(query.get(k, ['0'])[0]) for k in ('w', 'h')]
                 if not all(np.isfinite(v) for v in (x, y, scale)) or not .001 <= scale <= 8 or not 1 <= w <= 4096 or not 1 <= height <= 4096 or w*height > 6_000_000:
@@ -827,9 +944,9 @@ class Application:
                 view = query.get('view', ['composite'])[0]
                 if view not in lrgb.VIEWS:
                     raise ValueError('Unknown view.')
-                matrix, _, _ = scene.geometry(edits)
+                matrix, _, _ = scene.geometry(geometry)
                 transform = np.array([[scale, 0, -x], [0, scale, -y], [0, 0, 1]]) @ matrix
-                rgb, _ = scene.render_edits(transform, (w, height), edits, view, precise=scale >= .75)
+                rgb, _ = scene.render(transform, (w, height), doc, layers, view, precise=scale >= .75)
                 _, png = cv2.imencode('.png', np.round(rgb[..., ::-1]*255).astype(np.uint8))
                 h.reply(png.tobytes(), 'image/png')
             elif path == '/api/canvas-estimate':
@@ -845,7 +962,7 @@ class Application:
                 with self.lock:
                     p = self.require(dict(id=query.get('id', [''])[0]))
                     scene = self.get_scene()
-                    edits, doc = p.edits, p.chain_doc()
+                    geometry, doc = dict(p.data['geometry']), p.chain_doc()
                 stage = query.get('stage', ['final'])[0]
                 depth = query.get('depth', ['16'])[0]
                 if stage not in chain.STAGES or depth not in ('8', '16'):
@@ -859,7 +976,7 @@ class Application:
                     x, y, w, height = (int(query.get(k, ['0'])[0]) for k in ('x', 'y', 'w', 'h'))
                 if not 1 <= w <= 4096 or not 1 <= height <= 4096 or w*height > 8_000_000:
                     raise ValueError('Invalid render region.')
-                matrix, _, _ = scene.geometry(dict(edits, coverage='full'))
+                matrix, _, _ = scene.geometry(dict(geometry, coverage='full'))
                 rgb, _ = scene.render_view(matrix, (w, height), doc, dict(final='composite').get(stage, stage),
                                            origin=(x, y))
                 top = 65535 if depth == '16' else 255
@@ -886,6 +1003,8 @@ class Application:
                 h.reply(png.tobytes(), 'image/png')
             else:
                 return False
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass                              # the page went away (a reload, a superseded preview): no one to answer
         except (ValueError, OSError, TypeError, KeyError, cv2.error) as e:
             h.json(dict(error=str(e)), 400)
         return True
@@ -973,29 +1092,55 @@ class Application:
                         T = manual_match(o['rgb_points'], o['l_points'])['matrix']
                         initial = {Path(colour[0]).stem: T}
                         self.start('Place colour from control points', lambda: self.place_colour(initial))
-                    elif path == '/api/edits':
+                    elif path in ('/api/chain', '/api/geometry', '/api/previews', '/api/chain-file'):
+                        # edits carry the revision they were made on: a stale one is refused, not merged (T-STALE)
                         if o.get('revision') != p.data['revision']:
-                            h.json(dict(error='The project changed. Refresh and try again.', conflict=True), 409)
+                            h.json(dict(error='The project changed elsewhere. Your change was kept here; it is sent '
+                                              'again on top of the newer project.', conflict=True), 409)
                             return True
-                        Project.validate_edits(o['edits'])
-                        scene = self.get_scene()
-                        scene.geometry(o['edits'])
-                        p.edits = o['edits']
+                        if path == '/api/chain':
+                            p.set_chain(o['chain'])
+                        elif path == '/api/chain-file':
+                            doc = o['chain']                  # an imported chain: fresh ids, this project's previews
+                            if isinstance(doc, dict) and isinstance(doc.get('chains'), dict):
+                                for name in chain.PATHS:
+                                    for e in doc['chains'].get(name) or []:
+                                        if isinstance(e, dict):
+                                            e['id'] = secrets.token_hex(4)
+                            p.set_chain(doc)
+                        elif path == '/api/geometry':
+                            old = dict(p.data['geometry'])
+                            if 'geometry' in o:
+                                p.set_geometry(o['geometry'])
+                                if p.stream('luminance').get('mosaic'):
+                                    self.get_scene().geometry(p.data['geometry'])   # a common crop must exist
+                            if 'view' in o:
+                                p.set_view(o['view'])
+                            if p.stream('luminance').get('mosaic'):
+                                self.move_previews(old, p.data['geometry'])
+                        else:
+                            self.preview_op(o)
                         p.save()
-                        # statistics for the new chain start now, before the preview asks for them
-                        self.worker.submit(scene, p.chain_doc())
+                        if path != '/api/previews' and self.scene is not None:
+                            # statistics for the new chain start now, before the previews ask for them
+                            self.worker.submit(self.scene, p.chain_doc())
+                    elif path == '/api/notes':
+                        p.data['notes'] = []                  # the migration notes, shown once
+                        p.save()
                     elif path == '/api/cancel':
                         self.cancel_job()
                     elif path == '/api/export':
-                        scene, edits = self.get_scene(), p.edits
-                        edits, layer, factor = self.export_options(edits, o)
-                        self.start('Export image', lambda: scene.export(o['output'], edits, factor, layer,
+                        scene, doc, layers = self.get_scene(), p.chain_doc(), p.layers
+                        geometry, layer, factor = self.export_options(p.data['geometry'], layers, o)
+                        self.start('Export image', lambda: scene.export(o['output'], doc, geometry, layers, factor, layer,
                             progress=lambda f: self.update_job(progress=f, title=f'Writing image · {f:.0%}'),
                             cancelled=self.cancel.is_set))
                     else:
                         h.json(dict(error='Unknown operation.'), 404)
                         return True
                 h.json(self.status())
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass                              # the page went away before the answer
         except (ValueError, OSError, TypeError, KeyError, cv2.error) as e:
             h.json(dict(error=str(e)), 400)
         return True

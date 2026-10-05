@@ -388,14 +388,14 @@ diverges:
 
 | Area | Implemented 3 October | Decided since |
 |---|---|---|
-| Editing model | The application renders chains since phase 4, but its interface still edits the fixed adjustments, translated into a chain on every change; `lunar_finish` runs chains since phase 2 | Three chains of reorderable blocks |
+| Editing model | Three chains of reorderable blocks, edited in the interface since phase 7; `lunar_finish` runs chains since phase 2 | Three chains of reorderable blocks |
 | Colour placement | Each colour panel registered directly onto the luminance mosaic since phase 6; a project from before keeps its global transform until colour is placed again | Each colour panel registered directly onto the luminance mosaic |
-| Wavelet units | The interface's amount 0–3 (gain 1 + amount); since phase 4 it becomes bias = amount ÷ 10 (the same gain) on stored values | PixInsight biases (gain 1 + 10b) on stored values |
-| Unsharp mask | The interface's amount 0–1 and threshold 0–0.05 of full scale; since phase 4 translated into Photoshop units and applied with the soft threshold and measured radius law | Photoshop units, soft threshold, measured radius law |
-| Saturation | Chroma multiplier | Lunar-hue weighting |
-| Missing | In the interface: all of these (the renderer can run them since phase 4; the interface cannot add them until phase 7). As chain blocks (run by `lunar_finish --chain`) since phase 3: white balance, sub-pixel RGB shift, deconvolution, limb fade, levels, curves, Gaussian blur | White balance, sub-pixel RGB shift, deconvolution, limb fade, daylight sky model, named previews |
+| Wavelet units | PixInsight biases on stored values since phase 4, edited as biases with the gain beside each since phase 7; an old project's amount becomes bias = amount ÷ 10 (the same gain) | PixInsight biases (gain 1 + 10b) on stored values |
+| Unsharp mask | Photoshop units with the soft threshold and measured radius law since phase 4, edited in those units since phase 7 | Photoshop units, soft threshold, measured radius law |
+| Saturation | The saturation block, lunar-hue weighting on by default, since phase 3; an old project's slider becomes the block without the weighting, so it looks as before | Lunar-hue weighting |
+| Missing | The daylight sky model (§8, open). In the interface since phase 7: white balance, sub-pixel RGB shift, deconvolution, a limb fade on every block, levels, curves, Gaussian blur, named previews | White balance, sub-pixel RGB shift, deconvolution, limb fade, daylight sky model, named previews |
 | Build recovery | Interrupted builds restart | Resume from completed stages |
-| Luminance sets | Several sets at different scales build into one mosaic since phase 5 (builder, API and resolution view); the current interface still shows one | Several sets and scales per stream, selected in tiers by measured resolution |
+| Luminance sets | Several sets at different scales build into one mosaic since phase 5, imported and shown in the interface since phase 7 | Several sets and scales per stream, selected in tiers by measured resolution |
 | Lab conversion | Exact in `lunar_finish` since phase 1 and in the application since phase 4 (OpenCV's float conversion before: round trip off by 66 ADU rms) | Exact float math with the same constants |
 
 That table is the migration list for the chain editor.
@@ -659,6 +659,91 @@ luminance 2.29× finer and turned 8°; "a failed set keeps the other mosaic" che
 colour cannot start; colour fails: luminance stays); the local-error check runs `alignment.measure` on a colour
 mosaic matched the old way, because placement now corrects that error. All twelve suites pass; 119 tests.
 
+### Phase 7 — 2026-10-05
+
+The interface edits chains: streams of sets, building and placing colour, the chain editor, previews at 1:1.
+
+1. **Pages.** Vanilla ES modules, no build step, on LunarAtlas's stylesheet: `mosaic.js` (the pages, requests and
+   the canvas), `chains.js` (the chain editor), `previews.js` (preview rectangles) and `save.js` (autosave). The
+   server serves exactly these files. Import shows the two streams. The luminance stream takes any number of sets,
+   each with a name, optics (pixel size, focal length, Barlow, aperture) and its panels. A set without optics gets
+   a measured scale to confirm (D10). The sampling of colour against luminance is said in words ("The colour
+   panels sample 2.0× coarser than the luminance"). The canvas lower bound comes with the 400 Mpx prompt and a
+   smaller canvas when the finest set is oversampled. The colour set can feed both streams.
+2. **Build and match.** The build page lists the nine builder steps, then colour placement with progress per
+   panel. The status bar's chip reads "Match 0.11 px · worst 0.12 px" from the placement report, followed by the
+   independent check. Its popover lists every panel: placed, or the reason it was not; the pose model, the tiles,
+   the held-out residual and the RGB-shift decision. The build card lists the luminance panels the builder left
+   out, with the reason. The `resolution` view has a legend: each set's tier, pixel scale, measured detail and
+   share of the disk.
+3. **Chain editor.** It shows the luminance and colour chains, the merge strength, the final chain and "keep space
+   black". Blocks show Appendix A's parameters in the owner's units. These come from `/api/blocks`
+   (`block_catalog.py`), which derives them from the engine's own ranges, so the two cannot disagree. Wavelets show
+   each PixInsight bias with its gain beside it; the unsharp mask uses Photoshop's percent, pixels and levels;
+   Curves are drawn over the histogram of the image arriving at the block. The add menu greys out a block that a
+   chain cannot take, with the reason. Blocks can be reordered by dragging the grip or with Alt+↑/↓ (the focus
+   stays on the block), switched off, duplicated and deleted. Every block has a limb fade. Readouts come from
+   `/api/analysis`:
+   - wavelets: the layer the detail reaches, and the change in fine detail;
+   - white balance: the gains and ratios, and the sentence that PixInsight sometimes also rescales brightness
+     where this block never does;
+   - RGB shift: every estimate and the decision;
+   - deconvolution: the first dark ring, and a warning when it is not first in its chain.
+
+   White-balance references are drawn on the mosaic and stored in canvas pixels. New blocks open; the others stay
+   collapsed until chosen.
+4. **Previews.** P or the toolbar draws a rectangle on the view; it is named, saved with the project, listed
+   under the canvas and shown at 1:1 through `/api/render`, in a viewer sized to it beside the layers panel. A
+   preview renders again once whenever what it shows changes (the chain, the view's geometry, the mosaics or the
+   placement), not on a rename; a superseded render is dropped. Turning the view moves each preview with its
+   centre. Below 75 % zoom the canvas says it is approximate.
+5. **Saving (BUGS.md bug 11).** Every change goes out through one queue, carrying the revision it was made on.
+   A chain edit shows at once and is saved 300 ms after the last one. On a conflict or a lost connection the edit
+   stays on screen and is sent again, newer edits winning, and the header says so. A chain the server refuses (an
+   impossible combination of values) also stays on screen with the reason, but waits for the next edit instead of
+   going out every 2 s.
+6. **Export** as before, plus the chain as a file: saved from the export dialog, or loaded into a project, with
+   fresh block ids and the project's own previews.
+7. **Compatibility layer removed (item 8).** `/api/edits`, `Scene.render_edits` and `legacy_edits` are gone, and
+   `lrgb_workflow.py` drives the chain API. The migration notes show once, in the layers panel.
+8. **Statistics restart at the first changed block (item 9).** For each block, the proxy and probe pixels after
+   it are kept, keyed by the chain up to that block, in a 2 GB cache that drops the least recently used. Measured
+   on a synthetic 2048 px disk with a 30-iteration deconvolution first in the luminance chain:
+
+   | Pass | Time | Blocks run |
+   |---|---|---|
+   | First statistics pass | 7.49 s | all |
+   | Contrast edit (final chain) | 0.66 s | contrast only |
+   | Wavelets edit | 1.62 s | wavelets and the blocks after it; the deconvolution is not run again |
+
+   Both edits give the same statistics as a fresh pass. On the 4 October mosaic, with a 100-iteration
+   deconvolution first, the first pass took 38.1 s. A contrast edit then took 1.9 s (a fresh pass 39.2 s), and a
+   wavelets edit 3.4 s (fresh 32.9 s). The proxy pass is reused whole there, because detail blocks are skipped in
+   it. The statistics were identical, and peak memory was 2.1 GB. Evidence:
+   `/Volumes/Astro/moontest_04102026/phase7/`.
+9. **Three faults the journey found.**
+   - A quarter turn made the view 2 px too large. Cos 90° is 6·10⁻¹⁷ in floating point, which tipped the
+     bounding box's floor and ceil. The corners are now rounded to 10⁻⁶ px, and a 1008 px square turns into
+     1008 × 1008.
+   - The autosave called the browser's `setTimeout` as one of its own methods, which browsers refuse.
+   - When a page went away (a reload, a superseded preview), the server answered the dead connection with an
+     error and printed two tracebacks. It now lets the connection go.
+10. **Numbers are written the English way** (6,721 px; 45.2 Mpx), like the text around them; the browser's
+    locale had mixed "6.721 px" with "0.27 GB".
+
+Tests: `ui_journey.py` is the plan's browser journey, in headless Chrome over the DevTools protocol, using Node's
+own WebSocket and no packages. On synthetic data it imports two luminance sets at different scales and a colour
+set, builds, reads the chip and the per-panel table, and adds wavelets, white balance, curves and contrast. It
+draws two previews (the viewer is at 1:1); a parameter change renders both again; a quarter turn moves both with
+their centres, to within a pixel's rounding. It checks that the resolution view is tinted by set and that its
+legend names both tiers, reorders with Alt+↓/↑, reloads (server state, editor and previews identical), loads a
+chain file, exports a TIFF, then closes and reopens; no console errors. It takes about 20 s; with
+`JOURNEY_SHOTS=<folder>` it saves screenshots. Its sets are as small as the builder accepts: smaller panels fell
+below 150 features (luminance) or four tiles (colour) and were left out, as they would be in real data. `ui_autosave.py` was rewritten for `save.js`:
+10 scenarios, including refusals. `scene_checks.py` covers the routes and `chain_checks.py` the prefix cache.
+`run_all.py` now prints each suite's test count. All thirteen suites pass: 111 unittest tests, and the 14
+regressions of `review_regressions.py`.
+
 ### Changes made 2026-10-05 to `lunar_finish.py`
 
 1. **Wavelets match PixInsight.** `wavelet_gain()` applies the measured law; sharpening runs on each
@@ -689,6 +774,7 @@ setting) instead of the old, unintended gain 4. Divide any pre-2026-10-05 bias b
 | Chain engine against the old code on real data (terminator patch, movie frames) | `/Volumes/Astro/moontest_04102026/phase2/` |
 | The application on chains: renders and timings against the old renderer | `/Volumes/Astro/moontest_04102026/phase4/` |
 | Colour placed per panel: real 25 September panels, report and composite | `/Volumes/Astro/moontest_04102026/phase6/` |
+| The interface: statistics restart on the 4 October mosaic, browser-journey screenshots | `/Volumes/Astro/moontest_04102026/phase7/` |
 | LunarAtlas reference checkout | `/Volumes/Astro/LunarAtlas` |
 
 Driving the applications headless: PixInsight with

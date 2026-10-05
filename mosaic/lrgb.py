@@ -19,9 +19,7 @@ import zlib
 import cv2
 import numpy as np
 import tifffile
-import blocks
 import chain
-from project import edits_to_chain
 
 # Single source of truth for the JPEG ceiling: the server enforces it in Scene.export(),
 # and /api/export-preview publishes it so the UI can warn before the click.
@@ -297,6 +295,7 @@ class Scene:
         self._cond = threading.Condition()
         self._stats, self._running = OrderedDict(), set()
         self._base, self._base_busy = (None, None), False
+        self._prefix = chain.PrefixCache()       # per block: a changed block restarts the statistics there
 
     def read_sets(self):
         """For the resolution view: an RGBA tint at label resolution (which luminance set supplied each region) and
@@ -397,7 +396,8 @@ class Scene:
                 return self._stats[key]
         result = None
         try:
-            result = chain.prepare(self.lum, doc, colour=self.colour_source(), check=check, base=self.base())
+            result = chain.prepare(self.lum, doc, colour=self.colour_source(), check=check, base=self.base(),
+                                   cache=self._prefix, tag=json.dumps(self.signature()))
         finally:
             with self._cond:
                 self._running.discard(key)
@@ -408,37 +408,28 @@ class Scene:
                 self._cond.notify_all()
         return result
 
-    def sharpening_stats(self, edits):
-        """The old interface's sharpening readout: how much the detail blocks raised the fine-detail amplitude on
-        the probe (the product of their readouts)."""
-        doc = chain.normalised(edits_to_chain(edits)[0])
-        detail = [e for path in ('luminance', 'final') for e in chain.enabled(doc, path) if blocks.BLOCKS[e['type']].detail]
-        if not detail:
-            return dict(enabled=False, fine_variation=1.)
-        st = self.stats(doc)
-        ratio = float(np.prod([st.readouts.get(e['id'], {}).get('fine_detail', 1.0) for e in detail]))
-        return dict(enabled=True, fine_variation=ratio, sample_width=st.probe[3], sample_height=st.probe[2])
-
     # ---------------------------------------------------------------- the view (D13)
 
-    def geometry(self, edits, factor=1):
+    def geometry(self, geometry, factor=1):
         """The view matrix (canvas px -> output px), the output size and the common-coverage box. Output pixel j at
         export scale f covers view pixels [j/f, (j+1)/f): its centre is view pixel (j + 1/2)/f − 1/2, so an export
         at 1/2 or 1/4 is exactly a reduced full-scale export."""
         w, h = self.l.w, self.l.h
-        r = cv2.getRotationMatrix2D(((w-1)/2, (h-1)/2), edits['rotation'], 1)
-        if edits['mirror']:
+        r = cv2.getRotationMatrix2D(((w-1)/2, (h-1)/2), geometry['rotation'], 1)
+        if geometry['mirror']:
             center = np.array([(w-1)/2, (h-1)/2])
             r[:, :2] = np.diag([-1., 1.]) @ r[:, :2]
             r[:, 2] = center-r[:, :2] @ center
         m = np.vstack([r, [0, 0, 1]])
         corners = np.array([[-.5, -.5, 1], [w-.5, -.5, 1], [-.5, h-.5, 1], [w-.5, h-.5, 1]]) @ m.T
+        # cos 90° is 6e-17 in floating point: unrounded, a quarter turn of a 1008 px square came out 1010 × 1009
+        corners = np.round(corners, 6)
         lo = np.floor(corners[:, :2].min(0)+.5)
         hi = np.ceil(corners[:, :2].max(0)+.5)
         m[:2, 2] -= lo
         w, h = (hi-lo).astype(int)
         bbox = (0, 0, int(w), int(h))
-        if edits['coverage'] == 'common':
+        if geometry['coverage'] == 'common':
             if self.match is None:
                 raise ValueError('Match a colour mosaic before choosing common coverage.')
             # Conservative mask cells: erosion reserves one proxy pixel at all boundaries.
@@ -456,6 +447,19 @@ class Scene:
             w, h = bbox[2]-bbox[0], bbox[3]-bbox[1]
         m = np.array([[factor, 0, -(1-factor)/2], [0, factor, -(1-factor)/2], [0, 0, 1.]]) @ m
         return m, (max(1, round(w*factor)), max(1, round(h*factor))), bbox
+
+    def missing_colour(self, geometry):
+        """Share (%) of the luminance-covered view with no colour, from the coverage masks at 400 px at most."""
+        if self.match is None:
+            return 100.0
+        matrix, (w, h), _ = self.geometry(dict(geometry, coverage='full'))
+        scale = min(1, 400/max(w, h))
+        proxy = np.diag([scale, scale, 1.]) @ matrix
+        size = (max(1, round(w*scale)), max(1, round(h*scale)))
+        _, lm = self.layer('L', proxy, size)
+        _, cm = self.layer('RGB', proxy @ self.match, size)
+        valid = lm > .5
+        return float(np.mean(cm[valid] <= .5))*100 if valid.any() else 100.0
 
     def render_view(self, matrix, size, doc, view='composite', precise=True, stats=None, origin=(0, 0)):
         """Output pixels [ox, ox + w) × [oy, oy + h) of the output that `matrix` (canvas px -> output px) defines.
@@ -565,40 +569,40 @@ class Scene:
         return chain.render(self.lum, stats, doc, y0, x0, h, w, colour=self.colour_source(), stage=stage, step=step,
                             coverage=cover)
 
-    # ---------------------------------------------------------------- the schema-3 calls (phase 4 compatibility layer)
+    # ---------------------------------------------------------------- layers, previews, exports
 
-    def visible(self, edits, view):
-        """The old layer switches: (view to render, whether the result is empty)."""
+    def visible(self, layers, view):
+        """The layer switches (schema 4's `view`): (view to render, whether the result is empty). With luminance
+        hidden the colour layer supplies lightness too; with colour hidden the result is the grey luminance."""
         empty = False
         if view == 'composite':
-            if not edits['l_visible']:
-                empty = not edits['rgb_visible'] or self.match is None
+            if not layers['l_visible']:
+                empty = not layers['rgb_visible'] or self.match is None
                 view = 'colour'
-            elif not edits['rgb_visible']:
+            elif not layers['rgb_visible']:
                 view = 'luminance'
         return view, empty
 
-    def render_edits(self, matrix, size, edits, view='composite', precise=True, doc=None, stats=None, origin=(0, 0)):
-        """The schema-3 render: flat adjustments translated into their chain, with the old layer switches. Phase 7
-        removes it with the rest of the compatibility layer."""
-        view, empty = self.visible(edits, view)
-        rgb, info = self.render_view(matrix, size, doc or edits_to_chain(edits)[0], view, precise, stats, origin)
+    def render(self, matrix, size, doc, layers, view='composite', precise=True, stats=None, origin=(0, 0)):
+        """render_view with the layer switches applied."""
+        view, empty = self.visible(layers, view)
+        rgb, info = self.render_view(matrix, size, doc, view, precise, stats, origin)
         if empty:
             rgb[:] = 0
         return rgb, info
 
-    def preview(self, edits, view='composite'):
-        matrix, size, _ = self.geometry(edits)
+    def preview(self, doc, geometry, layers, view='composite'):
+        """The whole oriented view, at most 1400 px: approximate below scale 1 (plan §4.5)."""
+        matrix, size, _ = self.geometry(geometry)
         scale = min(1, 1400/max(size))
         matrix = np.diag([scale, scale, 1]) @ matrix
         small = (max(1, round(size[0]*scale)), max(1, round(size[1]*scale)))
-        rgb, info = self.render_edits(matrix, small, edits, view, precise=False)
+        rgb, info = self.render(matrix, small, doc, layers, view, precise=False)
         info.update(width=size[0], height=size[1], preview_scale=scale)
-        info['sharpening'] = self.sharpening_stats(edits)
         return rgb, info
 
-    def export(self, output, edits, factor=1, layer='composite', progress=lambda x: None, cancelled=lambda: False,
-               doc=None, stats=None):
+    def export(self, output, doc, geometry, layers, factor=1, layer='composite', progress=lambda x: None,
+               cancelled=lambda: False, stats=None):
         """Write the view at export scale `factor` (1, 1/2, 1/4), tile by tile. The chain document and its
         statistics are fixed when the export starts, so later edits never reach a running export (T-WORKER)."""
         output = Path(output).expanduser().resolve()
@@ -611,14 +615,14 @@ class Scene:
             raise ValueError('Choose an export outside the built mosaics and source files.')
         if factor not in (1, .5, .25):
             raise ValueError('Export scale must be 1, 1/2 or 1/4.')
-        matrix, (w, h), _ = self.geometry(edits, factor)
+        matrix, (w, h), _ = self.geometry(geometry, factor)
         suffix = output.suffix.lower()
         if suffix not in ('.tif', '.tiff', '.png', '.jpg', '.jpeg'):
             raise ValueError('Choose TIFF, PNG or JPEG.')
         if suffix in ('.jpg', '.jpeg') and (max(w, h) > JPEG_MAX_SIDE or w*h > JPEG_MAX_PIXELS):
             raise ValueError('This JPEG is too large. Choose a smaller scale or TIFF/PNG.')
-        view, empty = self.visible(edits, layer)
-        doc = chain.normalised(doc or edits_to_chain(edits)[0])
+        view, empty = self.visible(layers, layer)
+        doc = chain.normalised(doc)
         if STAGE_OF[view] != 'overlay' and stats is None:
             stats = self.stats(doc)
         output.parent.mkdir(parents=True, exist_ok=True)

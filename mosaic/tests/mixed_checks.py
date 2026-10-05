@@ -329,7 +329,7 @@ class Application(unittest.TestCase):
         self.assertEqual(sorted({e['set'] for e in scales['panels']}), ['L', 's2'])
         # the resolution view tints by set, with a legend giving each set's pixel scale
         scene = app.get_scene()
-        matrix, size, _ = scene.geometry(p.edits)
+        matrix, size, _ = scene.geometry(p.data['geometry'])
         m = np.diag([.25, .25, 1]) @ matrix
         rgb, info = scene.render_view(m, (round(size[0] * .25), round(size[1] * .25)), p.chain_doc(), 'resolution')
         legend = {x['id']: x for x in info['sets']}
@@ -338,10 +338,9 @@ class Application(unittest.TestCase):
         plain, _ = scene.render_view(m, rgb.shape[1::-1], p.chain_doc(), 'composite')
         tinted = np.abs(rgb - plain).max(axis=2) > .01
         self.assertGreater(tinted.mean(), .2)
-        # the interface's schema-3 view still describes one luminance set, with the stream's build state
         public = p.public()
-        self.assertEqual((public['sets']['L']['state'], public['sets']['L']['mosaic']), ('built', 'derived/L.tif'))
-        self.assertEqual(len(public['schema4']['sets']), 3)
+        self.assertEqual((public['luminance']['state'], public['luminance']['mosaic']), ('built', 'derived/L.tif'))
+        self.assertEqual(len(public['sets']), 3)
 
 
 class SingleScale(unittest.TestCase):

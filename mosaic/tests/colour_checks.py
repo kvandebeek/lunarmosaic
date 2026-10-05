@@ -198,7 +198,7 @@ class Application(unittest.TestCase):
                 self.assertEqual(p.stream('colour')['mosaic'], p.stream('luminance')['mosaic'])
                 self.assertEqual((p.match['method'], p.match['matrix']), ('both', np.eye(3).tolist()))
                 scene = app.get_scene()
-                out, _ = scene.render_edits(np.eye(3), (1024, 1024), dict(p.edits))
+                out, _ = scene.render(np.eye(3), (1024, 1024), p.chain_doc(), p.layers)
                 lab_in, lab_out = F.rgb_to_lab(rgb.astype(np.float32) / 65535), F.rgb_to_lab(out)
                 lit = lab_in[..., 0] > 20
                 self.assertLess(float(np.abs(lab_in[..., 1:] - lab_out[..., 1:])[lit].mean()), .3)   # its own colour

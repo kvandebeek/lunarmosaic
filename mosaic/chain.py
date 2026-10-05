@@ -10,10 +10,13 @@ when it is complete), `proxy(q)` the 1/q INTER_AREA proxy, and optionally `proxy
 colour streams each have a source; lunar_finish feeds one image to both (SAME, D9), and with no colour source the
 result is grey.
 """
+from collections import OrderedDict
 import copy
+import hashlib
 import json
 import re
 import secrets
+import threading
 
 import cv2
 import numpy as np
@@ -324,28 +327,48 @@ def _fade(e, blk, before, after, ctx):
     return before + w * (after - before)
 
 
-def run_chain(entries, x, ctx, *, protect=None, snapshot=None, hook=None, skip_detail=False):
+def run_chain(entries, x, ctx, *, protect=None, snapshot=None, hook=None, skip_detail=False, start=0, lab=None,
+              checkpoint=None):
     """Run enabled block entries on a float32 RGB region. Adjacent Lab blocks share one conversion: inside such a
     run L* is clipped to 0–100 after every block (as lunar_finish clipped L), RGB at the run's end, and space is
     protected there and after every RGB block. hook(entry, block, x, domain) is called before a block runs (the
-    statistics pass); snapshot(entry, array, domain, step) after it, with step = the saturation pass."""
-    i, n = 0, len(entries)
+    statistics pass); snapshot(entry, array, domain, step) after it, with step = the saturation pass.
+
+    `start` and `lab` resume after a checkpoint (plan §4.5): block `start` runs next, on x — or, inside a run of Lab
+    blocks, on `lab`. checkpoint(i, value, domain) receives the state after block i: RGB after its protection, or the
+    Lab array inside a Lab run. A resumed run computes exactly what an uninterrupted one would."""
+    i, n = start, len(entries)
     blk_of = lambda e: B.BLOCKS[e['type']]
+    in_lab = lambda e: blk_of(e).domain(e['params']) == 'lab'
     while i < n:
         e = entries[i]
         blk = blk_of(e)
-        if skip_detail and blk.detail:
-            i += 1
-            continue
-        st = ctx.stats.blocks.setdefault(e['id'], {})
-        if blk.domain(e['params']) == 'lab':
-            lab = F.rgb_to_lab(x)
-            while i < n and blk_of(entries[i]).domain(entries[i]['params']) == 'lab':
-                e = entries[i]
-                blk = blk_of(e)
+        if lab is None:
+            if skip_detail and blk.detail:
                 i += 1
-                if skip_detail and blk.detail:
-                    continue
+                if checkpoint:
+                    checkpoint(i - 1, x, 'rgb')
+                continue
+            if not in_lab(e):
+                i += 1
+                st = ctx.stats.blocks.setdefault(e['id'], {})
+                if hook:
+                    hook(e, blk, x, 'rgb')
+                    st = ctx.stats.blocks[e['id']]
+                x = np.clip(_fade(e, blk, x, blk.apply(x, e['params'], st, ctx), ctx), 0, 1).astype(np.float32)
+                if protect:
+                    protect.apply(x)
+                if snapshot:
+                    snapshot(e, x, 'rgb', None)
+                if checkpoint:
+                    checkpoint(i - 1, x, 'rgb')
+                continue
+            lab = F.rgb_to_lab(x)
+        while i < n and in_lab(entries[i]):
+            e = entries[i]
+            blk = blk_of(e)
+            i += 1
+            if not (skip_detail and blk.detail):
                 st = ctx.stats.blocks.setdefault(e['id'], {})
                 if hook:
                     hook(e, blk, lab, 'lab')
@@ -360,22 +383,54 @@ def run_chain(entries, x, ctx, *, protect=None, snapshot=None, hook=None, skip_d
                 lab = new
                 if snapshot and not passes:
                     snapshot(e, lab, 'lab', None)
-            x = np.clip(F.lab_to_rgb(lab), 0, 1)
-            if protect:
-                protect.apply(x)
-        else:
-            i += 1
-            if hook:
-                hook(e, blk, x, 'rgb')
-                st = ctx.stats.blocks[e['id']]
-            x = np.clip(_fade(e, blk, x, blk.apply(x, e['params'], st, ctx), ctx), 0, 1).astype(np.float32)
-            if protect:
-                protect.apply(x)
-            if snapshot:
-                snapshot(e, x, 'rgb', None)
+            if checkpoint:
+                checkpoint(i - 1, lab, 'lab')
+        x = np.clip(F.lab_to_rgb(lab), 0, 1)
+        lab = None
+        if protect:
+            protect.apply(x)
+    if lab is not None:                               # resumed after the last block, inside a Lab run
+        x = np.clip(F.lab_to_rgb(lab), 0, 1)
+        if protect:
+            protect.apply(x)
     if protect and entries:
         protect.finish(x)
     return x
+
+
+class PrefixCache:
+    """The statistics and pixels after every block of a statistics pass, keyed by everything upstream of it, so a
+    changed block restarts the pass there, not at the start (plan §4.5): a 100-iteration deconvolution first in its
+    chain runs once, not at every edit below it. Kept within a byte budget, least recently used out; thread-safe."""
+
+    def __init__(self, budget=2 << 30):
+        self.items, self.size, self.budget, self.lock = OrderedDict(), 0, budget, threading.Lock()
+
+    def get(self, key):
+        with self.lock:
+            value = self.items.get(key)
+            if value is not None:
+                self.items.move_to_end(key)
+            return value
+
+    def put(self, key, value):
+        with self.lock:
+            if key in self.items:
+                return
+            self.items[key] = value
+            self.size += value['value'].nbytes
+            while self.size > self.budget and len(self.items) > 1:
+                _, old = self.items.popitem(last=False)
+                self.size -= old['value'].nbytes
+
+
+def _key(*parts):
+    return hashlib.sha1(json.dumps(parts, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _identity(e, skip_detail):
+    """What a block's effect on a pass depends on — not its id. In the proxy pass a detail block is identity."""
+    return None if skip_detail and B.BLOCKS[e['type']].detail else [e['type'], e['params'], e.get('limb_fade_px', 0)]
 
 
 def _streams(lum_e, col_e, xl, xc, cl, cc, ctx, on, strength, same, **kw):
@@ -396,10 +451,11 @@ def _colour(source, colour, xl, cl, *region):
     return (None, None) if colour is None else colour.read(*region)
 
 
-def prepare(source, doc, q=STATS_Q, colour=SAME, check=None, base=None):
+def prepare(source, doc, q=STATS_Q, colour=SAME, check=None, base=None, cache=None, tag=''):
     """D1: every global statistic, once — on the proxy with the detail blocks skipped, then on the probe (a
     full-resolution crop at the disk's centre of mass) for the detail blocks' own statistics and the readouts.
-    check() is called before every block; it raises Stale to abandon the pass. `base` (Base) may be reused."""
+    check() is called before every block; it raises Stale to abandon the pass. `base` (Base) may be reused; with
+    `cache` (PrefixCache) each chain resumes after the longest prefix already computed — `tag` names the sources."""
     H, W = source.h, source.w
     base = base or Base(source, colour, q)
     stats = Stats(q, H, W, base.disk, base.filled, base.limb, base.space)
@@ -408,10 +464,51 @@ def prepare(source, doc, q=STATS_Q, colour=SAME, check=None, base=None):
     strength = doc['chains'].get('merge', {}).get('strength', 1.0)
     on = doc.get('protect_space', True)
 
-    def passes(xl, xc, cl, cc, ctx, hook, skip_detail, snapshot=None):
-        kw = dict(hook=hook, skip_detail=skip_detail, snapshot=snapshot)
-        x = _streams(lum_e, col_e, xl, xc, cl, cc, ctx, on, strength, base.same, **kw)
-        return run_chain(fin_e, x, ctx, protect=Protection(x, ctx, on and bool(fin_e)), **kw)
+    def chained(entries, x, ctx, protect, upstream, hook, skip, snapshot):
+        """run_chain, resumed after the longest prefix the cache holds, filling it as it goes."""
+        if cache is None:
+            return run_chain(entries, x, ctx, protect=protect, hook=hook, skip_detail=skip, snapshot=snapshot)
+        keys, key = [], upstream
+        for e in entries:
+            key = _key(key, _identity(e, skip))
+            keys.append(key)
+        found = [cache.get(k) for k in keys]
+        start = 0
+        while start < len(keys) and found[start] is not None:
+            got = found[start]
+            stats.blocks[entries[start]['id']] = dict(got['stats'])
+            if got['readout'] is not None:
+                stats.readouts[entries[start]['id']] = dict(got['readout'])
+            start += 1
+        lab = None
+        if start:
+            got = found[start - 1]
+            if got['domain'] == 'lab':
+                lab = got['value'].copy()
+            else:
+                x = got['value'].copy()
+
+        def checkpoint(i, value, domain):
+            e = entries[i]
+            readout = stats.readouts.get(e['id'])
+            cache.put(keys[i], dict(value=value.copy(), domain=domain, stats=dict(stats.blocks.get(e['id'], {})),
+                                    readout=dict(readout) if readout is not None else None))
+        return run_chain(entries, x, ctx, protect=protect, hook=hook, skip_detail=skip, snapshot=snapshot,
+                         start=start, lab=lab, checkpoint=checkpoint)
+
+    def passes(kind, xl, xc, cl, cc, ctx, hook, skip, snapshot=None):
+        kw = dict(hook=hook, skip=skip, snapshot=snapshot)
+        up = lambda path, *more: _key(tag, q, kind, path, on, *more)
+        if base.same and not (lum_e or col_e):
+            x = xl                                    # one source, no stream blocks: nothing to merge
+        else:
+            lum = chained(lum_e, xl, ctx, Protection(xl, ctx, on and bool(lum_e)), up('luminance', base.same), **kw)
+            col = None if xc is None else chained(col_e, xc, ctx, Protection(xc, ctx, on and bool(col_e)),
+                                                  up('colour', base.same), **kw)
+            x = merge(lum, col, cl, cc, strength)
+        streams = [[_identity(e, skip) for e in es] for es in (lum_e, col_e)]
+        return chained(fin_e, x, ctx, Protection(x, ctx, on and bool(fin_e)),
+                       up('final', base.same, streams, strength, xc is None), **kw)
 
     before = {}                                       # detail blocks' probe input, for their readouts
 
@@ -425,7 +522,7 @@ def prepare(source, doc, q=STATS_Q, colour=SAME, check=None, base=None):
         return hook
 
     ctxp = Ctx(stats, proxy=True)
-    passes(base.lum, base.col, base.cov_l, base.cov_c, ctxp, collect('proxy', ctxp), True)
+    passes('proxy', base.lum, base.col, base.cov_l, base.cov_c, ctxp, collect('proxy', ctxp), True)
     if any(B.BLOCKS[e['type']].detail for e in lum_e + col_e + fin_e):
         ys, xs = np.nonzero(disk)
         cy, cx, R = int(ys.mean() * q), int(xs.mean() * q), min(1024, H // 2, W // 2)
@@ -439,7 +536,7 @@ def prepare(source, doc, q=STATS_Q, colour=SAME, check=None, base=None):
                 stats.readouts.setdefault(e['id'], {})['fine_detail'] = ms.fine_detail(before.pop(e['id']), after)
         xl, cl = source.read(y0, x0, 2 * R, 2 * R)
         xc, cc = _colour(source, colour, xl, cl, y0, x0, 2 * R, 2 * R)
-        passes(xl, xc, cl, cc, ctx, collect('probe', ctx), False, snapshot=readout)
+        passes('probe', xl, xc, cl, cc, ctx, collect('probe', ctx), False, snapshot=readout)
     for path in PATHS:
         for i, e in enumerate(enabled(doc, path)):
             if e['type'] == 'deconvolution' and i:

@@ -1,254 +1,681 @@
-'use strict';
-const $ = (s, root=document) => root.querySelector(s);
-const $$ = (s, root=document) => [...root.querySelectorAll(s)];
-let state = {project:null, job:{state:'idle'}}, page='import', view='composite';
-let pendingEdits=null, savingEdits=null, saving=false, saveFailed=false, saveTimer, previewVersion=0, geometry=null;
-let scale=1, offset={x:0,y:0}, fitted=true, detailTimer, toastTimer, polling=false, importing=false;
-let loadedProject=null;
-let recentVersion=0, exportVersion=0;
-const stages=['Check panels','Find coarse features','Discover overlaps','Solve panel layout','Refine alignment','Match brightness','Select contributing panels','Blend seams','Finish & save'];
-const defaultEdits={saturation:1,smoothing:0,strength:1,highlights:0,contrast:0,rotation:0,coverage:'full',mirror:false,wavelets:[0,0,0,0],wavelet_kernel:'linear',wavelet_denoise:2,usm_amount:0,usm_radius:1,usm_threshold:.01,l_visible:true,rgb_visible:true};
-const points={L:[],RGB:[]};
-function message(text) { $('#toast').textContent=text; $('#toast').hidden=false; clearTimeout(toastTimer); toastTimer=setTimeout(()=>$('#toast').hidden=true,8000); }
+// LunarMosaic: import panel sets, build, place colour, edit the chains, preview at 1:1, export (plan phase 7).
+import {Autosave} from './save.js';
+import {ChainEditor, h} from './chains.js';
+import {Previews} from './previews.js';
+
+const $ = (s, root = document) => root.querySelector(s);
+const $$ = (s, root = document) => [...root.querySelectorAll(s)];
+let state = {project: null, job: {state: 'idle'}}, page = 'import', view = 'composite';
+let scale = 1, offset = {x: 0, y: 0}, fitted = true, geometry = null, previewVersion = 0, detailTimer, toastTimer;
+let polling = false, importing = false, loadedProject = null, editor = null, previews = null;
+let analysis = {}, analysisTimer = null, analysisTicket = 0, analysisVersion = 0, shownChain = '';
+let buildCanvas = null, estimateVersion = 0, estimateRevision = null, recentVersion = 0, exportVersion = 0, refreshTimer = null;
+const BUILDER = ['Check panels', 'Find coarse features', 'Discover overlaps', 'Solve panel layout', 'Refine alignment',
+                 'Match brightness', 'Select the best-resolving regions', 'Blend seams', 'Finish & save'];
+const PLACING = ['Find each panel on the luminance', 'Fit its pose on held-out tiles', 'Match brightness and colour',
+                 'Blend the colour canvas'];
+const points = {L: [], RGB: []};
+
+function message(text) {
+  $('#toast').textContent = text; $('#toast').hidden = false;
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => { $('#toast').hidden = true; }, 8000);
+}
+
 async function api(path, data) {
-  const options=data===undefined ? {} : {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)};
-  const r=await fetch('/api/'+path,options); const o=await r.json();
-  if(!r.ok) throw new Error(o.error||'The operation failed.');
+  const options = data === undefined ? {} : {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data)};
+  const r = await fetch('/api/' + path, options);
+  const o = await r.json().catch(() => ({}));
+  if (!r.ok) { const e = new Error(o.error || 'The operation failed.'); e.status = r.status; e.conflict = !!o.conflict; throw e; }
   return o;
 }
-function payload(data={}) { return {id:state.project?.id,...data}; }
-async function action(name, data={}) {
-  try { await flushEdits(); state=await api(name,payload(data)); render(); return true; }
-  catch(e){message(e.message); return false;}
-}
-function showPage(next) {
-  page=next; const editing=page==='edit'&&!!state.project;
-  document.body.scrollTop=0; document.documentElement.scrollTop=0;
-  document.body.classList.toggle('editing',editing);
-  $('#setup').hidden=editing; $('#workspace').hidden=!editing;
-  $('#welcome').hidden=!!state.project&&page!=='projects';
-  $('#close-project').hidden=!state.project;
-  $('#import-page').hidden=!state.project||page!=='import';
-  $('#build-page').hidden=!state.project||page!=='build';
-  $$('.mast nav button').forEach(b=>{b.classList.toggle('active',b.dataset.page===page); b.disabled=!state.project;});
-  if(editing) refreshPreview();
-  if(page==='projects'||!state.project)loadRecent();
-}
-function landingPage(){
-  if(state.job.state==='running')return 'build';
-  if(Object.values(state.project?.sets||{}).some(s=>['interrupted','failed','missing'].includes(s.state)))return 'build';
-  return state.project?.sets.L.mosaic?'edit':'import';
-}
-function fileSize(bytes){return bytes>=1024**3?`${(bytes/1024**3).toFixed(2)} GiB`:`${(bytes/1024**2).toFixed(1)} MiB`;}
-async function loadRecent(){
-  const ticket=++recentVersion;
-  try{
-    const info=await api('recent');if(ticket!==recentVersion)return;
-    $('#recent-projects').hidden=!info.enabled||!!state.project&&page!=='projects';
-    $('#recent-warning').textContent=info.warning||'';
-    const list=$('#recent-list');list.replaceChildren();
-    if(!info.projects.length){const li=document.createElement('li');li.className='hint';li.textContent='Your saved mosaics will appear here after you create or open a project.';list.append(li);}
-    for(const project of info.projects){
-      const li=document.createElement('li'),button=document.createElement('button');button.className='recent-open';
-      const name=document.createElement('strong'),note=document.createElement('small'),path=document.createElement('small');
-      name.textContent=project.name;note.textContent=[project.state,project.panels?`${project.panels.L} L · ${project.panels.RGB} RGB`:null,project.bytes?`${fileSize(project.bytes)} native mosaics`:null].filter(Boolean).join(' · ');path.textContent=project.folder;
-      button.append(name,note,path);button.disabled=!project.available||state.job.state==='running';
-      button.onclick=async()=>{if(await action('open',{folder:project.folder}))showPage(landingPage());};li.append(button);list.append(li);
+const payload = (data = {}) => ({id: state.project?.id, ...data});
+
+// One queue for every change, each sent with the revision current when it leaves: this page never conflicts with
+// itself, only with another window — and then the change is kept and sent again (save.js).
+let queue = Promise.resolve();
+function mutate(path, data = {}) {
+  const run = queue.then(async () => {
+    try {
+      state = await api(path, payload({...data, revision: state.project.revision}));
+    } catch (e) {
+      if (e.conflict) { try { state = await api('state'); render(); } catch (_) { /* reported by the caller */ } }
+      throw e;
     }
-  }catch(e){$('#recent-warning').textContent=e.message;}
+    render();
+    return state;
+  });
+  queue = run.catch(() => {});
+  return run;
 }
+
+async function action(name, data = {}) {
+  try { await chainSave.flush().catch(() => {}); await queue; state = await api(name, payload(data)); render(); return true; }
+  catch (e) { message(e.message); return false; }
+}
+
+// The chain: shown at once, saved 300 ms after the last change. A conflict or a lost connection is retried; a
+// chain the server refuses waits, with the reason shown, for the next edit.
+const chainSave = new Autosave({
+  send: doc => mutate('chain', {chain: doc}).then(() => { scheduleRefresh(); loadAnalysis(); },
+                                                  e => { if (e.status === 400 && !e.conflict) e.retry = false; throw e; }),
+  onState: s => {
+    $('#saved').textContent = s.failed ? `Not saved: ${s.failed}${s.retrying ? ' Trying again…' : ''}` : s.saving ? 'Saving…'
+      : state.project ? 'Saved locally' : 'Local · private';
+    $('#saved').classList.toggle('warning', !!s.failed);
+  },
+});
+
+// ---------------------------------------------------------------- pages
+
+const lum = p => p.sets.filter(s => s.stream === 'luminance');
+const colourSet = p => p.sets.find(s => s.id === 'RGB');
+const built = (p, name) => !!p?.[name]?.mosaic;
+
+function showPage(next) {
+  page = next;
+  document.body.scrollTop = 0; document.documentElement.scrollTop = 0;
+  showVisibility();
+  $$('.mast nav button').forEach(b => { b.classList.toggle('active', b.dataset.page === page); b.disabled = !state.project; });
+  if (page === 'edit' && built(state.project, 'luminance')) { refreshPreview(); loadAnalysis(); }
+  if (page === 'import') loadEstimate();
+  if (page === 'projects' || !state.project) loadRecent();
+}
+
+function showVisibility() {
+  const editing = page === 'edit' && built(state.project, 'luminance');
+  document.body.classList.toggle('editing', editing);
+  $('#setup').hidden = editing; $('#workspace').hidden = !editing;
+  $('#welcome').hidden = !!state.project && page !== 'projects'; $('#close-project').hidden = !state.project;
+  $('#import-page').hidden = !state.project || page !== 'import'; $('#build-page').hidden = !state.project || page !== 'build';
+  if (state.project && page !== 'projects') $('#recent-projects').hidden = true;
+}
+
+function landingPage() {
+  const p = state.project;
+  if (state.job.state === 'running') return 'build';
+  if (['luminance', 'colour'].some(n => ['interrupted', 'failed', 'missing'].includes(p?.[n]?.state))) return 'build';
+  return built(p, 'luminance') ? 'edit' : 'import';
+}
+
+// FNV-1a, 32 bits: a short key for a long state
+const hash = text => { let x = 2166136261; for (let i = 0; i < text.length; i++) { x ^= text.charCodeAt(i); x = Math.imul(x, 16777619); } return (x >>> 0).toString(16); };
+const fileSize = bytes => bytes >= 1024 ** 3 ? `${(bytes / 1024 ** 3).toFixed(2)} GiB` : `${(bytes / 1024 ** 2).toFixed(1)} MiB`;
+
+async function loadRecent() {
+  const ticket = ++recentVersion;
+  try {
+    const info = await api('recent'); if (ticket !== recentVersion) return;
+    $('#recent-projects').hidden = !info.enabled || (!!state.project && page !== 'projects');
+    $('#recent-warning').textContent = info.warning || '';
+    const list = $('#recent-list');
+    list.replaceChildren();
+    if (!info.projects.length) list.append(h('li', {class: 'hint', text: 'Your saved mosaics will appear here after you create or open a project.'}));
+    for (const project of info.projects) {
+      const button = h('button', {class: 'recent-open', disabled: !project.available || state.job.state === 'running',
+          onclick: async () => { if (await action('open', {folder: project.folder})) showPage(landingPage()); }},
+        h('strong', {text: project.name}),
+        h('small', {text: [project.state, project.panels ? `${project.panels.L} L · ${project.panels.RGB} RGB` : null, project.bytes ? `${fileSize(project.bytes)} native mosaics` : null].filter(Boolean).join(' · ')}),
+        h('small', {text: project.folder}));
+      list.append(h('li', {}, button));
+    }
+  } catch (e) { $('#recent-warning').textContent = e.message; }
+}
+
+// ---------------------------------------------------------------- import: streams of sets
+
+const setCards = new Map();
+const opticsOf = card => ({pixel_um: $('.pixel', card).value, focal_mm: $('.focal', card).value, barlow: $('.barlow', card).value, aperture_mm: $('.aperture', card).value});
+const arcsec = o => o.pixel_um && o.focal_mm ? 206.265 * o.pixel_um / (o.focal_mm * (o.barlow || 1)) : null;
+const setName = (p, id) => p.sets.find(x => x.id === id)?.label || id;
+
+function setCard(s) {
+  const key = s.id;
+  const card = h('article', {class: 'card set', dataset: {set: key}},
+    h('div', {class: 'set-title'}, h('input', {class: 'set-label', 'aria-label': 'Set name', maxlength: 120}), h('span', {class: 'tag state'}),
+      key !== 'L' && key !== 'RGB' ? h('button', {class: 'icon remove-set', type: 'button', title: 'Remove this set', 'aria-label': 'Remove this set'}, '×') : null),
+    h('label', {class: 'drop', tabindex: 0}, h('span', {class: 'drop-icon', text: '＋'}), h('strong', {text: 'Choose a folder of panels'}),
+      h('span', {text: 'TIFF, PNG or JPEG · originals stay untouched'}), h('input', {type: 'file', webkitdirectory: true, multiple: true, hidden: true, class: 'folder-upload'})),
+    h('div', {class: 'divider', text: 'or use a local folder directly'}),
+    h('div', {class: 'path-row'}, h('input', {class: 'source-path', placeholder: '/path/to/panels', 'aria-label': 'Panel folder'}), h('button', {class: 'btn scan', type: 'button'}, 'Use folder')),
+    h('details', {class: 'optics', open: true}, h('summary', {}, 'Camera & optics ', h('span', {text: 'needed when sets differ in scale'})),
+      h('div', {class: 'optics-grid'}, ...[['pixel', 'Pixel size · µm', '2.9'], ['focal', 'Focal length · mm', '1200'], ['barlow', 'Barlow', '1'], ['aperture', 'Aperture · mm', '250']]
+        .map(([c, l, ph]) => h('label', {}, l, h('input', {class: c, type: 'number', min: 0, step: 'any', placeholder: ph}))))),
+    h('p', {class: 'scale hint'}), h('div', {class: 'scale-actions button-row'}),
+    h('div', {class: 'set-summary'}), h('div', {class: 'set-error'}),
+    h('details', {class: 'files'}, h('summary', {text: 'Panel list'}), h('ul', {})));
+  $('.set-label', card).onchange = () => mutate('sets', {op: 'update', set: {id: key, label: $('.set-label', card).value}}).catch(e => message(e.message));
+  $('.remove-set', card)?.addEventListener('click', () => mutate('sets', {op: 'delete', set: {id: key}}).catch(e => message(e.message)));
+  $('.scan', card).onclick = () => action('inputs', {set: key, paths: [$('.source-path', card).value], optics: opticsOf(card)});
+  $('.folder-upload', card).onchange = e => importFiles(key, [...e.target.files]);
+  $$('.optics input', card).forEach(el => { el.onchange = () => {
+    const now = state.project.sets.find(x => x.id === key);
+    if (now.inputs.length) action('inputs', {set: key, paths: now.inputs, optics: opticsOf(card)});
+    else mutate('sets', {op: 'update', set: {id: key, optics: opticsOf(card)}}).catch(e => message(e.message));
+  }; });
+  const drop = $('.drop', card);
+  drop.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $('.folder-upload', card).click(); } };
+  drop.ondragover = e => { e.preventDefault(); drop.classList.add('drag'); };
+  drop.ondragleave = () => drop.classList.remove('drag');
+  drop.ondrop = e => { e.preventDefault(); drop.classList.remove('drag'); importFiles(key, [...e.dataTransfer.files]); };
+  return card;
+}
+
+function renderSets(p, busy) {
+  const wanted = new Set(p.sets.map(s => s.id));
+  for (const [id, card] of setCards) if (!wanted.has(id)) { card.remove(); setCards.delete(id); }
+  const mixed = lum(p).filter(s => s.inputs.length).length > 1, both = colourSet(p).stream === 'both';
+  for (const s of p.sets) {
+    let card = setCards.get(s.id);
+    const fresh = !card;
+    if (fresh) { card = setCard(s); setCards.set(s.id, card); }
+    const home = s.stream === 'luminance' ? $('#lum-sets') : $('#colour-sets');
+    if (card.parentElement !== home) home.append(card);
+    const stream = p[s.stream === 'luminance' ? 'luminance' : 'colour'];
+    if (fresh || loadedProject !== p.id || !card.contains(document.activeElement)) {
+      $('.set-label', card).value = s.label || s.id;
+      const o = s.optics || {};
+      $('.pixel', card).value = o.pixel_um || ''; $('.focal', card).value = o.focal_mm || '';
+      $('.barlow', card).value = o.barlow || ''; $('.aperture', card).value = o.aperture_mm || '';
+    }
+    $('.state', card).textContent = stream.mosaic ? 'built' : s.inputs.length ? 'ready' : s.stream === 'colour' ? 'optional' : 'empty';
+    const hd = s.headers;
+    $('.set-summary', card).textContent = `${s.inputs.length} panel${s.inputs.length === 1 ? '' : 's'}` +
+      (hd ? ` · ${hd.min_width}–${hd.max_width} × ${hd.min_height}–${hd.max_height} px · ${hd.depths.join(', ')}` : '');
+    $('.set-error', card).textContent = s.skipped?.length ? `${s.skipped.length} unreadable or unsuitable panels left out; see Panel list.` : '';
+    $('.files ul', card).replaceChildren(...s.inputs.map(x => h('li', {text: x.split(/[\\/]/).pop()})),
+                                         ...(s.skipped || []).map(k => h('li', {class: 'set-error', text: `Skipped ${k.name}: ${k.reason}`})));
+    // the pixel scale: from the optics, or measured against another set and confirmed (D10)
+    const a = arcsec(s.optics || {}), est = s.scale_estimate, actions = $('.scale-actions', card);
+    actions.replaceChildren();
+    if (a) $('.scale', card).textContent = `${a.toFixed(3)} ″/px from the optics.`;
+    else if (est) {
+      $('.scale', card).textContent = `Measured: pixels ${est.ratio.toFixed(3)}× those of ${setName(p, est.relative_to)} (${est.pairs} panel pairs agree within ${(est.spread * 100).toFixed(1)} %). ${est.confirmed ? 'Confirmed.' : 'Confirm it, or enter the optics.'}`;
+      if (!est.confirmed) actions.append(h('button', {class: 'btn small', type: 'button', onclick: () => mutate('sets', {op: 'confirm', set: {id: s.id}}).catch(e => message(e.message))}, 'Confirm this scale'));
+    } else $('.scale', card).textContent = s.stream === 'luminance' && mixed ? 'Enter the optics, or let LunarMosaic measure the scale: sets of different scales need it.'
+      : s.stream === 'luminance' ? 'A single set needs no optics.' : 'Optional: the optics speed up placing colour.';
+    if (!a && !est && s.stream === 'luminance' && mixed) actions.append(h('button', {class: 'btn small', type: 'button', onclick: () => action('sets', {op: 'estimate'})}, 'Measure the scale'));
+    const locked = busy || !!stream.mosaic || importing || (s.stream === 'luminance' && both);
+    $$('input,button', card).forEach(el => { el.disabled = locked; });
+  }
+  $('#colour-both').checked = both;
+  $('#colour-both').disabled = busy || built(p, 'luminance') || built(p, 'colour') || lum(p).some(s => s.inputs.length);
+  $('#add-lum-set').disabled = busy || built(p, 'luminance') || both;
+}
+
+// "The colour panels are 2.1× coarser than the luminance canvas" (plan phase 7, item 1)
+function ratioSentence(p) {
+  const finest = Math.min(...lum(p).filter(s => s.inputs.length).map(s => arcsec(s.optics || {}) || Infinity));
+  const c = arcsec(colourSet(p).optics || {});
+  if (!Number.isFinite(finest) || !c || colourSet(p).stream === 'both') return '';
+  const r = c / finest;
+  return r > 1.01 ? `The colour panels sample ${r.toFixed(1)}× coarser than the luminance: colour is placed at its own sampling and supplies the hue only, so this costs no detail.`
+    : r < 0.99 ? `The colour panels sample ${(1 / r).toFixed(1)}× finer than the luminance; colour is reduced to the canvas when placed.`
+    : 'Colour and luminance share one pixel scale.';
+}
+
+async function loadEstimate() {
+  const p = state.project, ticket = ++estimateVersion;
+  estimateRevision = p?.revision ?? null;
+  if (!p || page !== 'import' || built(p, 'luminance') || !p.sets.some(s => s.stream !== 'colour' && s.inputs.length)) { $('#canvas-card').hidden = true; return; }
+  try {
+    const e = await api(`canvas-estimate?id=${p.id}`);
+    if (ticket !== estimateVersion) return;
+    $('#canvas-card').hidden = false;
+    const lines = [];
+    if (e.problem) lines.push(e.problem);
+    if (e.lower_bound) lines.push(`The canvas will be at least ${e.lower_bound.px.toLocaleString('en-US')} px across — the Moon at perigee at ${(e.finest.arcsec_px / e.canvas_scale).toFixed(3)} ″/px — so ${e.lower_bound.mpx.toLocaleString('en-US')} Mpx and ${e.lower_bound.gb} GB as 16-bit RGB. Panels overhang the limb, so the real canvas is larger.`);
+    else if (!e.problem) lines.push('Enter the optics of the finest set to estimate the canvas size.');
+    if (e.oversampled) lines.push(`The finest set's pixels are about ${e.oversampled.px_per_detail}× smaller than the finest detail it resolves: a canvas at ${e.oversampled.suggested_canvas_scale}× keeps that detail and is ${Math.round(1 / e.oversampled.suggested_canvas_scale ** 2)}× smaller.`);
+    $('#canvas-estimate').textContent = lines.join(' ');
+    const confirm = $('#canvas-confirm');
+    confirm.replaceChildren();
+    const ask = e.needs_confirmation && !buildCanvas;
+    if (ask || (e.oversampled && !buildCanvas)) {
+      const smaller = Math.min(1, e.oversampled ? e.oversampled.suggested_canvas_scale : Math.sqrt(e.threshold_mpx / e.lower_bound.mpx));
+      if (ask) confirm.append(h('p', {class: 'warning', text: `That is above the ${e.threshold_mpx} Mpx confirmed before building.`}),
+        h('button', {class: 'btn', type: 'button', onclick: () => { buildCanvas = {max_canvas_mpx: Math.ceil(e.lower_bound.mpx * 1.6)}; loadEstimate(); }}, 'Build at full size'));
+      confirm.append(h('button', {class: 'btn', type: 'button', onclick: () => { buildCanvas = {canvas_scale: Math.round(smaller * 1000) / 1000}; loadEstimate(); }},
+        `Use a smaller canvas (${smaller.toFixed(2)}×)`));
+    }
+    if (buildCanvas) confirm.append(h('p', {class: 'hint', text: buildCanvas.canvas_scale ? `The canvas will be reduced to ${buildCanvas.canvas_scale}×.` : `Confirmed: up to ${buildCanvas.max_canvas_mpx} Mpx.`}),
+      h('button', {class: 'btn small', type: 'button', onclick: () => { buildCanvas = null; loadEstimate(); }}, 'Undo'));
+    confirm.hidden = !confirm.children.length;
+    $('#build-both').dataset.blocked = $('#build-lum').dataset.blocked = ask ? 'yes' : '';
+    render();
+  } catch (err) { if (ticket === estimateVersion) $('#canvas-estimate').textContent = err.message; }
+}
+
+async function importFiles(key, files) {
+  if (!state.project) { message('Create or open a project first.'); return; }
+  const supported = files.filter(f => /\.(tiff?|png|jpe?g)$/i.test(f.name));
+  if (!supported.length) { message('Choose TIFF, PNG or JPEG panels. FITS is not supported yet.'); return; }
+  if (supported.length !== files.length) message(`${files.length - supported.length} non-image files skipped.`);
+  importing = true; render(); let count = 0;
+  try {
+    for (const file of supported) {
+      $('#saved').textContent = `Importing ${++count}/${supported.length}…`;
+      const q = new URLSearchParams({id: state.project.id, set: key, name: file.name});
+      const r = await fetch('/api/upload?' + q, {method: 'POST', body: file});
+      const o = await r.json().catch(() => ({})); if (!r.ok) throw new Error(o.error || 'The upload failed.'); state = o;
+    }
+    const card = setCards.get(key), s = state.project.sets.find(x => x.id === key);
+    state = await api('inputs', payload({set: key, paths: s.inputs, optics: opticsOf(card)}));
+    message(`${count} panels imported. A copy is kept inside the project.`);
+  } catch (e) { message(e.message); }
+  finally { importing = false; render(); loadEstimate(); }
+}
+
+// ---------------------------------------------------------------- build
+
+function stageList(names, doneUpTo, running) {
+  return h('ol', {}, ...names.map((text, i) => h('li', {class: i < doneUpTo ? 'done' : running === i ? 'running' : ''},
+    h('span', {text: i < doneUpTo ? '✓' : String(i + 1).padStart(2, '0')}), text)));
+}
+
+function renderBuild(p, job, busy) {
+  const ls = p.luminance, cs = p.colour, active = busy ? job.set : null, both = colourSet(p).stream === 'both';
+  const lPanels = p.sets.filter(s => s.stream !== 'colour').reduce((n, s) => n + s.inputs.length, 0);
+  const lSets = p.sets.filter(s => s.stream !== 'colour' && s.inputs.length).length;
+  const lCard = h('article', {class: 'card build-card'}, h('h2', {text: 'Luminance'}),
+    h('p', {class: 'hint', text: ls.mosaic ? `${ls.width.toLocaleString('en-US')} × ${ls.height.toLocaleString('en-US')} px · saved` : `${lPanels} panels from ${lSets} set${lSets === 1 ? '' : 's'} · ${ls.state}`}));
+  const facts = ls.build_facts;
+  if (facts && ls.mosaic) lCard.append(h('p', {class: 'hint', text: `${facts.placed} panels placed · ${facts.contributing} contribute${facts.rms_px !== undefined ? ` · ${facts.rms_px.toFixed(2)} px RMS` : ''}`}));
+  if (facts?.not_placed?.length && ls.mosaic) lCard.append(h('details', {class: 'files'}, h('summary', {text: `${facts.not_placed.length} panel${facts.not_placed.length === 1 ? '' : 's'} left out`}),
+    h('ul', {}, ...facts.not_placed.map(x => h('li', {text: `${x.id}: ${x.reason}`})))));
+  const lStage = active === 'L' ? job.stage || 0 : -1;
+  lCard.append(stageList(lPanels === 1 ? ['Check panel', 'Keep the native 16-bit TIFF'] : BUILDER, ls.mosaic ? 99 : Math.max(0, lStage - 1), lStage >= 1 ? lStage - 1 : null));
+  if (ls.error) lCard.append(h('p', {class: 'set-error', text: ls.error}));
+  if (!ls.mosaic && lPanels) lCard.append(h('button', {class: 'btn', type: 'button', disabled: busy, onclick: () => build(['L'])}, ['failed', 'interrupted'].includes(ls.state) ? 'Restart luminance' : 'Build luminance'));
+  const cPanels = colourSet(p).inputs.length, placing = active === 'RGB';
+  const cCard = h('article', {class: 'card build-card'}, h('h2', {text: 'Colour'}),
+    h('p', {class: 'hint', text: both ? 'The colour set is all the data: its mosaic is the colour too.'
+      : cs.mosaic ? `${cs.summary?.text || 'Placed'}${cs.summary ? ` · ${cs.summary.placed} placed, ${cs.summary.rejected} left out` : ''}`
+      : cPanels ? `${cPanels} panels · placed one by one onto the luminance` : 'No colour panels: the mosaic stays grey.'}));
+  // colour_place reports [i/n] per panel; its steps are shown in turn while it runs
+  const step = placing ? Math.min(PLACING.length - 1, Math.floor((job.progress || 0) * PLACING.length)) : null;
+  if (!both) cCard.append(stageList(PLACING, cs.mosaic ? 99 : placing ? step : 0, placing ? step : null));
+  if (placing && job.title) cCard.append(h('p', {class: 'hint', text: job.title}));
+  if (cs.error) cCard.append(h('p', {class: 'set-error', text: cs.error}));
+  if (!cs.mosaic && cPanels && !both) cCard.append(h('button', {class: 'btn', type: 'button', disabled: busy || !ls.mosaic, onclick: () => build(['RGB'])},
+    ls.mosaic ? (cs.state === 'failed' ? 'Place colour again' : 'Place colour') : 'Build luminance first'));
+  $('#build-cards').replaceChildren(lCard, cCard);
+  const recovery = ['luminance', 'colour'].filter(n => ['interrupted', 'failed', 'missing'].includes(p[n].state));
+  $('#recovery').hidden = !recovery.length;
+  $('#recovery-summary').textContent = recovery.map(n => `${n === 'luminance' ? 'Luminance' : 'Colour'}: ${p[n].state}${p[n].last_stage ? ` during stage ${p[n].last_stage}` : ''}.`).join(' ') + ' Completed mosaics are kept.';
+  $('#job-title').textContent = job.state === 'idle' ? 'Ready to build' : job.title || job.action;
+  $('#job-progress').value = job.progress || 0;
+  $('#job-log').textContent = (job.log || []).join('\n');
+  $('#cancel-job').hidden = !busy;
+  $('#job-result').textContent = job.error || job.result?.path || (job.state === 'done' && job.result && typeof job.result === 'object'
+    ? Object.entries(job.result).filter(([k]) => ['L', 'RGB'].includes(k)).map(([k, v]) => `${k}: ${v}`).join(' · ') : '');
+  $('#go-edit').disabled = !ls.mosaic;
+}
+
+async function build(sets) {
+  if (await action('build', {sets, ...(buildCanvas ? {canvas: buildCanvas} : {})})) showPage('build');
+}
+
+// ---------------------------------------------------------------- render
+
 function render() {
-  const p=state.project, job=state.job, busy=job.state==='running';
-  $('#saved').textContent=saveFailed&&pendingEdits?'Not saved · adjust again to retry':saving||pendingEdits?'Saving…':p?'Saved locally':'Local · private';
-  $('#export-open').disabled=!p?.sets.L.mosaic||busy;
-  if(!p){loadedProject=null;document.body.classList.remove('editing');showVisibility();return;}
-  if(loadedProject!==p.id){
-    loadedProject=p.id;
-    $('#match-popover').hidden=true;
-    for(const key of ['L','RGB']){const card=$(`.set[data-set="${key}"]`),o=p.sets[key].optics;
-      $('.pixel',card).value=o.pixel_um||'';$('.focal',card).value=o.focal_mm||'';$('.barlow',card).value=o.barlow||1;}
-  }
-  $('#project-title').textContent=p.name; $('#project-location').textContent=p.folder;
-  $('#canvas-project').textContent=p.name.toUpperCase();
-  for(const key of ['L','RGB']) {
-    const s=p.sets[key], card=$(`.set[data-set="${key}"]`);
-    $('.state',card).textContent=s.state==='empty'?(key==='RGB'?'Optional':'Empty'):s.state;
-    const headers=s.headers?` · ${s.headers.min_width}–${s.headers.max_width} × ${s.headers.min_height}–${s.headers.max_height} px · ${s.headers.depths.join(', ')}`:'';
-    $('.set-summary',card).textContent=s.mosaic?`${s.inputs.length} panels · ${s.width.toLocaleString()} × ${s.height.toLocaleString()} · native mosaic kept`:`${s.inputs.length} panels selected${headers}`;
-    $('.set-error',card).textContent=s.error||'';
-    const ul=$('.files ul',card); ul.replaceChildren();
-    for(const path of s.inputs) {const li=document.createElement('li'); li.textContent=path.split(/[\\/]/).pop(); ul.append(li);}
-    for(const skip of s.skipped||[]){const li=document.createElement('li');li.className='set-error';li.textContent=`Skipped ${skip.name}: ${skip.reason}`;ul.append(li);}
-    if(s.skipped?.length)$('.set-error',card).textContent+=`${s.error?'\n':''}${s.skipped.length} unreadable or unsuitable panels left out; see Panel list.`;
-    $$('input,button',card).forEach(el=>el.disabled=busy||!!s.mosaic||importing);
-  }
-  $('#build-both').disabled=busy||importing||!p.sets.L.inputs.length||Object.values(p.sets).every(s=>!s.inputs.length||s.mosaic);
-  $('#import-note').textContent=p.sets.RGB.inputs.length?'Each set keeps its native scale. Colour will be matched after the build.':'Colour is optional. You can add it after building luminance.';
-  const sampling=['L','RGB'].map(k=>{const o=p.sets[k].optics;return o.pixel_um&&o.focal_mm?o.pixel_um/(o.focal_mm*(o.barlow||1)):null;});
-  if(sampling.every(v=>v>0))$('#import-note').textContent+=` Optics estimate: colour sampling is ${(sampling[1]/sampling[0]).toFixed(2)}× luminance sampling. The match still uses lunar detail.`;
-  const recovery=Object.entries(p.sets).filter(([,s])=>['interrupted','failed','missing'].includes(s.state));
-  $('#recovery').hidden=!recovery.length;
-  $('#recovery-summary').textContent=Object.entries(p.sets).map(([k,s])=>{const name=k==='L'?'Luminance':'Colour';return s.mosaic?`${name}: finished and saved${s.duration?` (${Math.round(s.duration)} seconds of completed processing)`:''}.`:['interrupted','failed','missing'].includes(s.state)?`${name}: ${s.state}${s.last_stage?` during stage ${s.last_stage}`:''}. Restart this set from the beginning; intermediate stages are not cached.`:`${name}: ${s.inputs.length?'ready to build':'no panels selected'}.`;}).join(' ');
-  const builds=$('#build-cards'); builds.replaceChildren();
-  for(const key of ['L','RGB']) {
-    const s=p.sets[key], card=document.createElement('article'); card.className='card build-card';
-    const title=document.createElement('h2'); title.textContent=key==='L'?'Luminance':'Colour'; card.append(title);
-    const elapsed=busy&&job.set===key&&s.started?Math.floor(Date.now()/1000-s.started):s.duration?Math.round(s.duration):null;
-    const note=document.createElement('p'); note.className='hint'; note.textContent=(s.mosaic?`${s.width.toLocaleString()} × ${s.height.toLocaleString()} · saved`:s.inputs.length?`${s.inputs.length} panels · ${s.state}`:'No panels selected')+(elapsed!==null?` · ${Math.max(0,elapsed)} s`:''); card.append(note);
-    if(s.build_facts&&s.mosaic){const facts=s.build_facts,summary=document.createElement('p');summary.className='hint';summary.textContent=`${facts.placed} of ${s.inputs.length} panels placed · ${facts.contributing} contribute${facts.rms_px!==undefined?` · ${facts.rms_px.toFixed(2)} px RMS`:''}`;card.append(summary);
-      if(facts.not_placed.length){const detail=document.createElement('details'),heading=document.createElement('summary'),list=document.createElement('ul');heading.textContent=`${facts.not_placed.length} panels left out`;detail.append(heading);for(const panel of facts.not_placed){const item=document.createElement('li');item.textContent=`${panel.id}: ${panel.reason}`;list.append(item);}detail.append(list);card.append(detail);}}
-    const ol=document.createElement('ol');
-    const actualStages=s.inputs.length===1?['Check panel','Retain native 16-bit TIFF']:stages;
-    actualStages.forEach((text,i)=>{const li=document.createElement('li'), marker=document.createElement('span'); const active=busy&&job.set===key;
-      const done=!!s.mosaic||(active&&job.stage>i+1); li.className=done?'done':active&&job.stage===i+1?'running':''; marker.textContent=done?'✓':String(i+1).padStart(2,'0');li.append(marker,document.createTextNode(text));ol.append(li);}); card.append(ol);
-    if(s.error){const error=document.createElement('p');error.className='set-error';error.textContent=s.error;card.append(error);}
-    if(!s.mosaic&&s.inputs.length){const b=document.createElement('button');b.className='btn';b.textContent=['failed','interrupted'].includes(s.state)?'Restart this set':'Build this set';b.disabled=busy;b.onclick=()=>action('build',{sets:[key]});card.append(b);}
-    builds.append(card);
-  }
-  $('#job-title').textContent=job.state==='idle'?'Ready to build':job.title||job.action;
-  $('#job-progress').value=job.progress||0; $('#job-log').textContent=(job.log||[]).join('\n');
-  $('#cancel-job').hidden=!busy; $('#status-job').textContent=busy?`${job.title} · ${Math.round((job.progress||0)*100)}%`:job.state==='failed'?job.error||'Operation failed':'';
-  $('#job-result').textContent=job.error||job.result?.path||(job.state==='done'?Object.entries(job.result||{}).filter(([k])=>['L','RGB'].includes(k)).map(([k,v])=>`${k}: ${v}`).join(' · '):'');
-  $('#go-edit').disabled=!p.sets.L.mosaic;
-  $('#l-layer-state').textContent=p.sets.L.mosaic?`${p.sets.L.width.toLocaleString()} × ${p.sets.L.height.toLocaleString()}`:'Not built';
-  $('#rgb-layer-state').textContent=p.match?'Matched to luminance':p.sets.RGB.mosaic?'Ready to match':'Add a colour set';
-  const both=!!p.sets.L.mosaic&&!!p.sets.RGB.mosaic;
-  for(const key of ['L','RGB']){
-    const s=p.sets[key],img=$(`[data-thumbnail="${key}"]`),badge=img.parentElement,stamp=`${p.id}:${s.mosaic}:${s.started||0}`;
-    if(!s.mosaic){img.hidden=true;$('span',badge).hidden=false;img.dataset.stamp='';}
-    else if(img.dataset.stamp!==stamp){img.hidden=true;$('span',badge).hidden=false;img.dataset.stamp=stamp;img.onload=()=>{img.hidden=false;$('span',badge).hidden=true;};img.onerror=()=>{img.hidden=true;$('span',badge).hidden=false;};img.src=`/api/layer-thumbnail?id=${p.id}&set=${key}&v=${s.started||0}`;}
-  }
-  $('[data-visible="rgb_visible"]').disabled=!p.match;
-  $('[data-visible="l_visible"]').disabled=!p.sets.L.mosaic;
-  $('#layer-visibility-info').textContent=!p.edits.l_visible&&(!p.edits.rgb_visible||!p.match)?'No visible matched layer. Enable luminance or match and show colour to export the combined image.':!p.edits.l_visible?'Colour supplies lightness and chroma while luminance is hidden.':!p.edits.rgb_visible?'Luminance only; colour adjustments are kept.':'L supplies lightness; RGB supplies chroma. Switches affect the combined image and export.';
-  $('#match').disabled=!both||busy; $('#manual-open').disabled=!both||busy;
-  $('#check-match').disabled=!p.match||busy;$('#north-up').disabled=!p.sets.L.mosaic||busy;
-  $('#rotation').disabled=busy&&job.action==='Find lunar north';$('#mirror').disabled=$('#rotation').disabled;
-  $('#coverage').disabled=!p.match;
-  $('#match-description').textContent=p.match?`Scale ${p.match.scale.toFixed(3)}× · rotation ${p.match.rotation.toFixed(2)}°`:both?'Different cameras or a Barlow? Match using the lunar detail.':'Build a colour mosaic to add colour.';
-  const checks=p.match?.diagnostics;
-  $('#match-chip').textContent=checks?.measured?`Checked ${checks.median.toFixed(2)} px · worst ${checks.worst.toFixed(2)} px`:p.match?`Fit ${p.match.median.toFixed(2)} px · local check ${checks?'unknown':'pending'}`:'Match not measured';
-  $('#match-metrics').textContent=p.match?`${p.match.method==='manual'?`Manual fit · ${p.match.candidates} control-point pairs`:`Feature fit · ${p.match.inliers}/${p.match.candidates} inliers`}\nMedian ${p.match.median.toFixed(2)} L px\n95% below ${p.match.p95.toFixed(2)} L px\nWorst ${p.match.worst.toFixed(2)} L px${p.match.scale_prior?`\nOptics estimate ${p.match.scale_prior.toFixed(3)}×`:''}\n${p.match.warning}`:'No match yet.';
-  if(checks)$('#match-metrics').textContent+=`\n\nIndependent local checks\n${checks.measured} measured · ${checks.unknown} unknown${checks.measured?`\nMedian ${checks.median.toFixed(2)} L px\n95% below ${checks.p95.toFixed(2)} L px\nWorst ${checks.worst.toFixed(2)} L px`:''}\n${checks.message}`;
-  $('#match-explanation').textContent=checks?.measured?`${checks.measured} overlapping patches were checked independently of the fitted points. Median offset ${checks.median.toFixed(2)} L pixels; worst ${checks.worst.toFixed(2)}. ${checks.unknown} patches could not be measured. Locations outside these patches remain unmeasured. Inspect the overlay at 1:1.`:p.match?'The transform fits the selected feature points. Independent checks have not established the match elsewhere. Use Check overlapping areas and inspect at 1:1.':'Build both mosaics and match the colour layer to measure the relationship.';
-  $('#match-transform').textContent=p.match?`RGB → native L\n${p.match.scale.toFixed(5)}× · ${p.match.rotation.toFixed(3)}°\ndx ${p.match.matrix[0][2].toFixed(2)} · dy ${p.match.matrix[1][2].toFixed(2)} L px\n${p.match.inliers}/${p.match.candidates} ${p.match.method==='manual'?'control pairs':'feature inliers'}`:'';
-  $('#match-chip').setAttribute('aria-expanded',String(!$('#match-popover').hidden));
-  const orient=p.orientation;
-  $('#orientation-info').textContent=orient?`${orient.matches} terrain matches · ${orient.rms_px.toFixed(2)} L px RMS. ${Math.abs(p.edits.rotation-orient.rotation)<.001&&p.edits.mirror===orient.mirror?'Lunar north is up.':'North-up estimate kept; the view has been adjusted.'}`:'Both layers turn together. Uses lunar reference maps, downloaded if needed.';
-  for(const key of ['strength','saturation','smoothing']) $(`[data-edit="${key}"]`).disabled=!p.match;
-  if(!pendingEdits&&!saving) syncEdits(p.edits);
+  const p = state.project, job = state.job, busy = job.state === 'running';
+  if (!chainSave.busy) chainSave.onState({saving: false, failed: chainSave.failed, retrying: chainSave.retrying});
+  $('#export-open').disabled = !built(p, 'luminance') || busy;
+  if (!p) { loadedProject = null; showVisibility(); return; }
+  $('#project-title').textContent = p.name; $('#project-location').textContent = p.folder;
+  $('#canvas-project').textContent = p.name.toUpperCase();
+  renderSets(p, busy);
+  $('#import-note').textContent = ratioSentence(p) || (colourSet(p).inputs.length ? 'Colour is placed panel by panel onto the luminance after it is built.' : 'Colour is optional. You can add it after building luminance.');
+  const anyLum = p.sets.some(s => s.stream !== 'colour' && s.inputs.length), blocked = $('#build-both').dataset.blocked === 'yes';
+  $('#build-both').disabled = busy || importing || blocked || !anyLum || (built(p, 'luminance') && (built(p, 'colour') || !colourSet(p).inputs.length));
+  $('#build-lum').disabled = busy || importing || blocked || !anyLum || built(p, 'luminance');
+  $('#build-lum').hidden = !colourSet(p).inputs.length || colourSet(p).stream === 'both';
+  renderBuild(p, job, busy);
+  renderWorkspace(p, job, busy);
+  loadedProject = p.id;
+  if (page === 'import' && p.revision !== estimateRevision) loadEstimate();     // the sets or their optics changed
   showVisibility();
 }
-function showVisibility(){ const editing=page==='edit';$('#setup').hidden=editing;$('#workspace').hidden=!editing;$('#welcome').hidden=!!state.project&&page!=='projects';$('#close-project').hidden=!state.project;$('#import-page').hidden=!state.project||page!=='import';$('#build-page').hidden=!state.project||page!=='build';if(state.project&&page!=='projects')$('#recent-projects').hidden=true; }
-function syncEdits(e){ $$('[data-edit]').forEach(el=>{el.value=e[el.dataset.edit]; updateOutput(el.dataset.edit,e[el.dataset.edit]);}); $$('[data-visible]').forEach(el=>el.checked=e[el.dataset.visible]);$('#coverage').value=e.coverage;$('#rotation').value=e.rotation;$('#mirror').checked=e.mirror;$('#wavelet-kernel').value=e.wavelet_kernel;$$('[data-wave]').forEach(el=>{el.value=e.wavelets[Number(el.dataset.wave)];$(`[data-wave-output="${el.dataset.wave}"]`).textContent=Number(el.value).toFixed(2);}); }
-function updateOutput(key,v){const out=$(`[data-output="${key}"]`);if(out) out.textContent=key==='strength'||key==='highlights'?`${Math.round(v*100)}%`:key==='saturation'?`${Number(v).toFixed(2)}×`:key==='smoothing'?`${Number(v).toFixed(1)} px`:Number(v).toFixed(key==='usm_threshold'?3:2);}
-// Edits made during a save build on the submitted values until the server acknowledges them.
-function currentEdits(){return pendingEdits||savingEdits||state.project.edits;}
-function changeEdit(key,value){pendingEdits={...currentEdits(),[key]:value};saveFailed=false;updateOutput(key,value);$('#saved').textContent='Saving…';clearTimeout(saveTimer);saveTimer=setTimeout(()=>flushEdits().catch(e=>message(e.message)),180);}
-async function flushEdits(){
-  clearTimeout(saveTimer);
-  if(saving){while(saving) await new Promise(r=>setTimeout(r,30)); if(pendingEdits) return flushEdits(); return;}
-  if(!pendingEdits) return;
-  const edits=pendingEdits;savingEdits=edits;pendingEdits=null;saving=true;
-  try {state=await api('edits',payload({edits,revision:state.project.revision}));saveFailed=false;await refreshPreview(false);}
-  // the rejected values go back into pendingEdits (newer keystrokes win), so render() keeps showing what the user chose
-  catch(e){pendingEdits={...edits,...(pendingEdits||{})};saveFailed=true;try{state=await api('state');}catch(_){}render();throw e;}
-  finally {savingEdits=null;saving=false;render();}
-  if(pendingEdits) await flushEdits();
+
+function renderWorkspace(p, job, busy) {
+  const ls = p.luminance, cs = p.colour, m = p.match;
+  $('#l-layer-state').textContent = ls.mosaic ? `${ls.width.toLocaleString('en-US')} × ${ls.height.toLocaleString('en-US')}` : 'Not built';
+  $('#rgb-layer-state').textContent = cs.mosaic ? (m?.method === 'both' ? 'From the same mosaic' : cs.summary ? `Placed · ${cs.summary.placed} panels` : 'Matched') : 'Add a colour set';
+  for (const [key, name] of [['L', 'luminance'], ['RGB', 'colour']]) {
+    const img = $(`[data-thumbnail="${key}"]`), badge = img.parentElement, s = p[name], stamp = `${p.id}:${s.mosaic}:${s.started || 0}`;
+    if (!s.mosaic) { img.hidden = true; $('span', badge).hidden = false; img.dataset.stamp = ''; }
+    else if (img.dataset.stamp !== stamp) {
+      img.hidden = true; $('span', badge).hidden = false; img.dataset.stamp = stamp;
+      img.onload = () => { img.hidden = false; $('span', badge).hidden = true; };
+      img.onerror = () => { img.hidden = true; $('span', badge).hidden = false; };
+      img.src = `/api/layer-thumbnail?id=${p.id}&set=${key}&v=${s.started || 0}`;
+    }
+  }
+  $('[data-visible="rgb_visible"]').checked = p.view.rgb_visible; $('[data-visible="l_visible"]').checked = p.view.l_visible;
+  $('[data-visible="rgb_visible"]').disabled = !m; $('[data-visible="l_visible"]').disabled = !ls.mosaic;
+  $('#layer-visibility-info').textContent = !p.view.l_visible && (!p.view.rgb_visible || !m) ? 'No visible layer. Show luminance, or colour once it is placed.'
+    : !p.view.l_visible ? 'Colour supplies lightness and hue while luminance is hidden.' : !p.view.rgb_visible || !m ? 'Luminance only; the colour chain is kept.'
+    : 'Luminance supplies the lightness, colour the hue.';
+  const single = colourSet(p).inputs.length === 1 && colourSet(p).stream === 'colour';
+  $('#match').disabled = busy || !ls.mosaic || !colourSet(p).inputs.length || colourSet(p).stream === 'both';
+  $('#match').textContent = m ? 'Place colour again' : 'Place colour';
+  $('#manual-open').disabled = busy || !ls.mosaic || !single;
+  $('#manual-open').title = single ? 'Click the same features on both images' : 'Control points place a single-image colour set';
+  $('#check-match').disabled = !m || busy || m.method === 'both';
+  $('#north-up').disabled = !ls.mosaic || busy;
+  $('#coverage').disabled = !m;
+  const checks = m?.diagnostics;
+  $('#match-chip').textContent = !m ? 'Colour not placed' : m.method === 'both' ? 'Colour from the same mosaic'
+    : `${cs.summary?.text || `Match ${m.median.toFixed(2)} px · worst ${m.worst.toFixed(2)} px`}${checks?.measured ? ` · checked ${checks.median.toFixed(2)} px` : ''}`;
+  $('#match-description').textContent = !m ? (colourSet(p).inputs.length ? 'Colour is placed once luminance is built.' : 'Add colour panels to colour the mosaic.')
+    : m.method === 'placement' ? `${m.inliers} of ${m.candidates} colour panels placed at ${m.scale.toFixed(3)}× the canvas pixel.`
+    : m.method === 'both' ? 'The colour set is the luminance too.'
+    : 'One global match, from before per-panel placement: place colour again to fit each panel.';
+  $('#match-explanation').textContent = !m ? 'Build both streams to measure how the colour sits on the luminance.' : m.method === 'both' ? 'Nothing is placed: one mosaic gives both.'
+    : `Each colour panel was found on the luminance and fitted with the simplest pose its own tiles support; every fourth tile was held out to measure the fit. ${m.warning || ''}${checks?.measured ? ` An independent check of ${checks.measured} patches measured a median offset of ${checks.median.toFixed(2)} px, worst ${checks.worst.toFixed(2)} px.` : ''}`;
+  $('#coverage').value = p.geometry.coverage; $('#mirror').checked = p.geometry.mirror;
+  if (document.activeElement !== $('#rotation')) $('#rotation').value = p.geometry.rotation;
+  const orient = p.orientation;
+  $('#orientation-info').textContent = orient ? `${orient.matches} terrain matches · ${orient.rms_px.toFixed(2)} px RMS. ${Math.abs(p.geometry.rotation - orient.rotation) < .001 && p.geometry.mirror === orient.mirror ? 'Lunar north is up.' : 'The view was turned since.'}`
+    : 'Both layers turn together. Uses lunar reference maps, downloaded if needed.';
+  $('#status-job').textContent = busy ? `${job.title || job.action} · ${Math.round((job.progress || 0) * 100)} %` : job.state === 'failed' ? job.error || '' : '';
+  // the migration notes, shown once
+  const notes = p.notes || [];
+  $('#notes').hidden = !notes.length;
+  if (notes.length && $('#notes').dataset.shown !== JSON.stringify(notes)) {
+    $('#notes').dataset.shown = JSON.stringify(notes);
+    $('#notes').replaceChildren(h('div', {class: 'eyebrow', text: 'WHAT CHANGED WHEN THIS PROJECT WAS OPENED'}),
+      h('ul', {}, ...notes.map(n => h('li', {text: n}))), h('button', {class: 'btn small', type: 'button', onclick: () => mutate('notes').catch(e => message(e.message))}, 'Got it'));
+  }
+  // the editor shows our working chain while a save is pending, the server's otherwise; never while typing in it
+  chainSave.adopt({format: 'lunarmosaic-chain', version: 1, ...p.chain});
+  const doc = chainSave.working, key = JSON.stringify(doc) + ':' + analysisVersion, active = document.activeElement;
+  const typing = $('#chains').contains(active) && /INPUT|SELECT|TEXTAREA/.test(active.tagName);
+  if (editor && key !== shownChain && !typing) { shownChain = key; editor.show(doc, analysis); }
+  // what a preview's pixels depend on: not the revision, which a rename or a build note also moves
+  if (previews && ls.mosaic) previews.render(hash(JSON.stringify([p.chain.protect_space, p.chain.chains, p.geometry,
+    ls.mosaic, ls.started || 0, cs.mosaic, cs.revision || 0])));
 }
-async function refreshPreview(reset=true){
-  if(page!=='edit'||!state.project?.sets.L.mosaic)return;
-  const ticket=++previewVersion, id=state.project.id;
+
+// ---------------------------------------------------------------- the canvas
+
+function scheduleRefresh() { clearTimeout(refreshTimer); refreshTimer = setTimeout(() => refreshPreview(false), 150); }
+
+function loadAnalysis() {
+  if (page !== 'edit' || !built(state.project, 'luminance')) return;
+  clearTimeout(analysisTimer);
+  analysisTimer = setTimeout(async () => {
+    const ticket = ++analysisTicket;
+    try {
+      const a = await api(`analysis?id=${state.project.id}`);
+      if (ticket !== analysisTicket) return;           // a newer chain's readouts were asked for meanwhile
+      analysis = a.blocks; analysisVersion++; render();
+    } catch (e) { /* readouts wait for the statistics; a failure shows in the canvas */ }
+  }, 250);
+}
+
+function legend() {
+  const sets = geometry?.sets || [];
+  $('#legend').hidden = view !== 'resolution';
+  $('#legend-list').replaceChildren(...(sets.length ? sets.map(s => h('li', {},
+    h('span', {class: 'swatch', style: `background:rgb(${s.colour.map(c => Math.round(c * 255)).join(',')})`}),
+    h('span', {}, h('strong', {text: s.label}), h('small', {text: [s.tier ? `tier ${s.tier}` : null, s.scale_rel ? `pixels ${s.scale_rel.toFixed(2)}× the canvas's` : null,
+      s.arcsec_px ? `${s.arcsec_px.toFixed(3)} ″/px` : null, s.detail_px ? `detail ${s.detail_px.toFixed(1)} px` : null,
+      typeof s.disk_share === 'number' ? `${(s.disk_share * 100).toFixed(0)} % of the disk` : null].filter(Boolean).join(' · ')}))))
+    : [h('li', {class: 'hint', text: 'This mosaic has no set report: it was built from one set.'})]));
+}
+
+async function refreshPreview(reset = true) {
+  if (page !== 'edit' || !built(state.project, 'luminance')) return;
+  const ticket = ++previewVersion, id = state.project.id;
   try {
-    const info=await api('geometry?id='+encodeURIComponent(id)); if(ticket!==previewVersion)return;
-    geometry=info;$('#status-dimensions').textContent=`${info.width.toLocaleString()} × ${info.height.toLocaleString()} · ${view}`;
-    $('.status-right').textContent=view==='errors'?'Green <1 px · amber <3 px · red ≥3 px · hollow = unknown':'Drag to pan · scroll to zoom';
-    $('#coverage-info').textContent=info.matched?`${info.missing_colour.toFixed(1)}% of the covered L canvas has no colour.`:'No colour layer matched.';
-    const sharp=info.sharpening;
-    $('#grain-info').textContent=sharp?.enabled?`Fine-scale variation ${sharp.fine_variation===null?'unmeasurable':sharp.fine_variation.toFixed(2)+'×'} in the sampled crop. Includes real detail and grain; inspect at 1:1.`:'Sharpening is off.';
-    $('#grain-info').classList.toggle('warning',!!sharp?.enabled&&sharp.fine_variation>1.5);
-    const response=await fetch(`/api/preview?id=${id}&view=${view}&v=${state.project.revision}`);
-    if(!response.ok){const e=await response.json();throw new Error(e.error);}
-    const url=URL.createObjectURL(await response.blob()); if(ticket!==previewVersion){URL.revokeObjectURL(url);return;}
-    const im=$('#mosaic');const old=im.dataset.url;
-    im.onload=()=>{if(old)URL.revokeObjectURL(old);im.dataset.url=url;$('#empty-canvas').hidden=true;if(reset||fitted)fit();else positionImage();};im.src=url;
-  }catch(e){message(e.message);}
+    const info = await api('geometry?id=' + encodeURIComponent(id)); if (ticket !== previewVersion) return;
+    geometry = info;
+    legend();
+    $('#status-dimensions').textContent = `${info.width.toLocaleString('en-US')} × ${info.height.toLocaleString('en-US')} · ${view}`;
+    $('#coverage-info').textContent = info.matched ? `${info.missing_colour.toFixed(1)} % of the luminance has no colour.` : 'No colour placed.';
+    const response = await fetch(`/api/preview?id=${id}&view=${view}&v=${state.project.revision}`);
+    if (!response.ok) { const e = await response.json().catch(() => ({})); throw new Error(e.error || 'The preview failed.'); }
+    const url = URL.createObjectURL(await response.blob()); if (ticket !== previewVersion) { URL.revokeObjectURL(url); return; }
+    const im = $('#mosaic'), old = im.dataset.url;
+    im.onload = () => { if (old) URL.revokeObjectURL(old); im.dataset.url = url; $('#empty-canvas').hidden = true; if (reset || fitted) fit(); else positionImage(); };
+    im.src = url;
+  } catch (e) { message(e.message); }
 }
-function fit(){if(!geometry)return;const stage=$('#stage');scale=Math.min((stage.clientWidth-370)/geometry.width,(stage.clientHeight-140)/geometry.height);scale=Math.max(.001,scale);offset={x:Math.max(70,(stage.clientWidth-340-geometry.width*scale)/2),y:Math.max(110,(stage.clientHeight-geometry.height*scale)/2)};fitted=true;positionImage();}
-function positionImage(){if(!geometry)return;const im=$('#mosaic');im.style.width=geometry.width+'px';im.style.height=geometry.height+'px';im.style.transform=`translate(${offset.x}px,${offset.y}px) scale(${scale})`;$('#zoom-label').textContent=`${Math.round(scale*100)}%`;$('#detail').hidden=true;clearTimeout(detailTimer);detailTimer=setTimeout(loadDetail,180);}
-async function loadDetail(){
-  if(page!=='edit'||!geometry)return;
-  const stage=$('#stage'), ticket=previewVersion, position=`${scale},${offset.x},${offset.y}`, id=state.project.id;
-  const q=new URLSearchParams({id,view,x:-offset.x,y:-offset.y,w:stage.clientWidth,h:stage.clientHeight,scale});
-  try {const r=await fetch('/api/viewport?'+q);if(!r.ok)return;const url=URL.createObjectURL(await r.blob());if(ticket!==previewVersion||position!==`${scale},${offset.x},${offset.y}`){URL.revokeObjectURL(url);return;}const im=$('#detail'),old=im.dataset.url;im.onload=()=>{if(old)URL.revokeObjectURL(old);im.dataset.url=url;im.hidden=false;};im.src=url;}catch(e){/* retain the preview while disconnected */}
+
+function fit() {
+  if (!geometry) return;
+  const stage = $('#stage'), right = stage.clientWidth > 900 ? 420 : 300, bottom = previews?.list().length ? 210 : 120;
+  scale = Math.max(.001, Math.min((stage.clientWidth - right - 90) / geometry.width, (stage.clientHeight - bottom - 130) / geometry.height));
+  offset = {x: Math.max(70, (stage.clientWidth - right - geometry.width * scale) / 2), y: Math.max(110, (stage.clientHeight - bottom - geometry.height * scale) / 2)};
+  fitted = true; positionImage();
 }
-function zoom(factor,x,y){if(!geometry)return;const stage=$('#stage');x??=stage.clientWidth/2;y??=stage.clientHeight/2;const next=Math.max(.005,Math.min(8,scale*factor));offset.x=x-(x-offset.x)*next/scale;offset.y=y-(y-offset.y)*next/scale;scale=next;fitted=false;positionImage();}
-async function importFiles(key,files){
-  if(!state.project){message('Create or open a project first.');return;}
-  const supported=files.filter(f=>/\.(tiff?|png|jpe?g)$/i.test(f.name));if(!supported.length){message('Choose TIFF, PNG or JPEG panels. FITS is not supported yet.');return;}
-  if(supported.length!==files.length)message(`${files.length-supported.length} non-image files skipped.`);
-  importing=true;render();let count=0;
-  try {for(const file of supported){$('#saved').textContent=`Importing ${++count}/${supported.length}…`;const q=new URLSearchParams({id:state.project.id,set:key,name:file.name});const r=await fetch('/api/upload?'+q,{method:'POST',body:file});const o=await r.json();if(!r.ok)throw new Error(o.error);state=o;}
-    const card=$(`.set[data-set="${key}"]`);
-    state=await api('inputs',payload({set:key,paths:state.project.sets[key].inputs,optics:{pixel_um:$('.pixel',card).value,focal_mm:$('.focal',card).value,barlow:$('.barlow',card).value}}));
-    message(`${count} panels imported. A copy is kept inside the project.`);}
-  catch(e){message(e.message);}
-  finally{importing=false;render();}
+
+function positionImage() {
+  if (!geometry) return;
+  const im = $('#mosaic');
+  im.style.width = geometry.width + 'px'; im.style.height = geometry.height + 'px';
+  im.style.transform = `translate(${offset.x}px,${offset.y}px) scale(${scale})`;
+  // below 75 % the canvas runs every block at a reduced scale (plan §4.5): judge detail in a preview at 1:1
+  $('#zoom-label').textContent = `${Math.round(scale * 100)}%${scale < .75 ? ' · approximate' : ''}`;
+  $('#zoom-label').title = scale < .75 ? 'Approximate below 75 %: draw a preview to judge detail at 1:1.' : '';
+  $('#detail').hidden = true; clearTimeout(detailTimer); detailTimer = setTimeout(loadDetail, 180);
+  previews?.place();
 }
-function clearPoints(){points.L=[];points.RGB=[];$$('.point-dot').forEach(el=>el.remove());$('#point-count').textContent='Choose point 1 in luminance.';}
-async function poll(){if(polling||saving||importing)return;polling=true;try{const old=state,next=await api('state');if(saving||pendingEdits||importing)return;if(state.project&&next.project?.id===state.project.id&&next.project.revision<state.project.revision)return;state=next;render();if(page==='edit'&&(old.project?.id!==state.project?.id||old.project?.match!==null&&!state.project?.match||JSON.stringify(old.project?.match)!==JSON.stringify(state.project?.match)))refreshPreview();if(old.job.state==='running'&&state.job.state!=='running'){if(state.job.error)message(state.job.error);if(page==='edit')refreshPreview(false);}}catch(e){$('#saved').textContent='Connection lost · reconnecting…';}finally{polling=false;}}
-$$('[data-page]').forEach(b=>b.onclick=()=>showPage(b.dataset.page));
-$('#home').onclick=()=>showPage('projects');
-$('#close-project').onclick=async()=>{if(await action('close'))showPage('import');};
-$('#create').onclick=async()=>{if(await action('new',{folder:$('#project-folder').value,name:$('#project-name').value}))showPage('import');};
-$('#open-project').onclick=async()=>{if(await action('open',{folder:$('#open-folder').value}))showPage(landingPage());};
-$('#recent-clear').onclick=async()=>{if(await action('recent-clear'))loadRecent();};
-$$('.set').forEach(card=>{const key=card.dataset.set;
-  $('.scan',card).onclick=()=>action('inputs',{set:key,paths:[$('.source-path',card).value],optics:{pixel_um:$('.pixel',card).value,focal_mm:$('.focal',card).value,barlow:$('.barlow',card).value}});
-  $('.folder-upload',card).onchange=e=>importFiles(key,[...e.target.files]);
-  $$('.optics input',card).forEach(el=>el.onchange=()=>{if(state.project?.sets[key].inputs.length&&!state.project.sets[key].mosaic)
-    action('inputs',{set:key,paths:state.project.sets[key].inputs,optics:{pixel_um:$('.pixel',card).value,focal_mm:$('.focal',card).value,barlow:$('.barlow',card).value}});});
-  const drop=$('.drop',card);drop.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();$('.folder-upload',card).click();}};
-  drop.ondragover=e=>{e.preventDefault();drop.classList.add('drag');};drop.ondragleave=()=>drop.classList.remove('drag');drop.ondrop=e=>{e.preventDefault();drop.classList.remove('drag');importFiles(key,[...e.dataTransfer.files]);};
-});
-$('#build-both').onclick=async()=>{if(await action('build'))showPage('build');};$('#cancel-job').onclick=()=>action('cancel');$('#go-edit').onclick=()=>showPage('edit');
-$('#match').onclick=()=>action('match');$('#match-chip').onclick=()=>{$('#match-popover').hidden=!$('#match-popover').hidden;$('#match-chip').setAttribute('aria-expanded',String(!$('#match-popover').hidden));};
-$('#match-popover-close').onclick=()=>{$('#match-popover').hidden=true;$('#match-chip').setAttribute('aria-expanded','false');$('#match-chip').focus();};
-$('#show-error-map').onclick=()=>{$('[data-view="errors"]').click();$('#match-popover-close').click();};
-$$('[data-visible]').forEach(el=>el.onchange=()=>changeEdit(el.dataset.visible,el.checked));
-$('#check-match').onclick=()=>action('check-match');$('#north-up').onclick=()=>{fitted=true;action('north-up');};
-$$('[data-layer]').forEach(b=>b.onclick=()=>{$('#rgb-controls').hidden=b.dataset.layer!=='RGB';$('#l-controls').hidden=b.dataset.layer!=='L';});
-$$('[data-edit]').forEach(el=>el.oninput=()=>changeEdit(el.dataset.edit,Number(el.value)));
-$('#coverage').onchange=()=>{fitted=true;changeEdit('coverage',$('#coverage').value);};$('#rotation').onchange=()=>{fitted=true;changeEdit('rotation',Number($('#rotation').value));};
-$('#mirror').onchange=()=>{fitted=true;changeEdit('mirror',$('#mirror').checked);};$('#wavelet-kernel').onchange=()=>changeEdit('wavelet_kernel',$('#wavelet-kernel').value);
-$$('[data-wave]').forEach(el=>el.oninput=()=>{const waves=[...currentEdits().wavelets];waves[Number(el.dataset.wave)]=Number(el.value);$(`[data-wave-output="${el.dataset.wave}"]`).textContent=Number(el.value).toFixed(2);changeEdit('wavelets',waves);});
-$('#reset-edits').onclick=()=>{pendingEdits=structuredClone(defaultEdits);fitted=true;flushEdits().then(()=>render()).catch(e=>message(e.message));};
-$$('[data-view]').forEach(b=>b.onclick=()=>{view=b.dataset.view;$$('[data-view]').forEach(x=>x.classList.toggle('active',x===b));refreshPreview(false);});
-$('#fit').onclick=fit;$('#zoom-in').onclick=()=>zoom(1.4);$('#zoom-out').onclick=()=>zoom(1/1.4);$('#one-to-one').onclick=()=>zoom(1/scale);
-const stage=$('#stage');stage.onwheel=e=>{e.preventDefault();const rect=stage.getBoundingClientRect();zoom(e.deltaY<0?1.15:1/1.15,e.clientX-rect.left,e.clientY-rect.top);};let drag=null;
-stage.onpointerdown=e=>{drag={x:e.clientX,y:e.clientY,ox:offset.x,oy:offset.y};stage.setPointerCapture(e.pointerId);};stage.onpointermove=e=>{if(!drag)return;offset={x:drag.ox+e.clientX-drag.x,y:drag.oy+e.clientY-drag.y};fitted=false;positionImage();};stage.onpointerup=()=>drag=null;stage.onpointercancel=()=>drag=null;
-window.onresize=()=>{if(fitted)fit();else positionImage();};
-async function exportPreview(){
-  const ticket=++exportVersion;$('#export-run').disabled=true;$('#export-summary').textContent='Preparing preview…';$('#export-preview').hidden=true;
-  const q=new URLSearchParams({id:state.project.id,coverage:$('#export-coverage').value,factor:$('#export-scale').value,layer:$('#export-layer').value});
-  try{const info=await api('export-preview?'+q);if(ticket!==exportVersion)return;
-    $('#export-preview').src=info.preview;$('#export-preview').hidden=false;
-    const format=$('#format').value;
-    const jpegOK=format!=='jpg'||info.width*info.height<=info.jpeg_max_pixels&&Math.max(info.width,info.height)<=info.jpeg_max_side;
-    $('#export-summary').textContent=`${info.width.toLocaleString()} × ${info.height.toLocaleString()} px · ${info.composition} · ${format==='jpg'?'8':'16'}-bit · ${info.missing_colour.toFixed(1)}% L coverage without colour. ${format==='tif'?`Approximately ${fileSize(info.raw_bytes)} uncompressed.`:'Compressed file size depends on the image.'} Preview approximates sharpening; inspect native detail in the workspace.${jpegOK?'':' Too large for JPEG; choose TIFF/PNG or a smaller size.'}`;
-    $('#export-run').disabled=!jpegOK;
-  }catch(e){if(ticket===exportVersion)$('#export-summary').textContent=e.message;}
+
+async function loadDetail() {
+  if (page !== 'edit' || !geometry) return;
+  const stage = $('#stage'), ticket = previewVersion, position = `${scale},${offset.x},${offset.y}`;
+  const q = new URLSearchParams({id: state.project.id, view, x: -offset.x, y: -offset.y, w: stage.clientWidth, h: stage.clientHeight, scale});
+  try {
+    const r = await fetch('/api/viewport?' + q); if (!r.ok) return;
+    const url = URL.createObjectURL(await r.blob());
+    if (ticket !== previewVersion || position !== `${scale},${offset.x},${offset.y}`) { URL.revokeObjectURL(url); return; }
+    const im = $('#detail'), old = im.dataset.url;
+    im.onload = () => { if (old) URL.revokeObjectURL(old); im.dataset.url = url; im.hidden = false; };
+    im.src = url;
+  } catch (e) { /* keep the preview while disconnected */ }
 }
-$('#export-open').onclick=async()=>{try{await flushEdits();$('#export-path').value=state.project.folder.replace(/[/\\]$/,'')+'/exports/Moon-LRGB.'+$('#format').value;$('#export-coverage').value=state.project.edits.coverage;$('#export-coverage').disabled=!state.project.match;$('#export-layer option[value=colour]').disabled=!state.project.match;if(!state.project.match&&$('#export-layer').value==='colour')$('#export-layer').value='composite';$('#export-dialog').showModal();exportPreview();}catch(e){message(e.message);}};
-$('#format').onchange=()=>{$('#export-path').value=$('#export-path').value.replace(/\.[^.\/\\]+$/,'.'+$('#format').value);exportPreview();};
-for(const selector of ['#export-scale','#export-layer','#export-coverage'])$(selector).onchange=exportPreview;
-$('#export-run').onclick=async()=>{if(await action('export',{output:$('#export-path').value,factor:Number($('#export-scale').value),layer:$('#export-layer').value,coverage:$('#export-coverage').value})){ $('#export-dialog').close();showPage('build'); }};
-$('#export-dialog form').onsubmit=e=>{e.preventDefault();};
-$$('[data-export-close]').forEach(b=>b.onclick=()=>$('#export-dialog').close());
-$('#manual-open').onclick=()=>{clearPoints();$('#manual-l').src=`/api/native-preview?id=${state.project.id}&set=L`;$('#manual-rgb').src=`/api/native-preview?id=${state.project.id}&set=RGB`;$('#manual-dialog').showModal();};
-$$('[data-points]').forEach(box=>box.onclick=e=>{const key=box.dataset.points, expected=points.L.length===points.RGB.length?'L':'RGB';if(key!==expected){message(`Choose the corresponding point in ${expected==='L'?'luminance':'colour'} first.`);return;}const rect=$('img',box).getBoundingClientRect();const u=(e.clientX-rect.left)/rect.width,v=(e.clientY-rect.top)/rect.height;if(u<0||u>1||v<0||v>1)return;const s=state.project.sets[key];points[key].push([u*s.width,v*s.height]);const dot=document.createElement('span');dot.className='point-dot';dot.style.left=u*100+'%';dot.style.top=v*100+'%';dot.textContent=points[key].length;box.append(dot);$('#point-count').textContent=key==='L'?`Choose point ${points.L.length} in colour.`:`${points.L.length} pairs chosen. Add another pair or use these points.`;});
-$('#clear-points').onclick=clearPoints;$('#manual-run').onclick=async()=>{if(await action('manual',{l_points:points.L,rgb_points:points.RGB})){ $('#manual-dialog').close();refreshPreview(); }};
-document.addEventListener('keydown',e=>{if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='s'){e.preventDefault();flushEdits().then(()=>message('Project saved locally.')).catch(err=>message(err.message));}if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='e'){e.preventDefault();if(!$('#export-open').disabled)$('#export-open').click();}});
-document.addEventListener('keydown',e=>{if(e.key==='Escape'&&!$('#match-popover').hidden)$('#match-popover-close').click();});
-window.addEventListener('beforeunload',e=>{if(pendingEdits||saving||importing){e.preventDefault();e.returnValue='';}});
-api('state').then(s=>{state=s;render();showPage(landingPage());}).catch(e=>message(e.message));setInterval(poll,1200);
+
+function zoom(factor, x, y) {
+  if (!geometry) return;
+  const stage = $('#stage'); x ??= stage.clientWidth / 2; y ??= stage.clientHeight / 2;
+  const next = Math.max(.005, Math.min(8, scale * factor));
+  offset.x = x - (x - offset.x) * next / scale; offset.y = y - (y - offset.y) * next / scale;
+  scale = next; fitted = false; positionImage();
+}
+
+// view px of the full oriented view -> canvas px, for the rectangles a block measures (white balance references)
+function toCanvas([x, y, w, hh]) {
+  const M = geometry.full.matrix, det = M[0][0] * M[1][1] - M[0][1] * M[1][0];
+  const inv = ([u, v]) => { const a = u - M[0][2], b = v - M[1][2]; return [(M[1][1] * a - M[0][1] * b) / det, (-M[1][0] * a + M[0][0] * b) / det]; };
+  const c = [[x, y], [x + w, y], [x, y + hh], [x + w, y + hh]].map(inv);
+  const xs = c.map(q => q[0]), ys = c.map(q => q[1]);
+  const x0 = Math.max(0, Math.min(...xs)), y0 = Math.max(0, Math.min(...ys));
+  return [Math.round(x0), Math.round(y0), Math.round(Math.max(...xs) - x0), Math.round(Math.max(...ys) - y0)];
+}
+
+async function poll() {
+  if (polling || importing) return;
+  polling = true;
+  try {
+    const old = state, next = await api('state');
+    if (importing) return;
+    // a reply older than one this page already has (a save that landed meanwhile) is dropped
+    if (state.project && next.project?.id === state.project.id && next.project.revision < state.project.revision) return;
+    state = next; render();
+    const was = old.project, now = state.project;
+    if (page === 'edit' && now && (was?.id !== now.id || was?.revision !== now.revision)) { scheduleRefresh(); loadAnalysis(); }
+    if (old.job.state === 'running' && state.job.state !== 'running') {
+      if (state.job.error) message(state.job.error);
+      if (page === 'edit') refreshPreview(false);
+      if (page === 'import') loadEstimate();
+    }
+  } catch (e) { $('#saved').textContent = 'Connection lost · reconnecting…'; }
+  finally { polling = false; }
+}
+
+// ---------------------------------------------------------------- the match popover
+
+async function openPlacement() {
+  const pop = $('#match-popover');
+  pop.hidden = !pop.hidden;
+  $('#match-chip').setAttribute('aria-expanded', String(!pop.hidden));
+  if (pop.hidden) return;
+  const table = $('#placement-table');
+  table.replaceChildren();
+  if (!state.project.match || state.project.match.method !== 'placement') return;
+  try {
+    const r = await api(`placement?id=${state.project.id}`);
+    if (!r.panels.length) return;
+    table.append(h('caption', {text: `${r.summary.placed} placed, ${r.summary.rejected} left out · scale ${r.k.toFixed(3)}× (${r.scale_source}).${r.photometry?.notes?.length ? ' ' + r.photometry.notes.join(' ') : ''}`}),
+      h('thead', {}, h('tr', {}, ...['Panel', 'Placed', 'Pose', 'Tiles', 'Held out', 'Red / blue shift'].map(t => h('th', {scope: 'col', text: t})))),
+      h('tbody', {}, ...r.panels.map(x => h('tr', {class: x.state === 'placed' ? '' : 'rejected'},
+        h('th', {scope: 'row', text: x.name}), h('td', {text: x.state === 'placed' ? 'yes' : `no: ${x.reason}`}),
+        h('td', {text: x.model || '—'}), h('td', {text: x.tiles ?? '—'}),
+        h('td', {text: typeof x.held_out_rms === 'number' ? `${x.held_out_rms.toFixed(2)} px` : '—'}),
+        h('td', {class: 'why', text: `R ${x.rgb_shift.r}; B ${x.rgb_shift.b}`})))));
+  } catch (e) { message(e.message); }
+}
+
+// ---------------------------------------------------------------- wiring
+
+function wire() {
+  $$('[data-page]').forEach(b => { b.onclick = () => showPage(b.dataset.page); });
+  $('#home').onclick = () => showPage('projects');
+  $('#close-project').onclick = async () => { if (await action('close')) showPage('import'); };
+  $('#create').onclick = async () => { if (await action('new', {folder: $('#project-folder').value, name: $('#project-name').value})) showPage('import'); };
+  $('#open-project').onclick = async () => { if (await action('open', {folder: $('#open-folder').value})) showPage(landingPage()); };
+  $('#recent-clear').onclick = async () => { if (await action('recent-clear')) loadRecent(); };
+  $('#add-lum-set').onclick = () => mutate('sets', {op: 'create', set: {stream: 'luminance'}}).catch(e => message(e.message));
+  $('#colour-both').onchange = () => mutate('sets', {op: 'update', set: {id: 'RGB', stream: $('#colour-both').checked ? 'both' : 'colour'}}).then(loadEstimate).catch(e => { message(e.message); render(); });
+  $('#build-both').onclick = () => build(['L', 'RGB']);
+  $('#build-lum').onclick = () => build(['L']);
+  $('#cancel-job').onclick = () => action('cancel');
+  $('#go-edit').onclick = async () => { await poll(); showPage('edit'); };      // with the finished build's state
+  $('#match').onclick = () => action('match');
+  $('#check-match').onclick = () => action('check-match');
+  $('#north-up').onclick = () => { fitted = true; action('north-up'); };
+  $('#match-chip').onclick = openPlacement;
+  $('#match-popover-close').onclick = () => { $('#match-popover').hidden = true; $('#match-chip').setAttribute('aria-expanded', 'false'); $('#match-chip').focus(); };
+  $('#show-error-map').onclick = () => { $('[data-view="errors"]').click(); $('#match-popover-close').click(); };
+  $$('[data-visible]').forEach(el => { el.onchange = () => mutate('geometry', {view: {[el.dataset.visible]: el.checked}}).then(() => refreshPreview(false)).catch(e => { message(e.message); render(); }); });
+  const turn = g => { fitted = true; mutate('geometry', {geometry: g}).then(() => refreshPreview()).catch(e => { message(e.message); render(); }); };
+  $('#coverage').onchange = () => turn({coverage: $('#coverage').value});
+  $('#rotation').onchange = () => turn({rotation: Number($('#rotation').value)});
+  $('#mirror').onchange = () => turn({mirror: $('#mirror').checked});
+  $$('[data-view]').forEach(b => { b.onclick = () => { view = b.dataset.view; $$('[data-view]').forEach(x => x.classList.toggle('active', x === b)); refreshPreview(false); }; });
+  $('#fit').onclick = fit; $('#zoom-in').onclick = () => zoom(1.4); $('#zoom-out').onclick = () => zoom(1 / 1.4); $('#one-to-one').onclick = () => zoom(1 / scale);
+  $('#preview-tool').onclick = () => previews.add().catch(e => message(e.message));
+  $('#preview-close').onclick = () => previews.close();
+  const stage = $('#stage');
+  stage.onwheel = e => { e.preventDefault(); const r = stage.getBoundingClientRect(); zoom(e.deltaY < 0 ? 1.15 : 1 / 1.15, e.clientX - r.left, e.clientY - r.top); };
+  let drag = null;
+  stage.onpointerdown = e => { if (stage.classList.contains('drawing')) return; drag = {x: e.clientX, y: e.clientY, ox: offset.x, oy: offset.y}; stage.setPointerCapture(e.pointerId); };
+  stage.onpointermove = e => { if (!drag) return; offset = {x: drag.ox + e.clientX - drag.x, y: drag.oy + e.clientY - drag.y}; fitted = false; positionImage(); };
+  stage.onpointerup = () => { drag = null; }; stage.onpointercancel = () => { drag = null; };
+  window.onresize = () => { if (fitted) fit(); else positionImage(); };
+  // export, with the chain as a file
+  $('#export-open').onclick = async () => {
+    try {
+      await chainSave.flush().catch(() => {}); await queue;
+      $('#export-path').value = state.project.folder.replace(/[/\\]$/, '') + '/exports/Moon-LRGB.' + $('#format').value;
+      $('#export-coverage').value = state.project.geometry.coverage;
+      $('#export-coverage').disabled = !state.project.match;
+      $('#export-layer option[value=colour]').disabled = !state.project.match;
+      if (!state.project.match && $('#export-layer').value === 'colour') $('#export-layer').value = 'composite';
+      $('#export-dialog').showModal(); exportPreview();
+    } catch (e) { message(e.message); }
+  };
+  $('#format').onchange = () => { $('#export-path').value = $('#export-path').value.replace(/\.[^./\\]+$/, '.' + $('#format').value); exportPreview(); };
+  for (const sel of ['#export-scale', '#export-layer', '#export-coverage']) $(sel).onchange = exportPreview;
+  $('#export-run').onclick = async () => {
+    if (await action('export', {output: $('#export-path').value, factor: Number($('#export-scale').value), layer: $('#export-layer').value, coverage: $('#export-coverage').value})) { $('#export-dialog').close(); showPage('build'); }
+  };
+  $('#export-dialog form').onsubmit = e => { e.preventDefault(); };
+  $$('[data-export-close]').forEach(b => { b.onclick = () => $('#export-dialog').close(); });
+  $('#chain-export').onclick = async () => {
+    try {
+      await chainSave.flush().catch(() => {}); await queue;
+      const doc = await api(`chain-file?id=${state.project.id}`);
+      const url = URL.createObjectURL(new Blob([JSON.stringify(doc, null, 2)], {type: 'application/json'}));
+      const a = h('a', {href: url, download: `${(state.project.name || 'moon').replace(/[\\/:*?"<>|]+/g, '-')}.chain.json`});
+      document.body.append(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+    } catch (e) { message(e.message); }
+  };
+  $('#chain-import').onchange = async e => {
+    const file = e.target.files[0]; e.target.value = '';
+    if (!file) return;
+    try {
+      const doc = JSON.parse(await file.text());
+      await chainSave.flush().catch(() => {});
+      await mutate('chain-file', {chain: doc});
+      shownChain = ''; render(); scheduleRefresh(); loadAnalysis(); exportPreview();
+      message('Chain loaded; your previews were kept.');
+    } catch (err) { message(err instanceof SyntaxError ? 'This file is not a chain document (not JSON).' : err.message); }
+  };
+  // control points for a single-image colour set: luminance points in mosaic px, colour points in the image's px
+  $('#manual-open').onclick = () => { clearPoints(); $('#manual-l').src = `/api/native-preview?id=${state.project.id}&set=L`; $('#manual-rgb').src = `/api/native-preview?id=${state.project.id}&set=RGB`; $('#manual-dialog').showModal(); };
+  $$('[data-points]').forEach(box => { box.onclick = e => {
+    const key = box.dataset.points, expected = points.L.length === points.RGB.length ? 'L' : 'RGB';
+    if (key !== expected) { message(`Choose the corresponding point in ${expected === 'L' ? 'luminance' : 'colour'} first.`); return; }
+    const r = $('img', box).getBoundingClientRect(), u = (e.clientX - r.left) / r.width, v = (e.clientY - r.top) / r.height;
+    if (u < 0 || u > 1 || v < 0 || v > 1) return;
+    const p = state.project, hd = colourSet(p).headers;
+    const [w, hh] = key === 'L' ? [p.luminance.width, p.luminance.height] : [hd.max_width, hd.max_height];
+    points[key].push([u * w, v * hh]);
+    box.append(h('span', {class: 'point-dot', style: `left:${u * 100}%;top:${v * 100}%`, text: points[key].length}));
+    $('#point-count').textContent = key === 'L' ? `Choose point ${points.L.length} in colour.` : `${points.L.length} pairs chosen. Add another pair or use these points.`;
+  }; });
+  $('#clear-points').onclick = clearPoints;
+  $('#manual-run').onclick = async () => { if (await action('manual', {l_points: points.L, rgb_points: points.RGB})) { $('#manual-dialog').close(); showPage('build'); } };
+  document.addEventListener('keydown', e => {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') { e.preventDefault(); chainSave.flush().then(() => message('Project saved locally.')).catch(err => message(err.message)); }
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'e') { e.preventDefault(); if (!$('#export-open').disabled) $('#export-open').click(); }
+    if (e.key === 'Escape') { previews?.cancelDraw(); if (!$('#match-popover').hidden) $('#match-popover-close').click(); }
+    const el = document.activeElement, typing = /INPUT|SELECT|TEXTAREA/.test(el?.tagName || '') || el?.isContentEditable;
+    if (!typing && !e.metaKey && !e.ctrlKey && !e.altKey && e.key.toLowerCase() === 'p' && page === 'edit' && !document.querySelector('dialog[open]')) {
+      e.preventDefault(); previews.add().catch(err => message(err.message));
+    }
+  });
+  window.addEventListener('beforeunload', e => { if (chainSave.busy || importing) { e.preventDefault(); e.returnValue = ''; } });
+}
+
+function clearPoints() { points.L = []; points.RGB = []; $$('.point-dot').forEach(el => el.remove()); $('#point-count').textContent = 'Choose point 1 in luminance.'; }
+
+async function exportPreview() {
+  if (!$('#export-dialog').open) return;
+  const ticket = ++exportVersion; $('#export-run').disabled = true; $('#export-summary').textContent = 'Preparing preview…'; $('#export-preview').hidden = true;
+  const q = new URLSearchParams({id: state.project.id, coverage: $('#export-coverage').value, factor: $('#export-scale').value, layer: $('#export-layer').value});
+  try {
+    const info = await api('export-preview?' + q); if (ticket !== exportVersion) return;
+    $('#export-preview').src = info.preview; $('#export-preview').hidden = false;
+    const format = $('#format').value;
+    const jpegOK = format !== 'jpg' || (info.width * info.height <= info.jpeg_max_pixels && Math.max(info.width, info.height) <= info.jpeg_max_side);
+    $('#export-summary').textContent = `${info.width.toLocaleString('en-US')} × ${info.height.toLocaleString('en-US')} px · ${info.composition} · ${format === 'jpg' ? '8' : '16'}-bit · ${info.missing_colour.toFixed(1)} % of the luminance without colour. ${format === 'tif' ? `About ${fileSize(info.raw_bytes)} uncompressed.` : 'The compressed size depends on the image.'} The preview approximates sharpening; judge detail in a preview at 1:1.${jpegOK ? '' : ' Too large for JPEG: choose TIFF or PNG, or a smaller size.'}`;
+    $('#export-run').disabled = !jpegOK;
+  } catch (e) { if (ticket === exportVersion) $('#export-summary').textContent = e.message; }
+}
+
+async function start() {
+  wire();
+  try {
+    const [first, catalog] = await Promise.all([api('state'), api('blocks')]);
+    state = first;
+    editor = new ChainEditor({root: $('#chains'), catalog: catalog.blocks,
+      onChange: doc => { chainSave.change(doc); },
+      onDraw: async (which, done) => {
+        const rect = await previews.draw(`Drag the ${which} reference on the mosaic · Esc cancels`);
+        if (rect) done(toCanvas(rect));
+        else { shownChain = ''; render(); }               // the choice goes back to what it was
+      }});
+    previews = new Previews({stage: $('#stage'), layer: $('#overlay'), strip: $('#preview-strip'), viewer: $('#preview-viewer'),
+      api: (route, body) => mutate(route, body), project: () => state.project, onError: e => message(e.message),
+      view: () => ({scale, offset, box: geometry?.box || [0, 0, 0, 0]})});
+    render(); showPage(landingPage());
+  } catch (e) { message(e.message); }
+  setInterval(poll, 1200);
+}
+
+start();

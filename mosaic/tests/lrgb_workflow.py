@@ -15,7 +15,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import cv2
 import numpy as np
 import tifffile
-from project import Project, DEFAULT_EDITS
+import chain
+from project import Project, DEFAULT_EDITS, edits_to_chain
 import lrgb
 from lrgb import Image, manual_match, largest_rectangle
 from app import Application, start_server
@@ -27,6 +28,16 @@ if __package__:
     from .synthetic import detail
 else:
     from synthetic import detail
+
+
+# The tests below are phrased in the old flat adjustments, which a schema-3 project migrates from (Appendix D):
+# these helpers turn one into its chain, geometry and layer switches, and use the phase-7 API.
+def doc_of(edits): return edits_to_chain(dict(DEFAULT_EDITS,**edits))[0]
+def geo(edits): return {k:edits[k] for k in ('rotation','mirror','coverage')}
+def layers(edits): return {k:edits[k] for k in ('l_visible','rgb_visible')}
+def render(scene,m,size,edits,view='composite',precise=True): return scene.render(m,size,doc_of(edits),layers(edits),view,precise)
+def export(scene,out,edits,factor=1,layer='composite',**kw): return scene.export(out,doc_of(edits),geo(edits),layers(edits),factor,layer,**kw)
+def store(p,edits): p.set_chain(doc_of(edits));p.set_geometry(geo(edits));p.set_view(layers(edits))
 
 
 class Workflow(unittest.TestCase):
@@ -75,7 +86,9 @@ class Workflow(unittest.TestCase):
     def legacy(self,version,edits):
         """Rewrite the open project's file in its schema-1–3 shape (sets by key, a global match, flat edits)."""
         p=self.app.project;self.app.close()
-        sets={k:{x:y for x,y in v.items() if x!='legacy_match'} for k,v in p.public()['sets'].items()}
+        own=lambda key:{k:v for k,v in p.set(key).items() if k not in ('id','stream','label')}
+        state=lambda name:{k:v for k,v in p.stream(name).items() if k not in ('legacy_match','placement')}
+        sets={'L':dict(state('luminance'),**own('L')),'RGB':dict(state('colour'),**own('RGB'))}
         old=dict(version=version,id=p.data['id'],name=p.data['name'],created=p.data['created'],updated=p.data['updated'],
                  revision=p.data['revision'],sets=sets,match=p.match,orientation=None,edits=edits)
         (p.folder/'project.json').write_text(json.dumps(old),'utf-8')
@@ -87,11 +100,11 @@ class Workflow(unittest.TestCase):
         folder,_=self.legacy(1,dict({k:DEFAULT_EDITS[k] for k in old_keys},saturation=2.3))
         restored=Project.open(folder)
         self.assertEqual(restored.data['version'],4)
-        self.assertEqual(restored.edits['saturation'],2.3)
-        self.assertEqual(restored.edits['wavelets'],[0,0,0,0])
-        self.assertFalse(restored.edits['mirror'])
-        self.assertTrue(restored.edits['l_visible'])
-        self.assertTrue(restored.edits['rgb_visible'])
+        ch=restored.data['chain']['chains']
+        self.assertEqual([(e['type'],e['params']['factor']) for e in ch['colour']],[('saturation',2.3)])
+        self.assertEqual(ch['luminance'],[])                           # wavelets [0,0,0,0]: no block
+        self.assertFalse(restored.data['geometry']['mirror'])
+        self.assertEqual(restored.layers,dict(l_visible=True,rgb_visible=True))
         self.assertTrue((folder/'project.v1.json').is_file())
 
     def test_version_two_migrates_preserving_sharpening_and_match(self):
@@ -101,29 +114,30 @@ class Workflow(unittest.TestCase):
         self.app.select(folder)
         restored=self.app.project
         self.assertEqual(restored.data['version'],4)
-        self.assertEqual(restored.edits['wavelets'],[.1,.2,.3,.4])
+        wave=restored.data['chain']['chains']['luminance'][0]
+        self.assertEqual(wave['type'],'wavelets');np.testing.assert_allclose(wave['params']['biases'],[.01,.02,.03,.04])
         self.assertEqual(restored.match,old['match'])
-        self.assertTrue(restored.edits['l_visible'])
+        self.assertTrue(restored.layers['l_visible'])
 
     def test_visibility_reopens_and_combined_export_uses_visible_layer(self):
         scene=self.built();p=self.app.project
         matrix,size,_=scene.geometry(DEFAULT_EDITS)
         lonly=dict(DEFAULT_EDITS,rgb_visible=False)
-        combined,_=scene.render_edits(matrix,size,lonly)
-        expected,_=scene.render_edits(matrix,size,DEFAULT_EDITS,'luminance')
+        combined,_=render(scene,matrix,size,lonly)
+        expected,_=render(scene,matrix,size,DEFAULT_EDITS,'luminance')
         self.assertLess(np.max(np.abs(combined-expected)),1e-6)
         conly=dict(DEFAULT_EDITS,l_visible=False)
-        output=self.root/'visible-colour.tif';scene.export(output,conly)
-        expected,_=scene.render_edits(matrix,size,DEFAULT_EDITS,'colour')
+        output=self.root/'visible-colour.tif';export(scene,output,conly)
+        expected,_=render(scene,matrix,size,DEFAULT_EDITS,'colour')
         self.assertLess(np.max(np.abs(tifffile.imread(output).astype(np.float32)/65535-expected)),.00002)
         empty=dict(DEFAULT_EDITS,l_visible=False,rgb_visible=False)
-        preview,_=scene.render_edits(matrix,size,empty)
+        preview,_=render(scene,matrix,size,empty)
         self.assertEqual(float(preview.max()),0)
-        with self.assertRaises(ValueError):self.app.export_options(empty,dict(layer='composite'))
-        self.app.export_options(empty,dict(layer='luminance'))
-        p.edits=conly;p.save();self.app.close();self.app.select(p.folder)
-        self.assertFalse(self.app.project.edits['l_visible'])
-        self.assertTrue(self.app.project.edits['rgb_visible'])
+        with self.assertRaises(ValueError):self.app.export_options(geo(empty),layers(empty),dict(layer='composite'))
+        self.app.export_options(geo(empty),layers(empty),dict(layer='luminance'))
+        store(p,conly);p.save();self.app.close();self.app.select(p.folder)
+        self.assertFalse(self.app.project.layers['l_visible'])
+        self.assertTrue(self.app.project.layers['rgb_visible'])
 
     def test_independent_checks_detect_local_error_and_unknown_regions(self):
         shifted=cv2.warpAffine(self.rgb,np.array([[1,0,3],[0,1,0]],np.float32),(640,640))
@@ -146,15 +160,18 @@ class Workflow(unittest.TestCase):
         edits=dict(DEFAULT_EDITS,wavelets=[1.5,.5,0,0],wavelet_kernel='b3',usm_amount=.4,
                    usm_radius=1.3,usm_threshold=.005,rotation=19,mirror=True,smoothing=3)
         m,size,_=scene.geometry(edits,factor=.5)
-        expected,_=scene.render_edits(m,size,edits)
-        out=self.root/'sharpened.tif';scene.export(out,edits,factor=.5)
+        expected,_=render(scene,m,size,edits)
+        out=self.root/'sharpened.tif';export(scene,out,edits,factor=.5)
         actual=Image(out).pixels(Image(out).raw)
         self.assertLess(float(np.mean(np.abs(actual-expected))),.0003)
         self.assertLess(float(np.max(np.abs(actual-expected))),.007)
-        original,_=scene.render_edits(m,size,dict(DEFAULT_EDITS,rotation=19,mirror=True))
+        original,_=render(scene,m,size,dict(DEFAULT_EDITS,rotation=19,mirror=True))
         self.assertGreater(float(np.mean(np.abs(actual-original))),.001)
-        self.assertTrue(scene.sharpening_stats(edits)['enabled'])
-        self.assertIsNotNone(scene.sharpening_stats(edits)['fine_variation'])
+        # the sharpening blocks report what they did to the fine detail (/api/analysis)
+        store(self.app.project,edits)
+        readouts=self.app.analysis()['blocks']
+        detail=[readouts[e['id']]['fine_detail'] for e in self.app.project.data['chain']['chains']['luminance'] if e['type'] in ('wavelets','unsharp_mask')]
+        self.assertEqual(len(detail),2);self.assertTrue(all(v>1 for v in detail))
 
     def test_shared_mirror_keeps_all_pixel_centres(self):
         scene=self.built()
@@ -173,10 +190,10 @@ class Workflow(unittest.TestCase):
             edits=dict(DEFAULT_EDITS,rotation=result['rotation'],mirror=result['mirror'])
             matrix,_,_=scene.geometry(edits)
             np.testing.assert_allclose(matrix[:2,:2],result['matrix'],atol=1e-12)
-        before=copy.deepcopy(self.app.project.edits)
+        before=copy.deepcopy(self.app.project.data['geometry'])
         with patch.object(orient,'locate',side_effect=NoUsableLimb('no limb')):
             with self.assertRaises(ValueError):orient.solve(self.app.project,log=lambda s:None)
-        self.assertEqual(self.app.project.edits,before)
+        self.assertEqual(self.app.project.data['geometry'],before)
 
     def test_native_tiff_byte_order_planar_and_white_zero(self):
         pixels=np.round(self.l*65535).astype(np.uint16)
@@ -215,19 +232,19 @@ class Workflow(unittest.TestCase):
     def test_smoothing_retains_luminance_detail(self):
         scene = self.built()
         m, size, _ = scene.geometry(DEFAULT_EDITS)
-        a,_ = scene.render_edits(m,size,DEFAULT_EDITS)
+        a,_ = render(scene,m,size,DEFAULT_EDITS)
         edits = dict(DEFAULT_EDITS,smoothing=8)
-        b,_ = scene.render_edits(m,size,edits)
+        b,_ = render(scene,m,size,edits)
         la = cv2.cvtColor(a,cv2.COLOR_RGB2LAB)[...,0]
         lb = cv2.cvtColor(b,cv2.COLOR_RGB2LAB)[...,0]
         self.assertLess(float(np.mean(np.abs(la-lb))),.15)
-        grey,_ = scene.render_edits(m,size,dict(edits,strength=0))
+        grey,_ = render(scene,m,size,dict(edits,strength=0))
         self.assertLess(float(np.max(np.ptp(grey,axis=2))),.002)
 
     def test_gaps_stay_grey_and_common_crop_avoids_holes(self):
         scene = self.built()
         scene.match[0,2] = 220
-        rgb, info = scene.render_edits(np.eye(3),(640,640),DEFAULT_EDITS)
+        rgb, info = render(scene,np.eye(3),(640,640),DEFAULT_EDITS)
         self.assertGreater(info['missing_colour'],30)
         self.assertLess(float(np.max(np.ptp(rgb[:,:200],axis=2))),.002)
         _,size,box = scene.geometry(dict(DEFAULT_EDITS,coverage='common'))
@@ -241,10 +258,10 @@ class Workflow(unittest.TestCase):
         scene = self.built()
         edits = dict(DEFAULT_EDITS,rotation=17,smoothing=4,saturation=1.7)
         matrix,size,_=scene.geometry(edits)
-        expected,_=scene.render_edits(matrix,size,edits)
+        expected,_=render(scene,matrix,size,edits)
         for ext in ('tif','png'):
             path=self.root/f'export.{ext}'
-            scene.export(path,edits)
+            export(scene,path,edits)
             decoded=Image(path).pixels(Image(path).raw)
             self.assertEqual(decoded.shape,expected.shape)
             self.assertLess(float(np.mean(np.abs(decoded-expected))),.00025)
@@ -253,13 +270,13 @@ class Workflow(unittest.TestCase):
     def test_cancel_does_not_publish_or_overwrite(self):
         scene=self.built();out=self.root/'cancel.tif'
         with self.assertRaises(InterruptedError):
-            scene.export(out,DEFAULT_EDITS,cancelled=lambda:True)
+            export(scene,out,DEFAULT_EDITS,cancelled=lambda:True)
         self.assertFalse(out.exists())
         self.assertFalse(list(self.root.glob('.cancel-*')))
-        with self.assertRaises(ValueError):scene.export(self.lp,DEFAULT_EDITS)
-        scene.export(out,DEFAULT_EDITS)
+        with self.assertRaises(ValueError):export(scene,self.lp,DEFAULT_EDITS)
+        export(scene,out,DEFAULT_EDITS)
         before=out.read_bytes()
-        with self.assertRaises(ValueError):scene.export(out,DEFAULT_EDITS)
+        with self.assertRaises(ValueError):export(scene,out,DEFAULT_EDITS)
         self.assertEqual(out.read_bytes(),before)
 
     def test_failed_set_keeps_other_mosaic(self):
@@ -314,13 +331,13 @@ class Workflow(unittest.TestCase):
             self.assertTrue(info['preview'].startswith('data:image/png;base64,'))
             # the JPEG ceiling the dialog pre-flights with is the one export() enforces
             self.assertEqual((info['jpeg_max_side'],info['jpeg_max_pixels']),(lrgb.JPEG_MAX_SIDE,lrgb.JPEG_MAX_PIXELS))
-            edits,layer,factor=self.app.export_options(p.edits,dict(coverage='common',factor=.5,layer='luminance'))
-            output=self.root/'preview-match.tif';scene.export(output,edits,factor,layer)
+            geometry,layer,factor=self.app.export_options(p.data['geometry'],p.layers,dict(coverage='common',factor=.5,layer='luminance'))
+            output=self.root/'preview-match.tif';scene.export(output,p.chain_doc(),geometry,p.layers,factor,layer)
             a=tifffile.imread(output)
             self.assertEqual(a.shape[:2],(info['height'],info['width']))
             self.assertEqual(info['raw_bytes'],a.nbytes)
             self.assertEqual(p.data,before)
-            with self.assertRaises(ValueError):self.app.export_options(p.edits,dict(factor=.1))
+            with self.assertRaises(ValueError):self.app.export_options(p.data['geometry'],p.layers,dict(factor=.1))
         finally:
             srv.shutdown();srv.server_close();t.join()
 
@@ -334,11 +351,11 @@ class Workflow(unittest.TestCase):
         shapes=[]
         for layer in ('composite','luminance','colour'):
             out=self.root/f'{layer}.tif'
-            scene.export(out,edits,factor=.5,layer=layer)
+            export(scene,out,edits,factor=.5,layer=layer)
             image=tifffile.imread(out);shapes.append(image.shape)
             if layer=='luminance':self.assertLess(np.ptp(image.astype(int),axis=2).max(),120)
         self.assertEqual(shapes[0],shapes[1]);self.assertEqual(shapes[1],shapes[2])
-        scene.export(self.root/'small.jpg',edits,factor=.5)
+        export(scene,self.root/'small.jpg',edits,factor=.5)
         self.assertEqual(Image(self.root/'small.jpg').raw.shape,shapes[0])
 
     def test_upload_validates_mono_and_survives_project_move(self):
@@ -377,15 +394,15 @@ class Workflow(unittest.TestCase):
 
     def test_missing_colour_reopens_luminance_without_stale_common_crop(self):
         self.built();p=self.app.project
-        p.edits=dict(p.edits,coverage='common',l_visible=False);p.save();self.app.close()
+        p.set_geometry(dict(coverage='common'));p.set_view(dict(l_visible=False));p.save();self.app.close()
         p.path('derived/colour_canvas.tif').rename(p.path('derived/colour_canvas.moved.tif'))
         self.app.select(p.folder)
         restored=self.app.project
         self.assertEqual(restored.stream('colour')['state'],'missing')
         self.assertIsNone(restored.match)
-        self.assertEqual(restored.edits['coverage'],'full')
-        self.assertTrue(restored.edits['l_visible'])
-        pixels,info=self.app.get_scene().preview(restored.edits)
+        self.assertEqual(restored.data['geometry']['coverage'],'full')
+        self.assertTrue(restored.layers['l_visible'])
+        pixels,info=self.app.get_scene().preview(restored.chain_doc(),restored.data['geometry'],restored.layers)
         self.assertEqual((info['width'],info['height']),(640,640))
         self.assertLess(np.ptp(pixels,axis=2).max(),.001)
 
@@ -405,7 +422,7 @@ class Workflow(unittest.TestCase):
             with self.assertRaises(urllib.error.HTTPError):request('api/state',origin='https://evil.example')
             p=self.app.project.data
             with self.assertRaises(urllib.error.HTTPError) as caught:
-                request('api/edits',dict(id=p['id'],revision=-1,edits=DEFAULT_EDITS))
+                request('api/chain',dict(id=p['id'],revision=-1,chain=chain.empty()))
             self.assertEqual(caught.exception.code,409)
             with request(f'api/viewport?id={p["id"]}&x=20&y=30&w=400&h=300&scale=1') as r:
                 image=cv2.imdecode(np.frombuffer(r.read(),np.uint8),cv2.IMREAD_UNCHANGED)

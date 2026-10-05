@@ -27,6 +27,21 @@ from app import Application, start_server
 from project import DEFAULT_EDITS, Project, edits_to_chain
 from synthetic import lunar_disk
 
+def doc_of(edits):
+    """Old flat adjustments as the chain a schema-3 project migrates to (Appendix D)."""
+    return edits_to_chain(dict(DEFAULT_EDITS, **edits))[0]
+
+
+GEO = lambda e: {k: e[k] for k in ('rotation', 'mirror', 'coverage')}
+LAYERS = lambda e: {k: e[k] for k in ('l_visible', 'rgb_visible')}
+
+
+def store(p, edits):
+    p.set_chain(doc_of(edits))
+    p.set_geometry(GEO(edits))
+    p.set_view(LAYERS(edits))
+
+
 SHARP = dict(DEFAULT_EDITS, wavelets=[1.5, .5, 0, 0], wavelet_kernel='b3', wavelet_denoise=1.0, usm_amount=.4,
              usm_radius=1.3, usm_threshold=.005, highlights=.5, contrast=.3, smoothing=2, saturation=1.7, strength=.9)
 
@@ -91,7 +106,9 @@ class Migration(unittest.TestCase):
                          wavelet_denoise=1.5, usm_amount=.3, usm_radius=1.4, usm_threshold=.02, l_visible=False,
                          rgb_visible=False)
             self.assertTrue(all(edits[k] != DEFAULT_EDITS[k] for k in DEFAULT_EDITS))
-            sets = p.public()['sets']                      # the schema-3 shape: sets by key with their build state
+            own = lambda key: {k: v for k, v in p.set(key).items() if k not in ('id', 'stream', 'label')}
+            state = lambda name: {k: v for k, v in p.stream(name).items() if k not in ('legacy_match', 'placement')}
+            sets = {'L': dict(state('luminance'), **own('L')), 'RGB': dict(state('colour'), **own('RGB'))}   # schema 3
             old = dict(version=3, id=p.data['id'], name=p.data['name'], created=p.data['created'],
                        updated=p.data['updated'], revision=7, sets=sets, match=p.match, orientation=None, edits=edits)
             folder = p.folder
@@ -104,7 +121,7 @@ class Migration(unittest.TestCase):
             self.assertEqual(d['version'], 4)
             self.assertEqual((folder/'project.v3.json').read_bytes(), original)
             self.assertEqual(d['revision'], 8)                       # saved once
-            self.assertEqual(q.edits, edits)
+            self.assertNotIn('legacy_edits', d)                     # the chain holds them now
             self.assertEqual(q.match, old['match'])
             self.assertEqual(d['geometry'], dict(rotation=12.0, mirror=True, coverage='common'))
             self.assertEqual(d['view'], dict(l_visible=False, rgb_visible=False))
@@ -173,13 +190,13 @@ class Rendering(unittest.TestCase):
 
     def export(self, name, edits, factor=1):
         out = self.f.root/name
-        self.f.app.get_scene().export(out, edits, factor)
+        self.f.app.get_scene().export(out, doc_of(edits), GEO(edits), LAYERS(edits), factor)
         return tifffile.imread(out).astype(np.int32)
 
     def test_t_preview_equals_export_in_process_and_over_http(self):
         p, scene = self.f.app.project, self.f.app.get_scene()
         edits = dict(SHARP, rotation=23.7)
-        p.edits = edits
+        store(p, edits)
         p.save()
         full = self.export('preview-full.tif', edits)
         x, y, w, h = 310, 420, 700, 500
@@ -249,24 +266,92 @@ class Clients(unittest.TestCase):
         try:
             with request('api/state') as r:
                 seen = json.load(r)['project']
-            a = dict(seen['edits'], saturation=2.0)
-            b = dict(seen['edits'], smoothing=3.0)
-            with request('api/edits', dict(id=seen['id'], revision=seen['revision'], edits=a)) as r:
+            a, b = doc_of(dict(saturation=2.0)), doc_of(dict(smoothing=3.0))
+            with request('api/chain', dict(id=seen['id'], revision=seen['revision'], chain=a)) as r:
                 self.assertEqual(r.status, 200)
             with self.assertRaises(urllib.error.HTTPError) as caught:
-                request('api/edits', dict(id=seen['id'], revision=seen['revision'], edits=b))
+                request('api/chain', dict(id=seen['id'], revision=seen['revision'], chain=b))
             self.assertEqual(caught.exception.code, 409)
             with caught.exception as answer:
                 self.assertTrue(json.load(answer)['conflict'])
             with request('api/state') as r:
                 now = json.load(r)['project']
-            self.assertEqual((now['edits']['saturation'], now['edits']['smoothing']), (2.0, 0.0))
-            self.assertEqual(now['schema4']['chain']['chains']['colour'][0]['params']['factor'], 2.0)
-            # the second client keeps its edit (ui_autosave checks the shipped JavaScript does) and retries
-            retry = dict(now['edits'], smoothing=3.0)
-            with request('api/edits', dict(id=now['id'], revision=now['revision'], edits=retry)) as r:
+            colour = lambda project: [(e['type'], e['params'].get('factor', e['params'].get('sigma')))
+                                      for e in project['chain']['chains']['colour']]
+            self.assertEqual(colour(now), [('saturation', 2.0)])          # the first client's chain stands
+            # the second client keeps its edit (ui_autosave checks the shipped JavaScript does) and sends it again
+            with request('api/chain', dict(id=now['id'], revision=now['revision'], chain=b)) as r:
                 final = json.load(r)['project']
-            self.assertEqual((final['edits']['saturation'], final['edits']['smoothing']), (2.0, 3.0))
+            self.assertEqual(colour(final), [('gaussian_blur', 3.0)])
+        finally:
+            stop()
+            f.close()
+
+
+class Routes(unittest.TestCase):
+    """The phase-7 routes the interface uses (plan §4.7)."""
+
+    def test_catalogue_chain_geometry_previews_files_notes_and_readouts(self):
+        f = Fixture()
+        request, stop = server(f.app)
+        try:
+            get = lambda path: json.load(request(path))
+            pid = f.app.project.data['id']
+            post = lambda route, **body: json.load(request(route, dict(id=pid, revision=f.app.project.data['revision'], **body)))
+            blocks = {b['type']: b for b in get('api/blocks')['blocks']}
+            self.assertEqual(len(blocks), 11)
+            wave = {x['name']: x for x in blocks['wavelets']['params']}
+            self.assertEqual((wave['biases']['min'], wave['biases']['max'], wave['biases']['unit']), (-1, 15, 'PixInsight bias'))
+            self.assertIn('luminance', blocks['saturation']['refusals'])          # greyed there, with the reason
+            self.assertIn('colour', blocks['saturation']['refusals']['luminance'])
+            # a chain from the editor
+            doc = chain.empty()
+            doc['chains']['luminance'] = [chain.entry('wavelets', {'biases': [.3, .1]})]
+            doc['chains']['colour'] = [chain.entry('white_balance', {})]
+            doc['chains']['final'] = [chain.entry('curves', {'points': [[0, 0], [128, 150], [255, 255]]})]
+            state = post('api/chain', chain=doc)
+            self.assertEqual([e['type'] for e in state['project']['chain']['chains']['final']], ['curves'])
+            with self.assertRaises(urllib.error.HTTPError) as bad:
+                post('api/chain', chain=dict(doc, chains=dict(doc['chains'], luminance=[chain.entry('saturation', {})])))
+            with bad.exception as answer:
+                self.assertIn('luminance', json.load(answer)['error'])
+            readouts = get(f'api/analysis?id={pid}')['blocks']
+            self.assertEqual(readouts[doc['chains']['luminance'][0]['id']]['gains'], [4.0, 2.0])
+            self.assertEqual(len(readouts[doc['chains']['final'][0]['id']]['histogram']), 256)
+            self.assertEqual(len(readouts[doc['chains']['colour'][0]['id']]['g']), 3)
+            # previews in view px follow a rotation, keeping their size
+            post('api/previews', op='add', preview=dict(name='Copernicus', x=300, y=200, w=256, h=192))
+            post('api/previews', op='add', preview=dict(x=600, y=500, w=128, h=128))
+            previews = f.app.project.data['chain']['previews']
+            self.assertEqual([(v['id'], v['name']) for v in previews], [('p01', 'Copernicus'), ('p02', 'Preview 2')])
+            scene = f.app.get_scene()
+            old = scene.geometry(f.app.project.data['geometry'])[0]
+            centre = np.linalg.inv(old) @ [300 + 128, 200 + 96, 1]          # canvas px under p01's centre
+            post('api/geometry', geometry=dict(rotation=30.0, mirror=True))
+            moved = f.app.project.data['chain']['previews'][0]
+            new = scene.geometry(f.app.project.data['geometry'])[0]
+            np.testing.assert_allclose(new @ centre, [moved['x'] + 128, moved['y'] + 96, 1], atol=1)
+            self.assertEqual((moved['w'], moved['h']), (256, 192))
+            post('api/geometry', view=dict(rgb_visible=False))
+            self.assertEqual(f.app.project.layers, dict(l_visible=True, rgb_visible=False))
+            post('api/previews', op='update', preview=dict(id='p02', name='Plato'))
+            post('api/previews', op='delete', preview=dict(id='p01'))
+            self.assertEqual([v['name'] for v in f.app.project.data['chain']['previews']], ['Plato'])
+            # chain files: exported as a chain document, imported with fresh ids and this project's previews
+            exported = get(f'api/chain-file?id={pid}')
+            self.assertEqual((exported['format'], exported['version']), (chain.FORMAT, chain.VERSION))
+            imported = json.loads(json.dumps(exported))
+            imported['previews'] = []
+            post('api/chain-file', chain=imported)
+            ch = f.app.project.data['chain']
+            self.assertNotEqual(ch['chains']['final'][0]['id'], exported['chains']['final'][0]['id'])
+            self.assertEqual([v['name'] for v in ch['previews']], ['Plato'])
+            # the placement report, panel by panel, and the migration notes, shown once
+            rows = get(f'api/placement?id={pid}')['panels']
+            self.assertEqual(rows[0]['state'], 'placed')
+            f.app.project.data['notes'] = ['Something changed.']
+            post('api/notes')
+            self.assertEqual(f.app.project.data['notes'], [])
         finally:
             stop()
             f.close()
@@ -279,10 +364,10 @@ class Worker(unittest.TestCase):
         try:
             p, scene = f.app.project, f.app.get_scene()
             edits = dict(SHARP, rotation=23.7)
-            p.edits = edits
+            store(p, edits)
             p.save()
             reference = f.root/'reference.tif'
-            scene.export(reference, edits)
+            scene.export(reference, doc_of(edits), GEO(edits), LAYERS(edits))
             paused, release = threading.Event(), threading.Event()
             update = f.app.update_job
 
@@ -295,8 +380,8 @@ class Worker(unittest.TestCase):
             with request('api/export', dict(id=p.data['id'], output=str(f.root/'during.tif'))) as r:
                 self.assertEqual(json.load(r)['job']['state'], 'running')
             self.assertTrue(paused.wait(60))                       # the export has written its first band
-            moved = dict(edits, saturation=2.6, wavelets=[2.0, .5, 0, 0])
-            with request('api/edits', dict(id=p.data['id'], revision=p.data['revision'], edits=moved)) as r:
+            moved = doc_of(dict(edits, saturation=2.6, wavelets=[2.0, .5, 0, 0]))
+            with request('api/chain', dict(id=p.data['id'], revision=p.data['revision'], chain=moved)) as r:
                 self.assertEqual(r.status, 200)
             new_key = scene.stats_key(chain.normalised(p.chain_doc()))
             for _ in range(600):                                   # the worker computes the new statistics meanwhile

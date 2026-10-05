@@ -1,5 +1,6 @@
 """Phase 2 acceptance (plan §5, phase 2): T-TILE, T-ATWT, T-USM, T-MERGE-ID, T-SPACE, T-MOVIE, validation and
 the chain compiled from lunar_finish's flags. T-GOLD lives in golden.py."""
+import copy
 import json
 import os
 from pathlib import Path
@@ -170,6 +171,49 @@ class Documents(unittest.TestCase):
         self.assertEqual(sat['limb_fade_px'], 1.0)          # the old taper divided by max(taper, 1)
         smooth_only = chain.default_chain(NS(**dict(FLAGS, saturation_passes=0)), False)['chains']['final'][1]
         self.assertEqual((smooth_only['type'], smooth_only['params']['passes']), ('saturation', 0))
+
+
+class Prefix(unittest.TestCase):
+    """Plan §4.5 (phase 7): a changed block restarts the statistics there; the result equals a fresh pass."""
+
+    @staticmethod
+    def equal(a, b):
+        if isinstance(a, dict):
+            return a.keys() == b.keys() and all(Prefix.equal(a[k], b[k]) for k in a)
+        if isinstance(a, (list, tuple)):
+            return len(a) == len(b) and all(Prefix.equal(x, y) for x, y in zip(a, b))
+        if isinstance(a, np.ndarray):
+            return np.array_equal(a, b)
+        return a == b
+
+    def test_resumed_statistics_equal_a_fresh_pass_and_skip_what_did_not_change(self):
+        source = chain.ArraySource(lunar_disk(1024)['image'])
+        doc = chain.empty()
+        doc['chains']['luminance'] = [chain.entry('deconvolution', {'iterations': 10}), chain.entry('highlights', {}),
+                                      chain.entry('wavelets', {'biases': [.3, .1]})]
+        doc['chains']['colour'] = [chain.entry('saturation', {'factor': 1.5})]
+        doc['chains']['final'] = [chain.entry('curves', {'points': [[0, 0], [128, 140], [255, 255]]}), chain.entry('contrast', {})]
+        calls = []
+        applied = {t: B.BLOCKS[t]._apply for t in ('deconvolution', 'highlights', 'wavelets', 'curves', 'contrast')}
+        try:
+            for t, f in applied.items():
+                B.BLOCKS[t]._apply = (lambda f, t: lambda *a, **k: (calls.append(t), f(*a, **k))[1])(f, t)
+            cache = chain.PrefixCache()
+            chain.prepare(source, doc, cache=cache, tag='t')
+            for change, recomputed in (
+                    (lambda d: d['chains']['final'][1]['params'].update(strength=.2), {'contrast'}),
+                    (lambda d: d['chains']['luminance'][2]['params'].update(biases=[.5, .1]), {'wavelets', 'curves', 'contrast'})):
+                changed = copy.deepcopy(doc)
+                change(changed)
+                calls.clear()
+                resumed = chain.prepare(source, changed, cache=cache, tag='t')
+                self.assertEqual(set(calls), recomputed)            # the deconvolution never runs again
+                fresh = chain.prepare(source, changed)
+                self.assertTrue(self.equal(resumed.blocks, fresh.blocks))
+                self.assertTrue(self.equal(resumed.readouts, fresh.readouts))
+        finally:
+            for t, f in applied.items():
+                B.BLOCKS[t]._apply = f
 
 
 class CommandLine(unittest.TestCase):

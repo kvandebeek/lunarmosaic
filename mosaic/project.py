@@ -2,9 +2,8 @@
 
 Schema 4 (plan §4.6): a list of panel sets, each feeding a stream — any number of luminance sets, built jointly
 into one luminance mosaic on the finest set's grid (phase 5), and the colour set; the build state of each stream;
-geometry (rotation, mirror, coverage) and view (layer visibility) kept apart from the editing chain. Until the
-interface moves to chains (plan phase 7) it still edits the flat adjustments of schema 3: they live in
-`legacy_edits`, and every change regenerates the chain from them.
+geometry (rotation, mirror, coverage) and view (layer visibility) kept apart from the editing chain, which the
+interface edits block by block (phase 7). A schema-3 project's flat adjustments become its first chain.
 
 Projects of schema 1–3 are migrated once, on opening, and the original file is kept as project.v<N>.json.
 """
@@ -184,18 +183,22 @@ def migrate(data):
         sets.append(dict(new_set(key, stream, label), **part, id=key, stream=stream))
         streams[stream] = dict(new_stream(), **state)
     streams['colour']['legacy_match'] = data.get('match')
+    Project.validate_edits(edits)
     doc, notes = edits_to_chain(edits)
     out = dict(version=SCHEMA, id=data['id'], name=data.get('name', 'Untitled Moon'), created=data.get('created', now()),
                updated=data.get('updated', now()), revision=data.get('revision', 0), sets=sets, **streams,
                orientation=data.get('orientation'),
                geometry={k: edits[k] for k in GEOMETRY_KEYS}, view={k: edits[k] for k in VIEW_KEYS},
-               legacy_edits={k: v for k, v in edits.items() if k not in GEOMETRY_KEYS + VIEW_KEYS},
                chain=chain_part(doc), notes=notes)
     return out, notes
 
 
 def from_phase4(data):
-    """The first schema-4 layout (phase 4, never released) kept build state in each set: move it to the streams."""
+    """Earlier schema-4 layouts (phases 4–6, never released): build state in each set moves to the streams, and the
+    flat adjustments the interface edited until phase 7 are dropped — the chain already holds them."""
+    if 'legacy_edits' in data:
+        data = copy.deepcopy(data)
+        del data['legacy_edits']
     if 'luminance' in data or not any('state' in s for s in data.get('sets', [])):
         return data
     data = copy.deepcopy(data)
@@ -223,7 +226,6 @@ class Project:
                              revision=0, sets=[new_set('L', 'luminance', 'Luminance'), new_set('RGB', 'colour', 'Colour')],
                              luminance=new_stream(), colour=dict(new_stream(), legacy_match=None), orientation=None,
                              geometry={k: edits[k] for k in GEOMETRY_KEYS}, view={k: edits[k] for k in VIEW_KEYS},
-                             legacy_edits={k: v for k, v in edits.items() if k not in GEOMETRY_KEYS + VIEW_KEYS},
                              chain=chain_part(chain.empty()), notes=[]))
         (folder / 'derived').mkdir()
         p.save()
@@ -285,9 +287,8 @@ class Project:
         for key, keys in (('geometry', GEOMETRY_KEYS), ('view', VIEW_KEYS)):
             if not isinstance(d.get(key), dict) or set(d[key]) != set(keys):
                 raise ValueError(f'The project\'s {key} is invalid.')
-        if not isinstance(d.get('colour'), dict) or not isinstance(d.get('legacy_edits'), dict):
-            raise ValueError('The project is missing its colour or adjustment settings.')
-        self.validate_edits(self.edits)
+        self.validate_geometry(d['geometry'])
+        self.validate_view(d['view'])
         problems = chain.validate(self.chain_doc()) if isinstance(d.get('chain'), dict) else [(None, 'It has none.')]
         if problems:
             raise ValueError('The project\'s chain is invalid: ' + ' '.join(r for _, r in problems))
@@ -356,21 +357,48 @@ class Project:
         if value is None:
             c['legacy_match'] = None
 
-    @property
-    def edits(self):
-        """The flat schema-3 adjustments the current interface edits: legacy_edits plus geometry and view."""
-        return dict(copy.deepcopy(self.data['legacy_edits']), **self.data['geometry'], **self.data['view'])
+    @staticmethod
+    def validate_geometry(g):
+        if not isinstance(g, dict) or set(g) != set(GEOMETRY_KEYS):
+            raise ValueError('Geometry is rotation, mirror and coverage.')
+        r = g['rotation']
+        if isinstance(r, bool) or not isinstance(r, (int, float)) or not math.isfinite(r) or not -180 <= r <= 180:
+            raise ValueError('Rotation must be between -180 and 180 degrees.')
+        if not isinstance(g['mirror'], bool):
+            raise ValueError('Mirror must be on or off.')
+        if g['coverage'] not in ('full', 'common'):
+            raise ValueError('Choose full or common coverage.')
 
-    @edits.setter
-    def edits(self, edits):
-        self.validate_edits(edits)
-        self.data['legacy_edits'] = {k: copy.deepcopy(v) for k, v in edits.items() if k not in GEOMETRY_KEYS + VIEW_KEYS}
-        self.data['geometry'] = {k: edits[k] for k in GEOMETRY_KEYS}
-        self.data['view'] = {k: edits[k] for k in VIEW_KEYS}
-        doc = edits_to_chain(edits)[0]
-        old = self.data.get('chain') or {}
-        doc.update(protect_space=old.get('protect_space', True), previews=copy.deepcopy(old.get('previews', [])))
+    @staticmethod
+    def validate_view(v):
+        if not isinstance(v, dict) or set(v) != set(VIEW_KEYS) or any(not isinstance(v[k], bool) for k in VIEW_KEYS):
+            raise ValueError('Layer visibility must be on or off for luminance and colour.')
+
+    def set_geometry(self, g):
+        g = dict(self.data['geometry'], **g)
+        self.validate_geometry(g)
+        self.data['geometry'] = {k: g[k] for k in GEOMETRY_KEYS}
+
+    def set_view(self, v):
+        v = dict(self.data['view'], **v)
+        self.validate_view(v)
+        self.data['view'] = {k: v[k] for k in VIEW_KEYS}
+
+    def set_chain(self, doc, keep_previews=True):
+        """A chain document from the editor: validated, stored without format and version; the preview rectangles
+        stay the project's unless the document brings its own (an imported chain file)."""
+        problems = chain.validate(doc)
+        if problems:
+            raise ValueError(' '.join(r if i is None else f'Block {i}: {r}' for i, r in problems))
+        doc = chain.normalised(doc)
+        if keep_previews:
+            doc['previews'] = copy.deepcopy(self.data['chain'].get('previews', []))
         self.data['chain'] = chain_part(doc)
+
+    @property
+    def layers(self):
+        """Layer visibility (schema 4's `view`)."""
+        return dict(self.data['view'])
 
     def chain_doc(self):
         part = self.data['chain']
@@ -414,15 +442,5 @@ class Project:
                 os.unlink(name)
 
     def public(self):
-        """For the interface: the schema-3 shape it reads today (sets by key, match, edits), with the schema-4 data
-        alongside under `schema4`. Phase 7 drops the schema-3 part."""
-        d = self.data
-
-        def legacy(key):            # a schema-3 set: the set's own fields plus its stream's build state
-            st = {k: v for k, v in d[self.set(key)['stream']].items() if k not in ('legacy_match', 'placement')}
-            return copy.deepcopy(dict(st, **{k: v for k, v in self.set(key).items() if k not in ('id', 'stream', 'label')}))
-        return dict(version=d['version'], id=d['id'], name=d['name'], created=d['created'], updated=d['updated'],
-                    revision=d['revision'], folder=str(self.folder), orientation=copy.deepcopy(d['orientation']),
-                    sets={'L': legacy('L'), 'RGB': legacy('RGB')},
-                    match=copy.deepcopy(self.match), edits=self.edits, notes=list(d.get('notes', [])),
-                    schema4=copy.deepcopy(d))
+        """For the interface: the project as stored, with its folder and the active colour match."""
+        return dict(copy.deepcopy(self.data), folder=str(self.folder), match=copy.deepcopy(self.match))

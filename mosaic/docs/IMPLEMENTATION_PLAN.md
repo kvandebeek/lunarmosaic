@@ -251,7 +251,8 @@ mosaics (path, size, mtime), colour-placement revision, and the chain prefix up 
 rotation, coverage or export scale. Per block, keep the stats **and** the proxy/probe pixels after that block,
 so a parameter change restarts from that block; drop the oldest prefixes beyond a 2 GB budget. *(As built in
 phase 4: whole-chain statistics are cached — four per scene — and the source proxies, the slowest part, are
-reused across chains; the restart from the first changed block is phase 7, item 9.)*
+reused across chains. As built in phase 7, item 9: the per-block restart, as described; in the proxy pass a
+detail block's place in the key is empty, since detail blocks are skipped there.)*
 
 **The statistics worker** is not a job: `Application.start()` allows one job at a time and refuses others, so a
 slider move during an export would fail. Use one background thread with a generation counter; the newest
@@ -740,6 +741,17 @@ carry.
 set → build → placement chip shows measured numbers → add wavelets, white balance and curves → draw a preview →
 change a parameter (every preview re-renders) → rotate the view (previews follow) → reload the page (state
 identical) → export TIFF → reopen project. Keyboard reordering works. No console errors.
+
+**As built (2026-10-05).** All of the above (DESIGN.md §9, phase 7), with these choices. Modules: `mosaic.js`,
+`chains.js`, `previews.js`, `save.js`; the block catalogue, `/api/blocks`, is derived from `blocks.BLOCKS` by
+`block_catalog.py`. Every change goes through one request queue carrying the revision it was made on; a chain
+edit is saved 300 ms after the last, a conflict or a lost connection is retried, and a chain the server refuses
+waits, with the reason shown, for the next edit. Starting to draw hides the 1:1 viewer, so the canvas is free.
+The resolution view's legend comes with `/api/geometry` (`sets`). Fixed on the way: a quarter turn made the view
+2 px too large (floating point in the bounding box), the browser refused the autosave's unbound `setTimeout`, and
+the server answered connections a page had dropped. The journey is `ui_journey.py` (headless Chrome over the
+DevTools protocol, Node's own WebSocket), and also checks the per-panel table, the set legend, a chain-file
+import and close-and-reopen; `ui_autosave.py` tests `save.js` directly.
 
 ### Phase 8 — CLI parity and documentation
 

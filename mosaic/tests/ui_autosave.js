@@ -1,165 +1,214 @@
+// Autosave behaviour of the shipped ui/save.js (plan phase 7, item 6; BUGS.md bug 11): Node, no npm packages.
+//
+//   node ui_autosave.js SCENARIO
+//
+// The module is loaded as it ships; the server and the timers are fakes the scenario drives step by step.
 'use strict';
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const vm = require('node:vm');
 
 const settle = () => new Promise(resolve => setImmediate(resolve));
+const conflict = () => Object.assign(new Error('The project changed elsewhere.'), {status: 409, conflict: true});
+const refused = () => Object.assign(new Error('Block 1: black must be below white.'), {status: 400, retry: false});
 
-async function editor() {
-  const nodes = new Map(), groups = new Map(), timers = new Map();
-  let timerId = 0;
-  function element(selector) {
-    if (!nodes.has(selector)) nodes.set(selector, {
-      value:'', textContent:'', dataset:{}, style:{}, hidden:false,
-      classList:{add(){},remove(){},toggle(){}},
-      append(){}, replaceChildren(){}, setAttribute(){},
-      querySelector:element, querySelectorAll:s=>groups.get(s)||[],
-      parentElement:{querySelector:element},
-    });
-    return nodes.get(selector);
-  }
-  const controls = ['saturation','smoothing','strength'].map(key => {
-    const el = element(`[data-edit="${key}"]`); el.dataset.edit=key; return el;
+async function harness() {
+  const source = fs.readFileSync(path.join(__dirname, '../ui/save.js'), 'utf8');
+  const {Autosave} = await import('data:text/javascript,' + encodeURIComponent(source));
+  const requests = [], timers = new Map(), states = [];
+  let next = 0;
+  const saver = new Autosave({
+    send: doc => new Promise((resolve, reject) => requests.push({doc: structuredClone(doc), resolve, reject})),
+    schedule: (fn, ms) => { timers.set(++next, {fn, ms}); return next; },
+    cancel: id => timers.delete(id),
+    onState: s => states.push({...s}),
   });
-  const waves = Array.from({length:4}, (_,i) => {
-    const el = element(`[data-wave="${i}"]`); el.dataset.wave=String(i); return el;
-  });
-  groups.set('[data-edit]', controls);
-  groups.set('[data-wave]', waves);
-  const requests = [];
-  const server = {project:{id:'autosave-test',name:'Test Moon',folder:'/test/moon',revision:1,
-    sets:Object.fromEntries(['L','RGB'].map(key=>[key,{state:'empty',mosaic:null,inputs:[],optics:{}}])),
-    match:null,orientation:null,edits:null},job:{state:'idle'}};
-  const harness = {server,requests,offline:false};
-  const response = (data,ok=true) => ({ok,json:async()=>structuredClone(data)});
-  const context = vm.createContext({
-    console, structuredClone, URLSearchParams,
-    document:{querySelector:element,querySelectorAll:s=>groups.get(s)||[],
-      createElement:()=>element(Symbol()),createTextNode:text=>({textContent:text}),
-      body:{classList:{add(){},remove(){},toggle(){}}},documentElement:{},addEventListener(){}},
-    window:{addEventListener(){}},
-    setTimeout:fn=>{timers.set(++timerId,fn);return timerId;},
-    clearTimeout:id=>timers.delete(id),setInterval(){},
-    fetch:async(url,options)=>{
-      if (url==='/api/state') {
-        if (harness.offline) throw new Error('Connection lost');
-        return response(server);
-      }
-      assert.equal(url,'/api/edits');
-      return new Promise((resolve,reject)=>requests.push({body:JSON.parse(options.body),resolve,reject}));
-    },
-  });
-  const source = fs.readFileSync(path.join(__dirname,'../ui/mosaic.js'),'utf8');
-  // Run the complete shipped script, including input handlers, rendering and fetch parsing.
-  vm.runInContext(source, context, {filename:'mosaic.js'});
-  server.project.edits = JSON.parse(vm.runInContext('JSON.stringify(defaultEdits)',context));
-  await settle();
-  assert.equal(Number(controls[0].value),1,'The editor must finish loading before the first input');
-
-  harness.input = (key,value) => {
-    const el=element(`[data-edit="${key}"]`);el.value=String(value);el.oninput();
-  };
-  harness.wave = (index,value) => {waves[index].value=String(value);waves[index].oninput();};
-  harness.flush = () => vm.runInContext('flushEdits()',context);
-  harness.poll = () => vm.runInContext('poll()',context);
-  harness.value = key => Number(element(`[data-edit="${key}"]`).value);
-  harness.waveValues = () => waves.map(el=>Number(el.value));
-  harness.saved = () => element('#saved').textContent;
-  harness.accept = index => {
-    const request=requests[index];assert.ok(request,'Expected a save request');
-    assert.equal(request.body.revision,server.project.revision);
-    server.project.edits=structuredClone(request.body.edits);server.project.revision++;
-    request.resolve(response(server));
-  };
-  harness.conflict = index => {
-    server.project.revision++;
-    requests[index].resolve(response({error:'Revision conflict'},false));
-  };
-  return harness;
+  const h = {saver, requests, timers, states};
+  h.timer = () => { assert.equal(timers.size, 1, 'Expected exactly one armed timer'); return [...timers.values()][0]; };
+  h.fire = async () => { const [id, t] = [...timers.entries()][0]; timers.delete(id); t.fn(); await settle(); };
+  h.accept = async i => { requests[i].resolve(); await settle(); };
+  h.fail = async (i, e) => { requests[i].reject(e); await settle(); };
+  h.last = () => states[states.length - 1];
+  return h;
 }
 
-async function retry(h,index,expected) {
-  const saving=h.flush();
-  assert.equal(h.requests.length,index+1);
-  for (const [key,value] of Object.entries(expected)) assert.deepEqual(h.requests[index].body.edits[key],value);
-  h.accept(index);await saving;
-  assert.equal(h.saved(),'Saved locally');
-  for (const [key,value] of Object.entries(expected)) assert.deepEqual(h.server.project.edits[key],value);
-}
+const doc = (extra = {}) => ({format: 'lunarmosaic-chain', version: 1, protect_space: true, chains: {luminance: [], colour: [], merge: {strength: 1}, final: []}, ...extra});
+const wavelets = biases => doc({chains: {luminance: [{id: 'a1b2c3d4', type: 'wavelets', enabled: true, limb_fade_px: 0, params: {biases, kernel: 'linear', denoise: [0, 0, 0, 0]}}], colour: [], merge: {strength: 1}, final: []}});
 
 const scenarios = {
+  // a failed save keeps the document on screen and sends it again on its own
   async single_failure() {
-    const h=await editor();h.input('saturation',2);
-    const saving=h.flush(), failed=assert.rejects(saving,/Revision conflict/);
-    h.conflict(0);await failed;
-    assert.equal(h.value('saturation'),2);assert.match(h.saved(),/^Not saved/);
-    await retry(h,1,{saturation:2});
+    const h = await harness();
+    const A = doc({protect_space: false});
+    h.saver.change(A);
+    assert.equal(h.timer().ms, 300, 'Saved after 300 ms of quiet');
+    await h.fire();
+    assert.equal(h.requests.length, 1);
+    await h.fail(0, conflict());
+    assert.deepEqual(h.saver.working, A, 'The failed document stays on screen');
+    assert.ok(h.saver.busy);
+    assert.equal(h.last().failed, 'The project changed elsewhere.');
+    assert.equal(h.last().retrying, true);
+    assert.equal(h.timer().ms, 2000, 'Sent again after 2 s');
+    await h.fire();
+    assert.deepEqual(h.requests[1].doc, A);
+    await h.accept(1);
+    assert.equal(h.saver.busy, false);
+    assert.equal(h.last().failed, null);
+    assert.equal(h.timers.size, 0);
   },
+
+  // an edit made while a save is out wins over the failed one, and is sent as soon as possible
   async different_fields_failure() {
-    const h=await editor();h.input('saturation',2);
-    const saving=h.flush(), failed=assert.rejects(saving,/Revision conflict/);
-    h.input('smoothing',3);h.conflict(0);await failed;
-    assert.equal(h.value('saturation'),2);assert.equal(h.value('smoothing'),3);
-    assert.match(h.saved(),/^Not saved/);
-    await retry(h,1,{saturation:2,smoothing:3});
+    const h = await harness();
+    const A = doc({protect_space: false}), B = doc({protect_space: false, chains: {...doc().chains, merge: {strength: .5}}});
+    h.saver.change(A);
+    await h.fire();
+    h.saver.change(B);
+    await h.fail(0, conflict());
+    assert.deepEqual(h.saver.working, B);
+    assert.equal(h.timer().ms, 300, 'The newer edit goes out after the usual quiet time, not the retry delay');
+    await h.fire();
+    assert.deepEqual(h.requests[1].doc, B, 'Both changes are in the document sent again');
+    await h.accept(1);
+    assert.equal(h.saver.busy, false);
   },
+
+  // an edit made while a save is out follows it; the document sent first is not changed afterwards
   async different_fields_success() {
-    const h=await editor();h.input('saturation',2);
-    const saving=h.flush();h.input('smoothing',3);h.accept(0);await settle();
-    assert.equal(h.requests.length,2);
-    assert.equal(h.requests[1].body.edits.saturation,2);
-    assert.equal(h.requests[1].body.edits.smoothing,3);
-    assert.equal(h.requests[0].body.edits.smoothing,0,'The submitted snapshot must not change');
-    h.accept(1);await saving;
-    assert.equal(h.value('saturation'),2);assert.equal(h.value('smoothing'),3);
-    assert.equal(h.saved(),'Saved locally');
+    const h = await harness();
+    const A = doc({protect_space: false}), B = doc({protect_space: false, chains: {...doc().chains, merge: {strength: .5}}});
+    h.saver.change(A);
+    const flushing = h.saver.flush();
+    h.saver.change(B);
+    await h.fire();                                   // the timer of B finds A in flight and waits
+    assert.equal(h.requests.length, 1);
+    await h.accept(0);
+    assert.equal(h.requests.length, 2, 'B follows as soon as A is answered');
+    assert.deepEqual(h.requests[0].doc, A, 'The submitted snapshot must not change');
+    assert.deepEqual(h.requests[1].doc, B);
+    await h.accept(1);
+    await flushing;
+    assert.equal(h.saver.busy, false);
+    assert.deepEqual(h.saver.working, B);
+    assert.equal(h.last().saving, false);
   },
+
+  // the newer value of one parameter wins, including going back to the value the server already has
   async same_field() {
-    for (const value of [4,1]) {
-      const h=await editor();h.input('saturation',2);
-      const saving=h.flush(), failed=assert.rejects(saving,/Revision conflict/);
-      h.input('saturation',value);h.conflict(0);await failed;
-      await retry(h,1,{saturation:value});
-      assert.equal(h.value('saturation'),value);
+    for (const value of [4, 1]) {
+      const h = await harness();
+      const make = v => doc({chains: {...doc().chains, merge: {strength: v / 4}}});
+      h.saver.change(make(2));
+      await h.fire();
+      h.saver.change(make(value));
+      await h.fail(0, conflict());
+      await h.fire();
+      assert.deepEqual(h.requests[1].doc, make(value));
+      await h.accept(1);
+      assert.deepEqual(h.saver.working, make(value));
     }
   },
+
+  // a lost connection is retried like a conflict
   async offline() {
-    const h=await editor();h.input('saturation',2);
-    const saving=h.flush(), failed=assert.rejects(saving,/Connection lost/);
-    h.input('smoothing',3);h.offline=true;
-    h.requests[0].reject(new Error('Connection lost'));await failed;
-    assert.match(h.saved(),/^Not saved/);h.offline=false;
-    await retry(h,1,{saturation:2,smoothing:3});
+    const h = await harness();
+    const A = doc({protect_space: false});
+    h.saver.change(A);
+    await h.fire();
+    await h.fail(0, new TypeError('Failed to fetch'));
+    assert.match(h.last().failed, /Failed to fetch/);
+    assert.equal(h.last().retrying, true);
+    await h.fire();
+    await h.fail(1, new TypeError('Failed to fetch'));
+    await h.fire();
+    await h.accept(2);
+    assert.deepEqual(h.requests[2].doc, A);
+    assert.equal(h.saver.busy, false);
   },
+
+  // two wavelet layers edited one after the other both survive a save in flight, failed or not
   async wavelets() {
-    for (const conflict of [false,true]) {
-      const h=await editor();h.wave(0,.6);
-      const saving=h.flush(), failed=conflict?assert.rejects(saving,/Revision conflict/):null;
-      h.wave(1,1.1);
-      if (conflict) {
-        h.conflict(0);await failed;
-        await retry(h,1,{wavelets:[.6,1.1,0,0]});
-      } else {
-        h.accept(0);await settle();
-        assert.deepEqual(h.requests[1].body.edits.wavelets,[.6,1.1,0,0]);
-        h.accept(1);await saving;
-      }
-      assert.deepEqual(h.requests[0].body.edits.wavelets,[.6,0,0,0]);
-      assert.deepEqual(h.waveValues(),[.6,1.1,0,0]);
+    for (const fails of [false, true]) {
+      const h = await harness();
+      h.saver.change(wavelets([.06, 0, 0, 0]));
+      await h.fire();
+      h.saver.change(wavelets([.06, .11, 0, 0]));
+      if (fails) { await h.fail(0, conflict()); await h.fire(); }
+      else await h.accept(0);
+      assert.deepEqual(h.requests[0].doc.chains.luminance[0].params.biases, [.06, 0, 0, 0]);
+      assert.deepEqual(h.requests[1].doc.chains.luminance[0].params.biases, [.06, .11, 0, 0]);
+      await h.accept(1);
+      assert.deepEqual(h.saver.working.chains.luminance[0].params.biases, [.06, .11, 0, 0]);
     }
   },
+
+  // the server's document (another window's edit) replaces the one shown only when nothing of ours waits
   async later_edit() {
-    const h=await editor();h.input('saturation',2);
-    const saving=h.flush();h.accept(0);await saving;
-    h.server.project.edits.strength=.4;h.server.project.revision++;
-    await h.poll();h.input('smoothing',3);
-    await retry(h,1,{saturation:2,smoothing:3,strength:.4});
+    const h = await harness();
+    const mine = doc({protect_space: false}), theirs = doc({chains: {...doc().chains, merge: {strength: .3}}});
+    h.saver.adopt(doc());
+    h.saver.change(mine);
+    h.saver.adopt(theirs);
+    assert.deepEqual(h.saver.working, mine, 'Pending: the server document waits');
+    await h.fire();
+    h.saver.adopt(theirs);
+    assert.deepEqual(h.saver.working, mine, 'In flight: the server document waits');
+    await h.accept(0);
+    h.saver.adopt(theirs);
+    assert.deepEqual(h.saver.working, theirs, 'Saved: the server document is shown');
+  },
+
+  // a document the server refuses waits for the next edit instead of being sent every 2 s
+  async refused() {
+    const h = await harness();
+    const bad = doc({protect_space: 'yes'}), good = doc({protect_space: false});
+    h.saver.change(bad);
+    await h.fire();
+    await h.fail(0, refused());
+    assert.equal(h.timers.size, 0, 'Nothing is sent again on its own');
+    assert.equal(h.last().retrying, false);
+    assert.equal(h.last().failed, 'Block 1: black must be below white.');
+    assert.ok(h.saver.busy, 'The refused document is still unsaved');
+    assert.deepEqual(h.saver.working, bad, 'and still on screen');
+    h.saver.change(good);
+    await h.fire();
+    assert.deepEqual(h.requests[1].doc, good);
+    await h.accept(1);
+    assert.equal(h.last().failed, null);
+    assert.equal(h.saver.busy, false);
+  },
+
+  // refused, but the user has already made a newer document: that one is sent
+  async refused_with_newer_edit() {
+    const h = await harness();
+    h.saver.change(doc({protect_space: 'yes'}));
+    await h.fire();
+    h.saver.change(doc({protect_space: false}));
+    await h.fail(0, refused());
+    assert.equal(h.timer().ms, 300);
+    await h.fire();
+    assert.deepEqual(h.requests[1].doc, doc({protect_space: false}));
+    await h.accept(1);
+    assert.equal(h.saver.busy, false);
+  },
+
+  // the timers are the browser's own when none are given: called as methods they would throw
+  // "Illegal invocation" in a browser; here the default must at least schedule and cancel
+  async default_timers() {
+    const source = fs.readFileSync(path.join(__dirname, '../ui/save.js'), 'utf8');
+    const {Autosave} = await import('data:text/javascript,' + encodeURIComponent(source));
+    const sent = [];
+    const saver = new Autosave({send: async d => { sent.push(d); }, delay: 5});
+    saver.change(doc());
+    await new Promise(resolve => setTimeout(resolve, 40));
+    assert.equal(sent.length, 1);
+    assert.equal(saver.busy, false);
+    const schedule = saver.schedule.toString();
+    assert.ok(!/^function setTimeout|\[native code\]/.test(schedule), 'The default timer is wrapped, not setTimeout itself');
   },
 };
 
-if (require.main===module) {
-  const name=process.argv[2];
-  if (!Object.hasOwn(scenarios,name)) throw new Error('Choose an autosave scenario');
-  scenarios[name]().then(()=>console.log(`PASS ${name}`)).catch(error=>{console.error(error);process.exitCode=1;});
-}
+const name = process.argv[2];
+if (!scenarios[name]) { console.error(`Unknown scenario ${name}`); process.exit(2); }
+scenarios[name]().then(() => console.log(`PASS ${name}`), e => { console.error(e.stack || e); process.exit(1); });
