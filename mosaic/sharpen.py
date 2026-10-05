@@ -21,8 +21,10 @@ def lightness(rgb):
 def apply(light, edits, noise, scale=1.):
     if any(edits['wavelets']):
         if abs(scale-1) < 1e-6:
+            # the app's own units: layer gain 1 + amount (lunar_finish takes PixInsight biases instead)
             light = wavelet_sharpen(light, edits['wavelets'], noise,
-                                   [edits['wavelet_denoise']]*4, edits['wavelet_kernel'])
+                                   [edits['wavelet_denoise']]*4, edits['wavelet_kernel'],
+                                   gains=[1+b for b in edits['wavelets']])
         else:
             # Fit/zoom-out previews approximate native filter supports. Native exports
             # filter before resampling; users inspect actual detail at 1:1.

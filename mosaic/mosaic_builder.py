@@ -1213,8 +1213,6 @@ def run_stages_4_to_8(args, pr, pv, stg, main, pairs, ref, theta, idx, sizes, da
         cv_ = tuple(int(v) for v in np.ceil(allc.max(axis=0) - off))
         return {n: mst.panel_matrix(model, th[ix[n]], sizes[n], off) for n in main}, off, cv_
 
-    fs_prev = max(min(aw / 15000, ah / 13600) for aw, ah in (st.area for st in pv.styles()))
-
     def on_iter(it, th, ix, st):
         pv.checkpoint()
         if not pv.active():
@@ -1487,7 +1485,6 @@ def run_stages_4_to_8(args, pr, pv, stg, main, pairs, ref, theta, idx, sizes, da
     pr.info(f"contribution map: {os.path.basename(stem)}_contributions.png · region map: {os.path.basename(stem)}_labels.png · "
             f"{time.time() - t8:.0f} s")
     if pv.active():
-        after8 = cv2.resize(out, (int(canvas[0] * fs), int(canvas[1] * fs)), interpolation=cv2.INTER_AREA)
         ro8 = [("size", f"{shape[1]} × {shape[0]} px"), ("format", "16-bit TIFF"), ("panels used", f"{len(contributing)}"),
                ("rms", f"{st4['rms']:.2f} px")]
         f8_before, f8_contrib = split_frames(step_frames(8), [1.3, 2.5])

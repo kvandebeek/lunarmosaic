@@ -1,7 +1,6 @@
 """Run builder stages 0-3 in-process and capture the fine-alignment inputs (no files published)."""
-import os, sys, os, types
+import os, sys, types
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
-import numpy as np, cv2
 import mosaic_common as mc, mosaic_stages as ms, mosaic_builder as mb, preview_style as ps
 
 class Captured(Exception):

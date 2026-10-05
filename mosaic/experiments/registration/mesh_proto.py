@@ -3,7 +3,7 @@ import sys, time, pickle, numpy as np, cv2
 from concurrent.futures import ThreadPoolExecutor
 sys.path.insert(0, '.')
 from harness import capture
-import mosaic_common as mc, mosaic_stages as ms
+import mosaic_stages as ms
 
 def dense_tiles(C, theta, idx, tile=128, max_tiles=600):
     model = C.model; win = cv2.createHanningWindow((tile, tile), cv2.CV_32F)

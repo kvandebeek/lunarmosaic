@@ -82,8 +82,10 @@ class Progress:
 
     def tick(self, done, total, extra=""):
         """Progress line at least every 2 % or 5 s (and at the end)."""
+        if total <= 0:                                 # nothing to report for an empty job
+            return
         now = time.time()
-        frac = done / max(total, 1)
+        frac = done / total
         if done < total and frac - self._last_frac < 0.02 and now - self._last < 5:
             return
         self._last, self._last_frac = now, frac

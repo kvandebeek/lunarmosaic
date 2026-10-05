@@ -57,10 +57,10 @@ SPECS = [
         S('LUNARATLAS_VIEW_PORT', 'int', 8766, 'first port to try (the next free one is used)', 1024, 65535),
         S('LUNARATLAS_VIEW_OPEN', 'bool', True, 'open the browser when the viewer starts'),
     ]),
-    ('lunar_finish: wavelet sharpening (first step; à trous wavelet transform on lightness)', [
-        S('LUNAR_FINISH_WAVELETS', 'str', '', "empty = off; 'pixinsight' = 4 layers, linear (3), layer 1 bias +3; or 1–8 "
-          'comma-separated layer biases, layer weight = 1 + bias; each bias ≥ −1 (−1 removes the layer, 0 keeps it); '
-          'typical 0–4 for layer 1, less for coarser layers'),
+    ('lunar_finish: wavelet sharpening (first step; as PixInsight ATrousWaveletTransform)', [
+        S('LUNAR_FINISH_WAVELETS', 'str', '', "empty = off; 'pixinsight' = 4 layers, linear (3), layer 1 bias +2.3; or 1–8 "
+          "comma-separated layer biases in PixInsight's units: gain 1 + 10 × bias, 1 / (1 + 10 × |bias|) below zero; "
+          'each bias −1 to 15; typical 0.3–2.5 for layers 1–2, less for coarser layers'),
         S('LUNAR_FINISH_WAVELET_KERNEL', 'choice', 'linear', "scaling function: linear = 'Linear Interpolation (3)', "
           "b3 = 'B3 Spline (5)'", choices=('linear', 'b3')),
         S('LUNAR_FINISH_WAVELET_DENOISE', 'str', '', 'per layer, comma-separated: coefficients within K × the '
@@ -68,7 +68,7 @@ SPECS = [
     ]),
     ('lunar_finish: unsharp mask (as Photoshop; optional, after contrast)', [
         S('LUNAR_FINISH_USM', 'str', '', 'empty = off; AMOUNT,RADIUS,THRESHOLD, e.g. 100,1.5,0 or "100;1,5;0": amount '
-          '≥ 0 % (Photoshop 1–500 %), radius > 0 px (Gaussian σ; Photoshop 0.1–1000), threshold 0–255 levels; '
+          '≥ 0 % (Photoshop 1–500 %), radius > 0 px (Photoshop 0.1–1000), threshold 0–255 levels (soft, as Photoshop); '
           'typical 50–150 %, 0.5–2 px, 0–6 levels'),
         S('LUNAR_FINISH_USM_MODE', 'choice', 'luminosity', 'luminosity = brightness only (no colour fringes); rgb = '
           'every channel, as Photoshop in RGB mode', choices=('luminosity', 'rgb')),

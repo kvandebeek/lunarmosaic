@@ -22,6 +22,7 @@ import cv2
 import numpy as np
 import tifffile
 from project import Project
+import lrgb
 from lrgb import Image, Scene, register, manual_match
 from alignment import measure
 from recent import RecentProjects
@@ -433,6 +434,7 @@ class Application:
                 _, png = cv2.imencode('.png', np.round(rgb[..., ::-1]*255).astype(np.uint8))
                 h.json(dict(width=w, height=height, raw_bytes=w*height*6,
                             missing_colour=info['missing_colour'],
+                            jpeg_max_side=lrgb.JPEG_MAX_SIDE, jpeg_max_pixels=lrgb.JPEG_MAX_PIXELS,
                             composition=layer if layer != 'composite' else 'LRGB' if edits['l_visible'] and edits['rgb_visible'] and scene.match is not None else 'luminance' if edits['l_visible'] else 'colour',
                             preview='data:image/png;base64,'+base64.b64encode(png).decode('ascii')))
             elif path == '/api/preview':

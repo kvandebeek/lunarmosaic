@@ -2,7 +2,7 @@
 const $ = (s, root=document) => root.querySelector(s);
 const $$ = (s, root=document) => [...root.querySelectorAll(s)];
 let state = {project:null, job:{state:'idle'}}, page='import', view='composite';
-let pendingEdits=null, saving=false, saveTimer, previewVersion=0, geometry=null;
+let pendingEdits=null, saving=false, saveFailed=false, saveTimer, previewVersion=0, geometry=null;
 let scale=1, offset={x:0,y:0}, fitted=true, detailTimer, toastTimer, polling=false, importing=false;
 let loadedProject=null;
 let recentVersion=0, exportVersion=0;
@@ -59,7 +59,7 @@ async function loadRecent(){
 }
 function render() {
   const p=state.project, job=state.job, busy=job.state==='running';
-  $('#saved').textContent=saving||pendingEdits?'Saving…':p?'Saved locally':'Local · private';
+  $('#saved').textContent=saveFailed&&pendingEdits?'Not saved · adjust again to retry':saving||pendingEdits?'Saving…':p?'Saved locally':'Local · private';
   $('#export-open').disabled=!p?.sets.L.mosaic||busy;
   if(!p){loadedProject=null;document.body.classList.remove('editing');showVisibility();return;}
   if(loadedProject!==p.id){
@@ -142,14 +142,15 @@ function render() {
 function showVisibility(){ const editing=page==='edit';$('#setup').hidden=editing;$('#workspace').hidden=!editing;$('#welcome').hidden=!!state.project&&page!=='projects';$('#close-project').hidden=!state.project;$('#import-page').hidden=!state.project||page!=='import';$('#build-page').hidden=!state.project||page!=='build';if(state.project&&page!=='projects')$('#recent-projects').hidden=true; }
 function syncEdits(e){ $$('[data-edit]').forEach(el=>{el.value=e[el.dataset.edit]; updateOutput(el.dataset.edit,e[el.dataset.edit]);}); $$('[data-visible]').forEach(el=>el.checked=e[el.dataset.visible]);$('#coverage').value=e.coverage;$('#rotation').value=e.rotation;$('#mirror').checked=e.mirror;$('#wavelet-kernel').value=e.wavelet_kernel;$$('[data-wave]').forEach(el=>{el.value=e.wavelets[Number(el.dataset.wave)];$(`[data-wave-output="${el.dataset.wave}"]`).textContent=Number(el.value).toFixed(2);}); }
 function updateOutput(key,v){const out=$(`[data-output="${key}"]`);if(out) out.textContent=key==='strength'||key==='highlights'?`${Math.round(v*100)}%`:key==='saturation'?`${Number(v).toFixed(2)}×`:key==='smoothing'?`${Number(v).toFixed(1)} px`:Number(v).toFixed(key==='usm_threshold'?3:2);}
-function changeEdit(key,value){pendingEdits={...(pendingEdits||state.project.edits),[key]:value};updateOutput(key,value);$('#saved').textContent='Saving…';clearTimeout(saveTimer);saveTimer=setTimeout(()=>flushEdits().catch(e=>message(e.message)),180);}
+function changeEdit(key,value){pendingEdits={...(pendingEdits||state.project.edits),[key]:value};saveFailed=false;updateOutput(key,value);$('#saved').textContent='Saving…';clearTimeout(saveTimer);saveTimer=setTimeout(()=>flushEdits().catch(e=>message(e.message)),180);}
 async function flushEdits(){
   clearTimeout(saveTimer);
   if(saving){while(saving) await new Promise(r=>setTimeout(r,30)); if(pendingEdits) return flushEdits(); return;}
   if(!pendingEdits) return;
   const edits=pendingEdits;pendingEdits=null;saving=true;
-  try {state=await api('edits',payload({edits,revision:state.project.revision}));await refreshPreview(false);}
-  catch(e){state=await api('state');render();throw e;}
+  try {state=await api('edits',payload({edits,revision:state.project.revision}));saveFailed=false;await refreshPreview(false);}
+  // the rejected values go back into pendingEdits (newer keystrokes win), so render() keeps showing what the user chose
+  catch(e){pendingEdits={...edits,...(pendingEdits||{})};saveFailed=true;try{state=await api('state');}catch(_){}render();throw e;}
   finally {saving=false;render();}
   if(pendingEdits) await flushEdits();
 }
@@ -231,7 +232,7 @@ async function exportPreview(){
   try{const info=await api('export-preview?'+q);if(ticket!==exportVersion)return;
     $('#export-preview').src=info.preview;$('#export-preview').hidden=false;
     const format=$('#format').value;
-    const jpegOK=format!=='jpg'||info.width*info.height<=80000000&&Math.max(info.width,info.height)<=65000;
+    const jpegOK=format!=='jpg'||info.width*info.height<=info.jpeg_max_pixels&&Math.max(info.width,info.height)<=info.jpeg_max_side;
     $('#export-summary').textContent=`${info.width.toLocaleString()} × ${info.height.toLocaleString()} px · ${info.composition} · ${format==='jpg'?'8':'16'}-bit · ${info.missing_colour.toFixed(1)}% L coverage without colour. ${format==='tif'?`Approximately ${fileSize(info.raw_bytes)} uncompressed.`:'Compressed file size depends on the image.'} Preview approximates sharpening; inspect native detail in the workspace.${jpegOK?'':' Too large for JPEG; choose TIFF/PNG or a smaller size.'}`;
     $('#export-run').disabled=!jpegOK;
   }catch(e){if(ticket===exportVersion)$('#export-summary').textContent=e.message;}

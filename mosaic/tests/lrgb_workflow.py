@@ -16,6 +16,7 @@ import cv2
 import numpy as np
 import tifffile
 from project import Project, DEFAULT_EDITS
+import lrgb
 from lrgb import Image, Scene, register, manual_match, largest_rectangle
 from app import Application, start_server
 from alignment import measure
@@ -290,6 +291,8 @@ class Workflow(unittest.TestCase):
             req=urllib.request.Request(srv.url()+f'api/export-preview?id={p.data["id"]}&coverage=common&factor=0.5&layer=luminance',headers={'X-LA-Token':'preview-token'})
             with urllib.request.urlopen(req) as r:info=json.load(r)
             self.assertTrue(info['preview'].startswith('data:image/png;base64,'))
+            # the JPEG ceiling the dialog pre-flights with is the one export() enforces
+            self.assertEqual((info['jpeg_max_side'],info['jpeg_max_pixels']),(lrgb.JPEG_MAX_SIDE,lrgb.JPEG_MAX_PIXELS))
             edits,layer,factor=self.app.export_options(p.data['edits'],dict(coverage='common',factor=.5,layer='luminance'))
             output=self.root/'preview-match.tif';scene.export(output,edits,factor,layer)
             a=tifffile.imread(output)

@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Phase 2: finishing touches for a lunar mosaic, with an optional before/after movie.
 
-0. Optional wavelet sharpening (--wavelets), for unsharpened stacks, as PixInsight's ATrousWaveletTransform on
-   lightness: dyadic layers of 1, 2, 4, 8 px (linear-interpolation or B3-spline scaling function), layer k weighted
-   by 1 + bias. --wavelets pixinsight = 4 layers, linear (3), layer 1 bias +3. Optional per-layer noise
-   protection (coefficients within DENOISE × the layer's noise keep weight 1). Brightness only: no colour fringes.
+0. Optional wavelet sharpening (--wavelets), for unsharpened stacks, reproducing PixInsight's ATrousWaveletTransform
+   (target RGB/K, no noise reduction or deringing): dyadic layers of 1, 2, 4, 8 px (linear-interpolation or B3-spline
+   scaling function) on each channel's stored values, layer k multiplied by PixInsight's gain for its bias:
+   1 + 10 · bias, or 1 / (1 + 10 · |bias|) below zero. The biases are PixInsight's own numbers.
+   --wavelets pixinsight = 4 layers, linear (3), layer 1 bias +2.3. Optional per-layer noise protection
+   (coefficients within DENOISE × the layer's noise keep weight 1).
 1. Highlights: brightness is split into a smooth base and fine detail (edge-aware guided filter); a gentle
    shoulder lowers only the brightest part of the base, and the detail goes back unchanged. Bright rays and
    rims come down while keeping their texture.
@@ -12,10 +14,12 @@
    colour layer in Photoshop), then more saturation along the Moon's natural hues (blue and orange-yellow). Greens, purples and pinks get only a small share of the boost (usually noise or fringing).
    Applied in passes (default 2): each pass multiplies saturation again.
 3. Contrast: a gentle S-curve on brightness; black stays 0 and white stays 1.
-4. Optional sharpening, reproducing Photoshop's Unsharp Mask: result = original + amount × (original − Gaussian(σ =
-   radius)), only where |original − blurred| ≥ threshold (in 0–255 levels). Photoshop sharpens each RGB channel
-   separately in an RGB image; the default here sharpens brightness only (like Fade → Luminosity), which avoids
-   colour fringes. --usm-mode rgb gives Photoshop's per-channel behaviour.
+4. Optional sharpening, reproducing Photoshop's Unsharp Mask: d = original − Gaussian(σ), result = original +
+   amount × sign(d) × max(|d| − threshold, 0), threshold in 0–255 levels (Photoshop's threshold is soft: it is
+   subtracted, not a cut-off). σ is slightly wider than the radius, as measured in Photoshop 2026: 1.08 × radius at
+   1 px, 1.05 × at 2 px, 1.03 × at 4 px. Photoshop sharpens each RGB channel separately in an RGB image; the default
+   here sharpens brightness only (like Fade → Luminosity), which avoids colour fringes. --usm-mode rgb gives
+   Photoshop's per-channel behaviour.
 
 5. North up (default; --keep-orientation to skip): moon_atlas locates the finished image, which is then turned
    so lunar north is up and east is right (never mirrored), in one Lanczos resample, and cropped to the Moon.
@@ -78,9 +82,9 @@ def s_curve(x, m, c):
 
 KERNELS = {"linear": np.array([1, 2, 1], np.float32) / 4,          # PixInsight "Linear Interpolation (3)"
            "b3": np.array([1, 4, 6, 4, 1], np.float32) / 16}     # PixInsight "B3 Spline (5)"
-# the user's PixInsight setting for unsharpened stacks (ATrousWaveletTransform, dyadic, 4 layers, linear (3),
-# layer 1 bias +3, target lightness, no noise reduction)
-WAVELET_PRESETS = {"pixinsight": dict(biases=(3.0, 0.0, 0.0, 0.0), kernel="linear")}
+# the user's PixInsight setting for unsharpened stacks, as saved on 2026-10-05 (ATrousWaveletTransform, dyadic,
+# 4 layers, linear (3), layer 1 bias +2.3, target RGB/K, no noise reduction or deringing)
+WAVELET_PRESETS = {"pixinsight": dict(biases=(2.3, 0.0, 0.0, 0.0), kernel="linear")}
 
 
 def atrous(L, n, kernel="linear"):
@@ -102,15 +106,36 @@ def wavelet_margin(n):
     return 2 * (2 ** n - 1) + 2          # support of the coarsest layer (B3: 2 · s per level), in px
 
 
-def wavelet_sharpen(L, biases, noise, denoise, kernel="linear"):
-    """PixInsight-style: layer k is weighted by 1 + biases[k]. With denoise[k] > 0 the part of each coefficient
-    within denoise[k] × noise[k] keeps weight 1, so the grain is not amplified."""
-    layers, out = atrous(L, len(biases), kernel)
-    for w, bias, sd, d in zip(layers, biases, noise, denoise):
+def wavelet_gain(bias):
+    """PixInsight ATrousWaveletTransform's layer gain for a bias, measured on PixInsight 1.9.5 by least-squares fits
+    of its output on the input's layers: biases 0.1, 0.5, 1, 2.3, 5 give gains 2, 6, 11, 24, 51; -0.5 gives 1/6."""
+    return 1 + 10 * bias if bias >= 0 else 1 / (1 + 10 * -bias)
+
+
+def wavelet_sharpen(L, biases, noise, denoise, kernel="linear", gains=None):
+    """Layer k is multiplied by wavelet_gain(biases[k]), or by gains[k] when the gains are given directly. With
+    denoise[k] > 0 the part of each coefficient within denoise[k] × noise[k] keeps weight 1, so the grain is not
+    amplified."""
+    gains = [wavelet_gain(b) for b in biases] if gains is None else gains
+    layers, out = atrous(L, len(gains), kernel)
+    for w, g, sd, d in zip(layers, gains, noise, denoise):
         t = d * sd
         core = np.sign(w) * np.maximum(np.abs(w) - t, 0) if t > 0 else w
-        out = out + w + bias * core
+        out = out + w + (g - 1) * core
     return out
+
+
+def usm_sigma(radius):
+    """Photoshop's Gaussian for an Unsharp Mask radius, measured on Photoshop 2026 at radius 1, 2 and 4 px
+    (σ = 1.080, 2.096, 4.132). The factor is held at 1 above about 10 px, beyond the measured range."""
+    return radius * max(1.0, 1.080 - 0.0339 * np.log(radius))
+
+
+def unsharp(x, amount, radius, threshold):
+    """Photoshop's Unsharp Mask on one channel (amount as a fraction, threshold in 0–255 levels): the threshold is
+    subtracted from the difference, not used as a cut-off."""
+    d = x - cv2.GaussianBlur(x.astype(np.float32), (0, 0), usm_sigma(radius))
+    return x + amount * np.sign(d) * np.maximum(np.abs(d) - threshold / 255.0, 0)
 
 
 def layer_noise(L, n, kernel="linear", tile=32):
@@ -141,7 +166,12 @@ def process_region(bgr, y0, x0, ctx, p):
     h, w = bgr.shape[:2]
     lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2Lab)
     L0 = lab[..., 0] / 100.0
-    L = wavelet_sharpen(L0, p.wavelets, ctx["wnoise"], p.wavelet_denoise, p.wavelet_kernel) if p.wavelets else L0
+    if p.wavelets:
+        # as PixInsight on an RGB/K target: every channel on its own, on the stored values (not on lightness)
+        sharp = np.dstack([wavelet_sharpen(bgr[..., c], p.wavelets, ctx["wnoise"], p.wavelet_denoise, p.wavelet_kernel)
+                           for c in range(3)])
+        lab = cv2.cvtColor(np.clip(sharp, 0, 1).astype(np.float32), cv2.COLOR_BGR2Lab)
+    L = lab[..., 0] / 100.0
     q = ctx["q"]
     X, Y = np.meshgrid(np.arange(x0, x0 + w, dtype=np.float32), np.arange(y0, y0 + h, dtype=np.float32))
     mx, my = (X - (q - 1) / 2) / q, (Y - (q - 1) / 2) / q
@@ -168,9 +198,7 @@ def process_region(bgr, y0, x0, ctx, p):
     stages.append(("contrast", L2, a * fk, b * fk))
     L3 = L2
     if p.usm and p.usm_mode == "luminosity":
-        amt, rad, thr = p.usm
-        diff = L2 - cv2.GaussianBlur(L2.astype(np.float32), (0, 0), rad)
-        L3 = L2 + amt * diff * (np.abs(diff) * 255 >= thr)
+        L3 = unsharp(L2, *p.usm)
         stages.append(("sharp", L3, a * fk, b * fk))
     for name, Lx, ax, bx in stages:
         o = cv2.cvtColor(np.dstack([np.clip(Lx, 0, 1) * 100, ax, bx]).astype(np.float32), cv2.COLOR_Lab2BGR)
@@ -178,10 +206,7 @@ def process_region(bgr, y0, x0, ctx, p):
         o[sky] = bgr[sky]
         out[name] = o
     if p.usm and p.usm_mode == "rgb":                       # Photoshop in RGB mode: every channel on its own
-        amt, rad, thr = p.usm
-        c = out["contrast"]
-        diff = c - cv2.GaussianBlur(c, (0, 0), rad)
-        o = np.clip(c + amt * diff * (np.abs(diff) * 255 >= thr), 0, 1)
+        o = np.clip(unsharp(out["contrast"], *p.usm), 0, 1)
         o[sky] = bgr[sky]
         out["sharp"] = o
     out["final"] = out["sharp"] if "sharp" in out else out["contrast"]
@@ -263,8 +288,10 @@ def run(args, pv, stg):
     pv.set_all("log_line", "")
     print(f"lunar_finish  {args.input}", flush=True)
     img16 = cv2.imread(args.input, cv2.IMREAD_UNCHANGED)
+    if img16 is not None and img16.ndim == 2:          # a mono image: three equal channels from here on
+        img16 = cv2.cvtColor(img16, cv2.COLOR_GRAY2BGR)
     if img16 is None or img16.ndim != 3 or img16.shape[2] < 3:
-        sys.exit("need a 3-channel (RGB) image")
+        sys.exit("need a mono or a 3-channel (RGB) image")
     if img16.dtype not in (np.uint8, np.uint16):
         sys.exit(f"need an 8- or 16-bit image, not {img16.dtype}")
     img16 = img16[..., :3]
@@ -278,6 +305,10 @@ def run(args, pv, stg):
     if src.dtype == np.uint8:                   # 8-bit: average in float, not in 1/255 steps
         src = src.astype(np.float32)
     small = cv2.resize(src, (W // q, H // q), interpolation=cv2.INTER_AREA).astype(np.float32) / scale
+    # a mono image (three equal channels, e.g. a mosaic built from mono panels) has no colour to saturate
+    args.mono = bool(np.abs(small - small[..., 1:2]).max() < 2e-3)
+    if args.mono:
+        args.saturation_passes = 0
     Ls = cv2.cvtColor(small, cv2.COLOR_BGR2Lab)[..., 0] / 100.0
     raw = (Ls > 0.05).astype(np.uint8)
     n_, lab_, st_, _ = cv2.connectedComponentsWithStats(raw)
@@ -302,7 +333,7 @@ def run(args, pv, stg):
         cy_, cx_, R_ = int(ys_.mean() * q), int(xs_.mean() * q), min(1024, H // 2, W // 2)
         y0_, x0_ = int(np.clip(cy_ - R_, 0, H - 2 * R_)), int(np.clip(cx_ - R_, 0, W - 2 * R_))
         crop_ = img16[y0_:y0_ + 2 * R_, x0_:x0_ + 2 * R_].astype(np.float32) / scale
-        ctx["wnoise"] = layer_noise(cv2.cvtColor(crop_, cv2.COLOR_BGR2Lab)[..., 0] / 100.0, len(args.wavelets), args.wavelet_kernel)
+        ctx["wnoise"] = layer_noise(crop_.mean(axis=2), len(args.wavelets), args.wavelet_kernel)   # stored values, as sharpened
     print(f"      disk {disk.sum() * q * q / 1e6:.0f} Mpx · brightness median L {ctx['m'] * 100:.1f} · highlight knee L "
           f"{ctx['knee'] * 100:.1f} (p{args.knee_percentile:g}) · top L {ctx['top'] * 100:.1f}", flush=True)
 
@@ -376,7 +407,7 @@ def run(args, pv, stg):
         return {"L": lab[..., 0][Ld], "C_axis": float(np.median(C[Ld & onaxis])), "C_off": float(np.median(C[Ld & ~onaxis])),
                 "p999": float(np.percentile(lab[..., 0][Ld], 99.9)), "std": float(lab[..., 0][Ld].std())}
     S = {k: lab_stats(small_st[k]) for k in keys}
-    last_col = f"colour{args.saturation_passes}"
+    last_col = f"colour{args.saturation_passes}" if args.saturation_passes else "high"
     affected = float((base_s[disk] > ctx["knee"]).mean() * 100)
     info = {"affected": affected, "p999": (S["orig"]["p999"], S["high"]["p999"]),
             "C_pass": [S["high"]["C_axis"]] + [S[f"colour{k}"]["C_axis"] for k in range(1, args.saturation_passes + 1)],
@@ -384,11 +415,16 @@ def run(args, pv, stg):
     if args.wavelets:
         print(f"      wavelets ({args.wavelet_kernel}, {len(args.wavelets)} layers, biases " + ", ".join(f"{v:+g}" for v in args.wavelets) +
               (", noise protection " + ", ".join(f"{v:g}σ" for v in args.wavelet_denoise) if any(args.wavelet_denoise) else "") +
-              f"): fine-detail amplitude × {wave_gain:.2f} (centre crop) · layer noise " + ", ".join(f"{v * 100:.2f}" for v in ctx["wnoise"]) + " L units")
+              "): layer gains " + ", ".join(f"{wavelet_gain(v):.3g}" for v in args.wavelets) +
+              f" · fine-detail amplitude × {wave_gain or 1:.2f} (centre crop) · layer noise " +
+              ", ".join(f"{v * 100:.3f}" for v in ctx["wnoise"]) + " % of full scale")
     print(f"      highlights: brightest 0.1 % L {S['orig']['p999']:.1f} → {S['high']['p999']:.1f} "
           f"({affected:.1f} % of the disk above the knee; detail kept)")
-    print(f"      colour ({args.saturation_passes} passes × {args.saturation:g}): chroma on lunar hues " +
-          " → ".join(f"{c:.2f}" for c in info["C_pass"]) + f" · elsewhere {info['C_off'][0]:.2f} → {info['C_off'][1]:.2f} (Lab units)")
+    if args.mono:
+        print("      colour: a mono image, so there is no colour to saturate (colour stages skipped)")
+    else:
+        print(f"      colour ({args.saturation_passes} passes × {args.saturation:g}): chroma on lunar hues " +
+              " → ".join(f"{c:.2f}" for c in info["C_pass"]) + f" · elsewhere {info['C_off'][0]:.2f} → {info['C_off'][1]:.2f} (Lab units)")
     print(f"      contrast: brightness spread (std) L {info['std'][0]:.2f} → {info['std'][1]:.2f}")
     if args.usm:
         # fine-detail energy on the full-resolution centre crop: a direct measure of the sharpening
@@ -439,7 +475,7 @@ def movie(args, pv, small_st, ctx, info, img16, scale, W, H):
         Yc, Xc = Y0 + (S - cs) // 2, X0 + (S - cs) // 2
         cw = process_region(img16[Yc:Yc + cs, Xc:Xc + cs].astype(np.float32) / scale, Yc, Xc, ctx, args)
         cw = {k: cv2.resize(v, (1000, 1000), interpolation=cv2.INTER_CUBIC) for k, v in cw.items()}
-        steps.append(("Wavelet sharpening", f"à trous, {args.wavelet_kernel} · close up, enlarged · lightness only",
+        steps.append(("Wavelet sharpening", f"à trous, {args.wavelet_kernel} · close up, enlarged · as in PixInsight",
                       tone(cw["orig"]), tone(cw["wave"]),
                       [("layers", f"{len(args.wavelets)} (1–{2 ** (len(args.wavelets) - 1)} px)"),
                        ("biases", " ".join(f"{v:+g}" for v in args.wavelets)),
@@ -539,7 +575,8 @@ def movie(args, pv, small_st, ctx, info, img16, scale, W, H):
     fin = tone(small_st["turned"] if turn else small_st["final"])
     ow, oh = info.get("out_size", (W, H))
     facts = [("size", f"{ow} × {oh} px"), ("highlights", f"{args.highlights:.2f}"),
-             ("saturation", f"× {args.saturation:g}, {args.saturation_passes} passes"), ("contrast", f"+{args.contrast * 100:.0f} %")]
+             ("colour", "mono image") if args.mono else ("saturation", f"× {args.saturation:g}, {args.saturation_passes} passes"),
+             ("contrast", f"+{args.contrast * 100:.0f} %")]
     if args.wavelets:
         facts[0] = ("size · wavelets", f"{ow} × {oh} px · layer biases " + " ".join(f"{v:+g}" for v in args.wavelets))
     if args.usm:
@@ -559,7 +596,8 @@ def movie(args, pv, small_st, ctx, info, img16, scale, W, H):
     def render_final(st):
         if id(st) not in final_frame:
             final_frame[id(st)] = st.final(fin, date or "finished", ("wavelets · " if args.wavelets else "") +
-                                           "highlights · lunar colour · contrast" + (" · sharpening" if args.usm else "") +
+                                           ("highlights · contrast" if args.mono else "highlights · lunar colour · contrast") +
+                                           (" · sharpening" if args.usm else "") +
                                            (" · north up" if turn else ""), facts)
         return final_frame[id(st)]
     pv.checkpoint()
@@ -583,13 +621,14 @@ def main():
     ap.add_argument("--saturation-passes", type=int, default=ts.get("LUNAR_FINISH_SATURATION_PASSES", 2, int), help="how many times the saturation boost is applied")
     ap.add_argument("--contrast", type=float, default=ts.get("LUNAR_FINISH_CONTRAST", 0.12, float), help="midtone contrast increase (0.12 = +12 %%), 0 to < 0.5")
     ap.add_argument("--usm", default=ts.get("LUNAR_FINISH_USM") or None, metavar="AMOUNT,RADIUS,THRESHOLD",
-                    help="sharpen like Photoshop's Unsharp Mask, e.g. 100,1.5,0 or \"100;1,5;0\" (amount %%, radius px = Gaussian σ, "
-                         "threshold in 0–255 levels); off by default")
+                    help="sharpen like Photoshop's Unsharp Mask, e.g. 100,1.5,0 or \"100;1,5;0\" (amount %%, radius px, "
+                         "threshold in 0–255 levels, all as Photoshop shows them); off by default")
     ap.add_argument("--usm-mode", choices=("luminosity", "rgb"), default=ts.get("LUNAR_FINISH_USM_MODE"),
                     help="luminosity = brightness only (no colour fringes); rgb = every channel, as Photoshop does in RGB mode")
     ap.add_argument("--wavelets", default=ts.get("LUNAR_FINISH_WAVELETS") or None, metavar="BIASES|pixinsight",
-                    help="wavelet sharpening first, as PixInsight's ATrousWaveletTransform on lightness: comma-separated layer "
-                         "biases (layer weight 1 + bias), e.g. 3,0,0,0; 'pixinsight' = 4 layers, linear (3), layer 1 +3; off by default")
+                    help="wavelet sharpening first, as PixInsight's ATrousWaveletTransform: comma-separated layer biases in "
+                         "PixInsight's own units (gain 1 + 10 × bias), e.g. 0.6,1.1,0.2,0; 'pixinsight' = 4 layers, linear (3), "
+                         "layer 1 +2.3; off by default")
     ap.add_argument("--wavelet-kernel", choices=("linear", "b3"), default=ts.get("LUNAR_FINISH_WAVELET_KERNEL", "linear"),
                     help="scaling function: linear = PixInsight 'Linear Interpolation (3)', b3 = 'B3 Spline (5)'")
     ap.add_argument("--wavelet-denoise", default=ts.get("LUNAR_FINISH_WAVELET_DENOISE") or None, metavar="K1,K2,…",
@@ -631,9 +670,10 @@ def main():
             try:
                 args.wavelets = [float(v) for v in args.wavelets.replace(";", ",").split(",") if v.strip()]
             except ValueError:
-                sys.exit("--wavelets expects comma-separated biases, e.g. 3,0,0,0, or 'pixinsight'")
-            if not 1 <= len(args.wavelets) <= 8 or any(v < -1 for v in args.wavelets):
-                sys.exit("--wavelets: 1 to 8 layers, each bias ≥ -1 (-1 removes a layer, 0 keeps it)")
+                sys.exit("--wavelets expects comma-separated biases, e.g. 0.6,1.1,0.2,0, or 'pixinsight'")
+            if not 1 <= len(args.wavelets) <= 8 or any(not -1 <= v <= 15 for v in args.wavelets):
+                sys.exit("--wavelets: 1 to 8 layers, each bias from -1 to 15 "
+                         "(0 keeps a layer, 1 multiplies it by 11, -1 divides it by 11)")
         try:
             d = [float(v) for v in (args.wavelet_denoise or "").split(",") if v.strip()]
         except ValueError:

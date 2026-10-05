@@ -1,5 +1,8 @@
 # Implementation status — 2026-10-03
 
+> Status of the 3 October 2026 implementation. For how it diverges from the decisions taken since,
+> see [DESIGN.md](DESIGN.md) section 9.
+
 ## Implemented
 
 - Local LunarAtlas family interface with separate native L and RGB mosaic builds.

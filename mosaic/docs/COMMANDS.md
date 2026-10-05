@@ -202,10 +202,12 @@ usage: lunar_finish.py [-h] -o OUTPUT [--highlights HIGHLIGHTS]
 
 Phase 2: finishing touches for a lunar mosaic, with an optional before/after movie.
 
-0. Optional wavelet sharpening (--wavelets), for unsharpened stacks, as PixInsight's ATrousWaveletTransform on
-   lightness: dyadic layers of 1, 2, 4, 8 px (linear-interpolation or B3-spline scaling function), layer k weighted
-   by 1 + bias. --wavelets pixinsight = 4 layers, linear (3), layer 1 bias +3. Optional per-layer noise
-   protection (coefficients within DENOISE × the layer's noise keep weight 1). Brightness only: no colour fringes.
+0. Optional wavelet sharpening (--wavelets), for unsharpened stacks, reproducing PixInsight's ATrousWaveletTransform
+   (target RGB/K, no noise reduction or deringing): dyadic layers of 1, 2, 4, 8 px (linear-interpolation or B3-spline
+   scaling function) on each channel's stored values, layer k multiplied by PixInsight's gain for its bias:
+   1 + 10 · bias, or 1 / (1 + 10 · |bias|) below zero. The biases are PixInsight's own numbers.
+   --wavelets pixinsight = 4 layers, linear (3), layer 1 bias +2.3. Optional per-layer noise protection
+   (coefficients within DENOISE × the layer's noise keep weight 1).
 1. Highlights: brightness is split into a smooth base and fine detail (edge-aware guided filter); a gentle
    shoulder lowers only the brightest part of the base, and the detail goes back unchanged. Bright rays and
    rims come down while keeping their texture.
@@ -213,10 +215,12 @@ Phase 2: finishing touches for a lunar mosaic, with an optional before/after mov
    colour layer in Photoshop), then more saturation along the Moon's natural hues (blue and orange-yellow). Greens, purples and pinks get only a small share of the boost (usually noise or fringing).
    Applied in passes (default 2): each pass multiplies saturation again.
 3. Contrast: a gentle S-curve on brightness; black stays 0 and white stays 1.
-4. Optional sharpening, reproducing Photoshop's Unsharp Mask: result = original + amount × (original − Gaussian(σ =
-   radius)), only where |original − blurred| ≥ threshold (in 0–255 levels). Photoshop sharpens each RGB channel
-   separately in an RGB image; the default here sharpens brightness only (like Fade → Luminosity), which avoids
-   colour fringes. --usm-mode rgb gives Photoshop's per-channel behaviour.
+4. Optional sharpening, reproducing Photoshop's Unsharp Mask: d = original − Gaussian(σ), result = original +
+   amount × sign(d) × max(|d| − threshold, 0), threshold in 0–255 levels (Photoshop's threshold is soft: it is
+   subtracted, not a cut-off). σ is slightly wider than the radius, as measured in Photoshop 2026: 1.08 × radius at
+   1 px, 1.05 × at 2 px, 1.03 × at 4 px. Photoshop sharpens each RGB channel separately in an RGB image; the default
+   here sharpens brightness only (like Fade → Luminosity), which avoids colour fringes. --usm-mode rgb gives
+   Photoshop's per-channel behaviour.
 
 5. North up (default; --keep-orientation to skip): moon_atlas locates the finished image, which is then turned
    so lunar north is up and east is right (never mirrored), in one Lanczos resample, and cropped to the Moon.
@@ -251,19 +255,19 @@ options:
                         (default: 0.12)
   --usm AMOUNT,RADIUS,THRESHOLD
                         sharpen like Photoshop's Unsharp Mask, e.g. 100,1.5,0
-                        or "100;1,5;0" (amount %, radius px = Gaussian σ,
-                        threshold in 0–255 levels); off by default (default:
-                        None)
+                        or "100;1,5;0" (amount %, radius px, threshold in
+                        0–255 levels, all as Photoshop shows them); off by
+                        default (default: None)
   --usm-mode {luminosity,rgb}
                         luminosity = brightness only (no colour fringes); rgb
                         = every channel, as Photoshop does in RGB mode
                         (default: luminosity)
   --wavelets BIASES|pixinsight
                         wavelet sharpening first, as PixInsight's
-                        ATrousWaveletTransform on lightness: comma-separated
-                        layer biases (layer weight 1 + bias), e.g. 3,0,0,0;
-                        'pixinsight' = 4 layers, linear (3), layer 1 +3; off
-                        by default (default: pixinsight)
+                        ATrousWaveletTransform: comma-separated layer biases
+                        in PixInsight's own units (gain 1 + 10 × bias), e.g.
+                        0.6,1.1,0.2,0; 'pixinsight' = 4 layers, linear (3),
+                        layer 1 +2.3; off by default (default: pixinsight)
   --wavelet-kernel {linear,b3}
                         scaling function: linear = PixInsight 'Linear
                         Interpolation (3)', b3 = 'B3 Spline (5)' (default:

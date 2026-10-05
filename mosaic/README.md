@@ -9,6 +9,9 @@ every step. Developed and measured on the 2026-09-25 full Moon (101 panels, Appl
 | File | What it contains |
 |---|---|
 | this README | overview, workflow, outputs, movies, tips, limitations |
+| [`docs/DESIGN.md`](docs/DESIGN.md) | **the design record**: what the application is meant to be, the measured behaviour each filter must match (PixInsight, Photoshop, LuckyStackWorker), open questions and implementation status |
+| [`docs/interface-proposal.html`](docs/interface-proposal.html) | the screen mockups that illustrate `DESIGN.md`; open it from disk in a browser |
+| [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md) | the phased plan for building `DESIGN.md`: target architecture, schema, API, block specifications and the acceptance tests for each phase |
 | [`docs/COMMANDS.md`](docs/COMMANDS.md) | **every command with all options and defaults** (generated from `--help`; refresh with `python3 tools/update_docs.py`) |
 
 Every command also explains itself: `python3 <command> --help`.
@@ -39,7 +42,7 @@ Every command also explains itself: `python3 <command> --help`.
   tools/edge_falloff.py      detail vs distance from the frame edge (optics/tilt check)
   tools/update_docs.py       regenerates docs/COMMANDS.md
   design_mockups/            the chosen design (Observatory) and its renderer
-  docs/                      COMMANDS.md
+  docs/                      DESIGN.md, IMPLEMENTATION_PLAN.md, interface-proposal.html, COMMANDS.md, DESIGN_DECISIONS.md, IMPLEMENTATION_STATUS.md, LRGB.md
 ```
 
 ## Workflow
@@ -120,11 +123,14 @@ fine-alignment tiles, brightness mismatch on shared terrain 1.06 % → 0.14 %, 8
 
 Works in CIE Lab, so brightness and colour are adjusted independently:
 
-0. **Wavelet sharpening** (optional, first): as PixInsight's ATrousWaveletTransform on lightness (CIE L*): dyadic
-   layers of 1, 2, 4, 8 px, each weighted by 1 + bias. `--wavelets pixinsight` is the user's setting (4 layers, linear
-   interpolation (3), layer 1 bias +3); `--wavelets 3,0.5,0,0` gives your own biases, `--wavelet-kernel b3` the B3-spline
-   scaling function, and `--wavelet-denoise 1,0.5` protects against grain (coefficients within K × the layer's noise keep
-   weight 1). Measured on the unsharpened 27 Sep 2026 mosaic: fine detail × 1.27, limb 7.3 → 5.5 px.
+0. **Wavelet sharpening** (optional, first): reproduces PixInsight's ATrousWaveletTransform (target RGB/K, no noise
+   reduction or deringing): dyadic layers of 1, 2, 4, 8 px on each channel's stored values, and **the biases are
+   PixInsight's own numbers**. Measured on PixInsight 1.9.5, a layer with bias b is multiplied by 1 + 10 × b (b ≥ 0) or
+   1 / (1 + 10 × |b|) (b < 0): biases 0.1, 0.5, 1, 2.3, 5 give gains 2, 6, 11, 24, 51. `--wavelets pixinsight` is the
+   user's setting as saved on 2026-10-05 (4 layers, linear interpolation (3), layer 1 bias +2.3); `--wavelets
+   0.6,1.1,0.2,0` gives your own biases, `--wavelet-kernel b3` the B3-spline scaling function, and `--wavelet-denoise
+   1,0.5` protects against grain (coefficients within K × the layer's noise keep weight 1). Before 2026-10-05 the biases
+   meant gain 1 + bias on CIE lightness, ten times weaker than PixInsight: divide an old value by 10 to keep its effect.
 1. **Highlights** (`--highlights 0.3`): the brightest ~10 % of the disk is gently lowered on an edge-aware base layer;
    the fine detail is added back unchanged (no halos).
 2. **Lunar colour** (`--saturation 2`, `--saturation-passes 2`, `--chroma-denoise 3`): the image is split into brightness
@@ -147,12 +153,15 @@ the master's brightest 0.01 %, gamma 1.1; about 0.03 % of the Moon at full white
 
 ### Sharpening: how Photoshop's Unsharp Mask works, and how `--usm` reproduces it
 
-- Photoshop: result = original + **Amount** × (original − Gaussian blur). **Radius** is the Gaussian's standard deviation
-  σ in pixels. **Threshold** (0–255 levels) leaves pixels alone whose difference from the blurred copy is smaller; 0 means
-  everything is sharpened. In an RGB image Photoshop sharpens each colour channel separately, which can create colour
-  fringes; Edit → Fade → Luminosity avoids that.
-- `--usm 100,1.5,0` (or with a decimal comma: `--usm "100;1,5;0"`) applies exactly this formula. `--usm-mode luminosity`
-  (default) sharpens brightness only; `--usm-mode rgb` sharpens each channel, as Photoshop does in RGB mode.
+- Photoshop, as measured on Photoshop 2026: d = original − Gaussian blur, result = original + **Amount** ×
+  sign(d) × max(|d| − **Threshold**, 0). Amount is exactly linear (50 / 100 / 200 % halve and double the effect). The
+  Gaussian for a **Radius** is slightly wider than σ = radius: σ = 1.08 × radius at 1 px, 1.05 × at 2 px, 1.03 × at 4 px.
+  The **Threshold** (0–255 levels) is soft: it is subtracted from every difference, so small differences fade out
+  instead of being cut off at a step. In an RGB image Photoshop sharpens each colour channel separately, which can
+  create colour fringes; Edit → Fade → Luminosity avoids that.
+- `--usm 100,1.5,0` (or with a decimal comma: `--usm "100;1,5;0"`) applies exactly this. `--usm-mode luminosity`
+  (default) sharpens brightness only; `--usm-mode rgb` sharpens each channel, as Photoshop does in RGB mode. Before
+  2026-10-05 the threshold was a hard cut-off and σ equalled the radius.
 - Measured on this mosaic, which is already wavelet-sharpened: 100 % / 1.5 px / 0 roughly **doubles the grain in smooth
   mare areas** (grain 969 → 1927). Threshold 3 hardly helps (1875), threshold 6 a little (1636), because the grain
   itself is about 7 levels strong. Sharpening is therefore **off by default**. If you use it, do it here *or* in

@@ -24,8 +24,8 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import atlas_equipment as eq  # noqa: E402
 from atlas_ephem import capture_time, ephemeris  # noqa: E402
-from atlas_geo import (DATA, R_MOON, Geometry, Reference, download, fit_correction, fit_global, load_gray, match_patches,
-                       resize, sky_to_latlon, unit)
+from atlas_geo import (DATA, R_MOON, Geometry, Reference, download, fit_global, load_gray, match_patches,
+                       resize, unit)
 
 OPTICS_FILE = 'lunaratlas_optics.json'
 OLD_OPTICS_FILES = ('moon_atlas_optics.json',)   # the same file, written before the rename; still read

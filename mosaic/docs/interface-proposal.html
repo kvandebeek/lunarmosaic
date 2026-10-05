@@ -1,0 +1,2010 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- LunarMosaic interface proposal: the screen mockups that illustrate mosaic/docs/DESIGN.md.
+     DESIGN.md is the record of the decisions; where the two disagree, DESIGN.md is right.
+     Self-contained apart from the Google Fonts link, which falls back to system fonts offline.
+     Open it straight from disk in a browser. -->
+<title>LunarMosaic Interface</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a single scrolling design brief; each screen is a 1:1 reproduction of the app chrome,
+   built from LunarAtlas's own tokens (lunaratlas/viewer/theme.css) rather than redrawn. */
+
+/* ---- LunarAtlas design tokens, copied verbatim from lunaratlas/viewer/theme.css ---- */
+:root {
+  --bg-0: #0A0F25;
+  --bg-1: #111934;
+  --bg-2: #18224A;
+  --bg-3: #1F2C5A;
+  --bg-4: #28386E;
+  --panel: rgba(17, 25, 52, 0.84);
+  --scrim: rgba(5, 8, 20, 0.62);
+
+  --line: rgba(255, 255, 255, 0.08);
+  --line-strong: rgba(255, 255, 255, 0.16);
+
+  --text: #FCF8EE;
+  --text-2: #B7BFD8;
+  --text-3: #97A1C2;
+  --text-disabled: #5E6789;
+
+  --accent: #F5A742;
+  --accent-hover: #F8B963;
+  --accent-press: #E3922C;
+  --accent-soft: rgba(245, 167, 66, 0.16);
+  --accent-line: rgba(245, 167, 66, 0.55);
+  --accent-ink: #1A1206;
+  --focus: 0 0 0 2px var(--bg-0), 0 0 0 4px var(--accent);
+
+  --grid: #8FD8EC;
+  --grid-line: rgba(143, 216, 236, 0.30);
+  --grid-label: rgba(143, 216, 236, 0.90);
+  --moon: #FCF8EE;
+  --moon-2: #D8CEB8;
+  --moon-shadow: #26326A;
+  --halo: rgba(5, 8, 20, 0.72);
+  --label: #FFF4E2;
+  --rim: var(--accent);
+
+  --danger: #F08A7E;
+  --danger-soft: rgba(240, 138, 126, 0.14);
+
+  --radius-s: 6px;
+  --radius: 10px;
+  --radius-l: 14px;
+  --shadow: 0 12px 36px rgba(2, 4, 14, 0.55);
+  --ease: cubic-bezier(.2, .7, .2, 1);
+
+  --font-ui: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background:
+    radial-gradient(1100px 520px at 50% -180px, rgba(31,44,90,.75) 0%, transparent 72%),
+    var(--bg-0);
+  color: var(--text);
+  font: 15px/1.6 var(--font-ui);
+  -webkit-font-smoothing: antialiased;
+  padding-block: 0 72px;
+}
+[hidden] { display: none !important; }
+button, input, select { font: inherit; color: inherit; }
+
+/* ---- document shell ---- */
+.wrap { max-width: 1120px; margin: 0 auto; padding-inline: 20px; }
+.narrow { max-width: 760px; }
+
+h1, h2, h3, h4 { text-wrap: balance; margin: 0; }
+p { margin: 0; }
+
+.masthead { padding-block: 64px 40px; border-bottom: 1px solid var(--line); }
+.eyebrow { font-size: 11px; font-weight: 600; letter-spacing: .16em; text-transform: uppercase; color: var(--accent); }
+.masthead h1 { font-size: clamp(32px, 5vw, 46px); font-weight: 600; letter-spacing: -.02em; line-height: 1.08; margin-top: 14px; }
+.masthead .lead { color: var(--text-2); font-size: 17px; margin-top: 16px; max-width: 64ch; }
+.masthead .meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 24px; }
+.masthead .meta span { font-size: 12px; color: var(--text-2); padding: 3px 10px; border-radius: 6px;
+  background: rgba(255,255,255,.05); border: 1px solid var(--line); }
+
+section.part { padding-block: 56px 8px; }
+.kicker { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.kicker .num { font: 600 11px/1 var(--font-mono); letter-spacing: .1em; color: var(--accent);
+  border: 1px solid var(--accent-line); border-radius: 5px; padding: 5px 7px; flex: none; }
+.kicker h2 { font-size: clamp(24px, 3.4vw, 31px); font-weight: 600; letter-spacing: -.015em; }
+section.part > .wrap > p.intro { color: var(--text-2); margin-top: 14px; max-width: 70ch; }
+.note { color: var(--text-2); max-width: 70ch; margin-top: 18px; }
+.note + .note { margin-top: 12px; }
+strong { color: var(--text); font-weight: 600; }
+code { font: 12.5px/1.5 var(--font-mono); color: var(--grid); background: rgba(143,216,236,.08);
+  padding: 1px 5px; border-radius: 4px; word-break: break-word; }
+
+/* ---- the mockup frame ---- */
+figure.screen { margin: 28px 0 0; }
+.frame { border: 1px solid var(--line-strong); border-radius: var(--radius-l); overflow: hidden;
+  background: var(--bg-0); box-shadow: var(--shadow); }
+.frame .chrome { display: flex; align-items: center; gap: 8px; padding: 9px 13px; background: var(--bg-1);
+  border-bottom: 1px solid var(--line); }
+.frame .chrome i { width: 9px; height: 9px; border-radius: 50%; background: rgba(255,255,255,.14); flex: none; }
+.frame .chrome b { font: 500 12px/1 var(--font-ui); color: var(--text-3); margin-left: 6px; }
+figcaption { color: var(--text-2); font-size: 13.5px; margin-top: 14px; max-width: 76ch; }
+figcaption b { color: var(--text); font-weight: 600; }
+
+/* ---- shared controls, copied from theme.css ---- */
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 7px; height: 32px; padding: 0 13px;
+  border-radius: 8px; border: 1px solid var(--line-strong); background: var(--bg-2); color: var(--text);
+  font: 500 13px/1 var(--font-ui); cursor: pointer; white-space: nowrap; text-decoration: none;
+  transition: background .12s, border-color .12s, color .12s, transform .06s; }
+.btn:hover { background: var(--bg-3); border-color: rgba(255,255,255,.22); }
+.btn:active { background: var(--bg-1); transform: translateY(1px); }
+.btn:focus-visible { outline: none; box-shadow: var(--focus); }
+.btn:disabled, .btn[aria-disabled=true] { background: transparent; border-color: var(--line); color: var(--text-disabled); cursor: default; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+.btn.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+.btn.ghost { background: transparent; border-color: transparent; color: var(--text-2); }
+.btn.ghost:hover { background: rgba(255,255,255,.06); color: var(--text); }
+.btn.danger { color: var(--danger); }
+.btn.danger:hover { background: var(--danger-soft); border-color: rgba(240,138,126,.4); }
+.btn.lg { height: 40px; padding: 0 18px; font-size: 14px; border-radius: 10px; }
+.btn.sm { height: 26px; padding: 0 9px; font-size: 12px; border-radius: 7px; }
+.linkbtn { border: 0; background: none; padding: 2px 4px; margin: -2px -4px; border-radius: 5px; color: var(--text-2);
+  font: inherit; cursor: pointer; text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: 3px; }
+.linkbtn:hover { color: var(--text); }
+
+.switch { position: relative; width: 30px; height: 18px; flex: none; display: inline-block; }
+.switch input { opacity: 0; width: 0; height: 0; position: absolute; }
+.switch span { position: absolute; inset: 0; border-radius: 9px; background: rgba(255,255,255,.14); transition: .15s; cursor: pointer; }
+.switch span::after { content: ''; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%;
+  background: var(--text-2); transition: .15s var(--ease); }
+.switch input:checked + span { background: var(--accent); }
+.switch input:checked + span::after { transform: translateX(12px); background: var(--accent-ink); }
+.switch input:focus-visible + span { box-shadow: var(--focus); }
+
+.tag { display: inline-flex; align-items: center; gap: 5px; height: 20px; padding: 0 8px; border-radius: 10px;
+  font: 500 11.5px/1 var(--font-ui); white-space: nowrap; border: 1px solid transparent; }
+.tag::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.tag.ok { color: var(--grid); background: rgba(143,216,236,.10); }
+.tag.warn { color: var(--accent); background: var(--accent-soft); }
+.tag.off { color: var(--text-2); background: rgba(255,255,255,.06); }
+.tag.bad { color: var(--danger); background: var(--danger-soft); }
+
+kbd { font: 500 11px/16px var(--font-ui); padding: 0 5px; border-radius: 4px; border: 1px solid var(--line-strong);
+  color: var(--text-2); background: rgba(255,255,255,.04); }
+
+/* ---- app.html page furniture ---- */
+.app { padding: 26px 22px; background:
+  radial-gradient(900px 440px at 50% -160px, var(--bg-3) 0%, transparent 70%), var(--bg-0); }
+.app .hero { display: flex; align-items: center; gap: 16px; margin-bottom: 24px; }
+.app .hero .mark { width: 54px; height: 54px; flex: none; filter: drop-shadow(0 6px 18px rgba(0,0,0,.45)); }
+.app .hero h3 { font-size: 26px; font-weight: 600; letter-spacing: -.01em; line-height: 1.1; }
+.app .hero p { margin-top: 3px; color: var(--text-2); font-size: 14px; }
+.card { background: var(--bg-1); border: 1px solid var(--line); border-radius: var(--radius-l); padding: 20px; margin-bottom: 16px; }
+.card > h4 { font-size: 12px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: var(--text-2); margin-bottom: 12px; }
+.card > h4 .side { float: right; letter-spacing: 0; text-transform: none; font-size: 12px; font-weight: 400; color: var(--text-3); }
+.hint { color: var(--text-2); font-size: 13px; }
+.sub3 { color: var(--text-3); font-size: 12.5px; }
+
+/* drop zones */
+.drops { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.drop { position: relative; display: flex; align-items: center; gap: 16px; padding: 18px; border-radius: 12px;
+  border: 1.5px dashed rgba(143,216,236,.28); background: linear-gradient(180deg, rgba(31,44,90,.35), rgba(10,15,37,.2));
+  cursor: pointer; transition: border-color .15s, background .15s; }
+.drop:hover { border-color: var(--accent-line); background: linear-gradient(180deg, rgba(31,44,90,.6), rgba(10,15,37,.3)); }
+.drop.over { border-style: solid; border-color: var(--accent); background: var(--accent-soft); }
+.drop .glyph { width: 62px; height: 62px; flex: none; }
+.drop b { display: block; font-size: 15px; font-weight: 600; margin-bottom: 3px; }
+.formats { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 8px; }
+.formats span { font-size: 11px; color: var(--text-2); padding: 1px 7px; border-radius: 5px;
+  background: rgba(255,255,255,.05); border: 1px solid var(--line); }
+
+/* filled set summary */
+.setgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.set { border: 1px solid var(--line-strong); border-radius: 12px; padding: 14px; background: var(--bg-0); }
+.set.l { box-shadow: inset 3px 0 0 var(--grid); }
+.set.c { box-shadow: inset 3px 0 0 var(--accent); }
+.set .top { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.set .top .ic { width: 34px; height: 34px; border-radius: 8px; display: grid; place-items: center; flex: none;
+  background: var(--bg-3); color: var(--grid); }
+.set.c .top .ic { color: var(--accent); }
+.set .top b { font-weight: 600; font-size: 14px; display: block; }
+.set dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; margin: 0; font-size: 12.5px; }
+.set dt { color: var(--text-3); }
+.set dd { margin: 0; font-variant-numeric: tabular-nums; }
+.thumbs { display: flex; gap: 4px; margin-bottom: 11px; }
+.thumbs i { width: 34px; height: 24px; border-radius: 4px; border: 1px solid var(--line); flex: none;
+  background: var(--bg-2) center/cover no-repeat; display: block; }
+.thumbs .more { width: auto; padding: 0 6px; display: grid; place-items: center; font: 500 10.5px/1 var(--font-ui);
+  color: var(--text-3); background: none; font-style: normal; }
+
+/* stages, from app.html */
+.pbar { height: 6px; background: rgba(255,255,255,.08); border-radius: 3px; overflow: hidden; margin: 12px 0 14px; }
+.pbar i { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
+.pbar.failed i { background: var(--danger); }
+.pbar.done i { background: var(--grid); }
+ol.stages { list-style: none; margin: 0; padding: 0; display: grid; gap: 1px; }
+ol.stages li { display: flex; align-items: center; gap: 10px; padding: 3px 0; color: var(--text-3); font-size: 13px; }
+ol.stages li .dot { width: 17px; height: 17px; border-radius: 50%; border: 1.5px solid var(--line-strong); flex: none;
+  display: grid; place-items: center; }
+ol.stages li .note { margin-left: auto; font-size: 12px; color: var(--text-3); font-variant-numeric: tabular-nums; text-align: right; }
+ol.stages li.active { color: var(--text); font-weight: 500; }
+ol.stages li.active .dot { border-color: var(--accent); }
+ol.stages li.active .dot::after { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--accent);
+  animation: pulse 1.2s ease-in-out infinite; }
+ol.stages li.done .dot, ol.stages li.skip .dot { border-color: transparent; background: rgba(143,216,236,.16); color: var(--grid); }
+ol.stages li.done, ol.stages li.skip { color: var(--text-2); }
+ol.stages li.done .dot::after, ol.stages li.skip .dot::after { content: ''; width: 7px; height: 4px; border: solid currentColor;
+  border-width: 0 0 1.6px 1.6px; transform: translateY(-1px) rotate(-45deg); }
+ol.stages li.failed { color: var(--danger); }
+ol.stages li.failed .dot { border-color: var(--danger); }
+ol.stages li.failed .dot::after { content: '!'; font: 700 10px/1 var(--font-ui); color: var(--danger); }
+@keyframes pulse { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0s !important; transition-duration: 0s !important; } }
+
+.err { margin-top: 14px; padding: 13px 15px; border-radius: 10px; background: var(--danger-soft); border: 1px solid rgba(240,138,126,.3); }
+.err > b { display: block; color: var(--text); font-weight: 600; margin-bottom: 4px; }
+.err p { color: var(--text-2); font-size: 13.5px; }
+.err ul { margin: 10px 0 0; padding: 0; list-style: none; display: grid; gap: 8px; }
+.err li b { color: var(--accent); }
+.err li span { color: var(--text-2); font-size: 13.5px; }
+.err li small { display: block; color: var(--text-3); font-size: 12px; margin-top: 2px; font-family: var(--font-mono); }
+.warnbox { margin-top: 14px; padding: 13px 15px; border-radius: 10px; background: var(--accent-soft); border: 1px solid var(--accent-line); }
+.warnbox > b { display: block; color: var(--text); font-weight: 600; margin-bottom: 4px; }
+.warnbox p { color: var(--text-2); font-size: 13.5px; }
+.okbox { margin-top: 14px; padding: 13px 15px; border-radius: 10px; background: rgba(143,216,236,.10); border: 1px solid var(--grid-line); }
+.okbox > b { display: block; color: var(--text); font-weight: 600; margin-bottom: 4px; }
+.okbox p { color: var(--text-2); font-size: 13.5px; }
+
+details.log { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 11px; }
+details.log summary { cursor: pointer; color: var(--text-2); font-size: 12.5px; list-style: none; display: flex;
+  align-items: center; gap: 6px; width: max-content; }
+details.log summary::-webkit-details-marker { display: none; }
+details.log summary::before { content: '▸'; font-size: 10px; transition: transform .15s; }
+details.log[open] summary::before { transform: rotate(90deg); }
+pre.log { background: var(--bg-0); border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px;
+  font: 11.5px/1.55 var(--font-mono); max-height: 180px; overflow: auto; white-space: pre-wrap; margin: 9px 0 0; color: var(--text-2); }
+
+.rowbtns { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 16px; }
+
+/* recent projects */
+ul.recent { list-style: none; padding: 0; margin: 0 -8px; }
+ul.recent li { display: flex; align-items: center; gap: 12px; padding: 8px; border-radius: 10px; cursor: pointer; }
+ul.recent li:hover { background: var(--bg-2); }
+ul.recent .thumb { width: 46px; height: 46px; border-radius: 8px; flex: none; border: 1px solid var(--line);
+  background: var(--bg-0); overflow: hidden; }
+ul.recent .meta { flex: 1; min-width: 0; }
+ul.recent .name { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+ul.recent .sub { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 3px;
+  color: var(--text-3); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+
+/* ---- the canvas screen (index.html furniture) ---- */
+.stage { position: relative; height: 560px; background: var(--bg-0); overflow: hidden; }
+.stage canvas.map { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.stage.short { height: 400px; }
+.panel { position: absolute; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-l);
+  box-shadow: var(--shadow); backdrop-filter: blur(16px) saturate(1.2); -webkit-backdrop-filter: blur(16px) saturate(1.2); }
+
+.topbar { top: 12px; left: 12px; display: flex; align-items: center; gap: 10px; padding: 6px 10px 6px 8px; z-index: 5; }
+.topbar .brand { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+.topbar .brand b { font-weight: 600; font-size: 13.5px; }
+.topbar .file { color: var(--text-3); font-size: 12px; }
+.topbar .mark { width: 20px; height: 20px; flex: none; }
+
+.tools { top: 68px; left: 12px; display: flex; flex-direction: column; gap: 2px; padding: 5px; z-index: 4; }
+.tools button { position: relative; width: 36px; height: 36px; display: grid; place-items: center; border: 0; border-radius: 9px;
+  background: none; color: var(--text-2); cursor: pointer; transition: background .12s, color .12s; }
+.tools button:hover { background: rgba(255,255,255,.07); color: var(--text); }
+.tools button.on { background: var(--accent-soft); color: var(--accent); }
+.tools button.on::before { content: ''; position: absolute; left: -5px; top: 8px; bottom: 8px; width: 3px;
+  border-radius: 0 2px 2px 0; background: var(--accent); }
+.tools hr { width: 20px; margin: 4px auto; border: 0; border-top: 1px solid var(--line-strong); }
+
+.layers { top: 12px; right: 12px; width: 288px; padding: 11px 13px 13px; z-index: 4; max-height: calc(100% - 80px); overflow: auto; }
+.layers h5 { margin: 0 0 8px; font-size: 11px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: var(--text-2);
+  display: flex; align-items: center; justify-content: space-between; }
+.lrow { display: flex; align-items: center; gap: 9px; padding: 7px; border-radius: 9px; cursor: pointer; }
+.lrow:hover { background: rgba(255,255,255,.05); }
+.lrow.sel { background: var(--bg-3); box-shadow: inset 0 0 0 1px var(--accent-line); }
+.lrow .lt { width: 32px; height: 32px; border-radius: 6px; flex: none; border: 1px solid var(--line-strong); overflow: hidden; background: #000; }
+.lrow .lt canvas { width: 100%; height: 100%; display: block; }
+.lrow .nm { flex: 1; min-width: 0; }
+.lrow .nm b { display: block; font-weight: 500; font-size: 13px; }
+.lrow .nm span { display: block; color: var(--text-3); font-size: 11px; }
+.lrow.off .lt, .lrow.off .nm { opacity: .42; }
+.ladj { padding: 2px 7px 8px; }
+.sep { border-top: 1px solid var(--line); margin: 7px 0; }
+.slider { padding: 5px 0 1px; }
+.slider .lbl { display: flex; justify-content: space-between; color: var(--text-2); font-size: 12px; margin-bottom: 2px; }
+.slider .lbl b { color: var(--text); font-weight: 500; font-variant-numeric: tabular-nums; }
+.track { height: 4px; border-radius: 2px; background: rgba(255,255,255,.12); position: relative; }
+.track i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 2px; background: var(--accent); }
+.track b { position: absolute; top: 50%; width: 13px; height: 13px; margin-left: -6px; border-radius: 50%;
+  background: var(--accent); transform: translateY(-50%); box-shadow: 0 1px 3px rgba(0,0,0,.5); }
+.seg { display: flex; background: rgba(255,255,255,.05); border: 1px solid var(--line); border-radius: 9px; padding: 2px; }
+.seg button { flex: 1; border: 0; background: none; padding: 4px 0; border-radius: 7px; color: var(--text-2);
+  cursor: pointer; font-size: 12px; white-space: nowrap; }
+.seg button:hover { color: var(--text); background: rgba(255,255,255,.05); }
+.seg button.on { background: var(--bg-3); color: var(--text); box-shadow: inset 0 0 0 1px var(--accent-line); }
+.sublabel { color: var(--text-2); font-size: 12px; margin: 4px 0 6px; }
+.disclose { display: flex; align-items: center; gap: 6px; color: var(--text-2); font-size: 12px; cursor: pointer;
+  padding: 4px 0 0; width: max-content; }
+.disclose::before { content: '▸'; font-size: 10px; color: var(--text-3); }
+.outsize { display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; border-radius: 9px;
+  background: var(--bg-2); font-variant-numeric: tabular-nums; font-size: 12.5px; margin-top: 8px; }
+.outsize span { color: var(--text-2); }
+
+.status { left: 12px; right: 12px; bottom: 12px; height: 44px; display: flex; align-items: center; gap: 14px;
+  padding: 0 7px 0 14px; z-index: 4; }
+.status .left { display: flex; align-items: center; gap: 12px; min-width: 0; flex: 1 1 auto; }
+.readout { display: flex; gap: 12px; font-variant-numeric: tabular-nums; color: var(--text-2); white-space: nowrap;
+  font-size: 12.5px; flex: none; }
+.readout b { color: var(--text); font-weight: 500; }
+.readout .k { color: var(--text-3); }
+.status .save { color: var(--text-3); font-size: 11.5px; white-space: nowrap; }
+.qchip { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border-radius: 13px; flex: none;
+  border: 1px solid var(--accent-line); background: var(--accent-soft); color: var(--accent); font-size: 12px;
+  font-weight: 500; cursor: pointer; }
+.qchip.ok { border-color: var(--grid-line); background: rgba(143,216,236,.12); color: var(--grid); }
+.zoom { display: flex; align-items: center; gap: 4px; flex: none; }
+.zoom .pct { min-width: 46px; text-align: right; color: var(--text-2); font-variant-numeric: tabular-nums;
+  margin-right: 4px; font-size: 12.5px; }
+
+.popover { position: absolute; z-index: 10; width: 300px; padding: 14px; background: var(--bg-1);
+  border: 1px solid var(--line-strong); border-radius: var(--radius-l); box-shadow: var(--shadow); }
+.popover h6 { margin: 0 0 9px; font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: var(--text-2); font-weight: 600; }
+.popover p { color: var(--text-2); font-size: 13px; margin-bottom: 9px; }
+.popover .raw { margin-top: 10px; padding-top: 9px; border-top: 1px solid var(--line); color: var(--text-3);
+  font: 11px/1.5 var(--font-mono); }
+.popover .nub { position: absolute; width: 12px; height: 12px; background: var(--bg-1); border: 1px solid var(--line-strong);
+  transform: rotate(45deg); }
+.popover .nub.b { bottom: -7px; left: 26px; border-top: 0; border-left: 0; }
+
+/* viewmode legend over the canvas */
+.vlegend { position: absolute; left: 60px; bottom: 68px; z-index: 5; display: flex; gap: 6px; align-items: center;
+  padding: 6px 10px; border-radius: 10px; background: var(--panel); border: 1px solid var(--line);
+  backdrop-filter: blur(16px); font-size: 12px; color: var(--text-2); }
+.vlegend b { color: var(--text); font-weight: 500; }
+.vlegend .sw { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+
+/* ---- modal / export dialog ---- */
+.modal { position: absolute; inset: 0; z-index: 30; display: grid; place-items: center; background: var(--scrim);
+  backdrop-filter: blur(2px); padding: 14px; }
+.dialog { width: 100%; max-width: 580px; max-height: 100%; overflow: auto; padding: 20px; background: var(--bg-1);
+  border: 1px solid var(--line-strong); border-radius: 16px; box-shadow: var(--shadow); }
+.dialog .top { display: flex; gap: 16px; align-items: flex-start; margin-bottom: 15px; }
+.dialog .top > div { flex: 1; min-width: 0; }
+.dialog h4 { margin: 0 0 4px; font-size: 17px; font-weight: 600; }
+.dialog .lead { color: var(--text-2); font-size: 13.5px; }
+.preview { flex: none; width: 160px; height: 120px; border-radius: 10px; background: var(--bg-0);
+  border: 1px solid var(--line); overflow: hidden; display: grid; place-items: center; position: relative; }
+.preview canvas { display: block; width: 100%; height: 100%; }
+.preview span { position: absolute; left: 6px; bottom: 5px; font-size: 10.5px; color: var(--text-3);
+  background: rgba(10,15,37,.7); padding: 1px 6px; border-radius: 5px; }
+.fieldset { margin: 0 0 14px; }
+.legend { color: var(--text-2); font-size: 11px; letter-spacing: .14em; text-transform: uppercase; font-weight: 600; margin-bottom: 7px; }
+.opts { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 6px; }
+.opts.three { grid-template-columns: repeat(3, minmax(0,1fr)); }
+.opt { display: block; padding: 8px 10px; border-radius: 9px; border: 1px solid var(--line-strong); cursor: pointer;
+  font-size: 13px; }
+.opt small { display: block; color: var(--text-2); font-size: 11.5px; margin-top: 1px; }
+.opt:hover { background: var(--bg-2); border-color: rgba(255,255,255,.24); }
+.opt.on { border-color: var(--accent); background: var(--bg-3); box-shadow: inset 0 0 0 1px var(--accent); }
+.opt.dis { color: var(--text-disabled); border-color: var(--line); cursor: default; }
+.opt.dis small { color: var(--text-disabled); }
+.checks { display: grid; grid-template-columns: 1fr 1fr; gap: 3px 16px; }
+.checks label { display: flex; align-items: center; gap: 8px; padding: 3px 0; font-size: 13px; cursor: pointer; }
+.cb { width: 15px; height: 15px; border-radius: 4px; flex: none; background: var(--accent); position: relative; }
+.cb::after { content: ''; position: absolute; left: 4px; top: 4px; width: 6px; height: 3px; border: solid var(--accent-ink);
+  border-width: 0 0 1.8px 1.8px; transform: rotate(-45deg); }
+.cb.off { background: none; border: 1px solid var(--line-strong); }
+.cb.off::after { display: none; }
+.dialog .foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+.dialog .foot .spread { margin-right: auto; }
+
+/* ---- tables ---- */
+.tablewrap { overflow-x: auto; margin-top: 24px; border: 1px solid var(--line); border-radius: var(--radius-l); }
+table { width: 100%; border-collapse: collapse; font-size: 13.5px; min-width: 620px; }
+th { text-align: left; font-weight: 600; font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--text-3);
+  padding: 11px 14px; border-bottom: 1px solid var(--line-strong); background: var(--bg-1); }
+td { padding: 11px 14px; border-bottom: 1px solid var(--line); color: var(--text-2); vertical-align: top; }
+tr:last-child td { border-bottom: 0; }
+td b { color: var(--text); font-weight: 600; }
+td code { font-size: 12px; }
+
+/* ---- decision list ---- */
+ol.decisions { list-style: none; counter-reset: d; padding: 0; margin: 26px 0 0; display: grid; gap: 14px; }
+ol.decisions li { counter-increment: d; background: var(--bg-1); border: 1px solid var(--line); border-radius: var(--radius-l);
+  padding: 18px 20px 18px 56px; position: relative; }
+ol.decisions li::before { content: counter(d); position: absolute; left: 18px; top: 18px; width: 24px; height: 24px;
+  border-radius: 7px; background: var(--accent-soft); border: 1px solid var(--accent-line); color: var(--accent);
+  font: 600 12px/22px var(--font-mono); text-align: center; }
+ol.decisions h4 { font-size: 15.5px; font-weight: 600; margin-bottom: 6px; }
+ol.decisions p { color: var(--text-2); font-size: 13.5px; }
+ol.decisions p + p { margin-top: 7px; }
+ol.decisions .lean { color: var(--text-3); font-size: 13px; margin-top: 8px; }
+ol.decisions .lean b { color: var(--accent); font-weight: 600; }
+
+/* ---- flow strip ---- */
+.flow { display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; margin-top: 28px; }
+.flow .step { background: var(--bg-1); border: 1px solid var(--line); border-radius: var(--radius); padding: 13px; position: relative; }
+.flow .step span { display: block; font: 600 10.5px/1 var(--font-mono); color: var(--accent); letter-spacing: .08em; margin-bottom: 7px; }
+.flow .step b { display: block; font-size: 13.5px; font-weight: 600; margin-bottom: 3px; }
+.flow .step p { color: var(--text-3); font-size: 12px; line-height: 1.45; }
+
+.callouts { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; margin-top: 22px; }
+.callout { background: var(--bg-1); border: 1px solid var(--line); border-radius: var(--radius); padding: 15px; }
+.callout b { display: block; font-size: 13.5px; font-weight: 600; margin-bottom: 5px; }
+.callout p { color: var(--text-2); font-size: 13px; }
+.callout.accent { border-color: var(--accent-line); background: linear-gradient(180deg, var(--accent-soft), transparent); }
+
+footer.end { margin-top: 64px; padding-top: 28px; border-top: 1px solid var(--line); color: var(--text-3); font-size: 13px; }
+
+@media (max-width: 900px) {
+  .flow { grid-template-columns: repeat(2, 1fr); }
+  .drops, .setgrid { grid-template-columns: 1fr; }
+  .layers { position: static; width: auto; max-height: none; margin: 10px; }
+  .tools { display: none; }
+  .stage { height: auto; }
+  .stage canvas.map { position: static; height: 240px; }
+  .topbar, .status { position: static; margin: 10px; }
+  .status { height: auto; flex-wrap: wrap; padding: 10px 12px; gap: 10px; }
+  .vlegend { position: static; margin: 0 10px 10px; width: max-content; }
+  .popover { position: static; width: auto; margin: 10px; }
+  .popover .nub { display: none; }
+  .modal { position: static; padding: 12px; background: none; }
+}
+@media (max-width: 560px) {
+  .opts, .opts.three, .checks { grid-template-columns: 1fr; }
+  .drop { flex-direction: column; text-align: center; }
+}
+
+/* ---- chain editor (section 07) ---- */
+.chains { top: 12px; right: 12px; width: 318px; padding: 11px 12px 12px; z-index: 4; max-height: calc(100% - 24px); overflow: auto; }
+.chain { margin-bottom: 10px; }
+.chain .ch { display: flex; align-items: center; gap: 8px; margin: 2px 2px 6px; }
+.chain .ch h5 { margin: 0; font-size: 11px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: var(--text-2); }
+.chain .ch .src { margin-left: auto; font-size: 11px; color: var(--text-3); }
+.chain .ch .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.blk { display: flex; align-items: center; gap: 8px; padding: 6px 7px; border-radius: 8px; border: 1px solid var(--line); background: rgba(255,255,255,.03); margin-bottom: 4px; }
+.blk:hover { background: rgba(255,255,255,.06); }
+.blk.sel { border-color: var(--accent-line); background: var(--bg-3); }
+.blk .grip { color: var(--text-disabled); font-size: 11px; letter-spacing: -1px; cursor: grab; flex: none; }
+.blk .bn { flex: 1; min-width: 0; }
+.blk .bn b { display: block; font-weight: 500; font-size: 12.5px; }
+.blk .bn span { display: block; font: 11px/1.35 var(--font-mono); color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.blk.off .bn { opacity: .42; }
+.blk-body { padding: 4px 8px 9px 22px; margin: -2px 0 6px; border-left: 2px solid var(--accent-line); margin-left: 9px; }
+.blk-body .readout { font: 11px var(--font-mono); color: var(--text-3); }
+.addblk { display: flex; align-items: center; gap: 6px; width: 100%; height: 28px; padding: 0 8px; border-radius: 8px; border: 1px dashed var(--line-strong); background: none; color: var(--text-3); font-size: 12px; cursor: pointer; }
+.addblk:hover { border-color: var(--accent-line); color: var(--accent); background: var(--accent-soft); }
+.mergebar { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 9px; background: var(--bg-2); border: 1px solid var(--line-strong); margin: 4px 0 12px; font-size: 12.5px; }
+.mergebar b { font-weight: 600; }
+.mergebar span { margin-left: auto; font: 11px var(--font-mono); color: var(--text-3); }
+.prev-rect { position: absolute; border: 1.5px dashed var(--accent); border-radius: 3px; z-index: 3; box-shadow: 0 0 0 1px rgba(5,8,20,.6); }
+.prev-rect i { position: absolute; left: -1px; top: -21px; font: 500 11px/1 var(--font-ui); font-style: normal; color: var(--accent-ink); background: var(--accent); padding: 4px 6px; border-radius: 4px 4px 4px 0; white-space: nowrap; }
+.prev-strip { position: absolute; left: 60px; bottom: 68px; z-index: 5; display: flex; gap: 8px; padding: 8px; border-radius: 12px; background: var(--panel); border: 1px solid var(--line); backdrop-filter: blur(16px); }
+.prev-strip figure { margin: 0; }
+.prev-strip canvas { display: block; width: 132px; height: 132px; border-radius: 6px; border: 1px solid var(--line-strong); image-rendering: pixelated; }
+.prev-strip figcaption { margin: 4px 0 0; font-size: 11px; color: var(--text-2); max-width: none; display: flex; justify-content: space-between; }
+.prev-strip figcaption em { font-style: normal; color: var(--text-3); font-family: var(--font-mono); }
+.addpop { width: 290px; }
+.addpop .grp { font-size: 10.5px; letter-spacing: .12em; text-transform: uppercase; color: var(--text-3); margin: 8px 0 4px; }
+.addpop .it { display: flex; align-items: baseline; gap: 8px; padding: 6px 8px; border-radius: 7px; font-size: 13px; cursor: pointer; }
+.addpop .it:hover { background: var(--bg-2); }
+.addpop .it small { margin-left: auto; color: var(--text-3); font-size: 11px; }
+.addpop .it.dis { color: var(--text-disabled); cursor: default; }
+.addpop .it.dis:hover { background: none; }
+.curvebox { display: flex; gap: 18px; flex-wrap: wrap; align-items: flex-start; }
+.curvebox svg { display: block; flex: none; max-width: 100%; height: auto; }
+.chain-flow { overflow-x: auto; margin-top: 26px; border: 1px solid var(--line); border-radius: var(--radius-l); background: var(--bg-1); padding: 18px; }
+.chain-flow svg { display: block; min-width: 760px; width: 100%; height: auto; }
+@media (max-width: 900px) {
+  .chains { position: static; width: auto; max-height: none; margin: 10px; }
+  .prev-strip { position: static; margin: 0 10px 10px; flex-wrap: wrap; }
+  .prev-rect { display: none; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="masthead">
+    <div class="eyebrow">Interface proposal · for discussion</div>
+    <h1>LunarMosaic</h1>
+    <p class="lead">Two panel sets in, one editable two-layer image out. A luminance mosaic that defines the
+      canvas, a colour mosaic matched to it, and a small set of controls that say plainly what each layer
+      contributes. Built as a second application in the LunarAtlas family, from the same stylesheet.</p>
+    <div class="meta">
+      <span>Reference: kvandebeek/lunaratlas</span>
+      <span>Tokens: lunaratlas/viewer/theme.css</span>
+      <span>Pipeline: mosaic_builder.py · lunar_finish.py</span>
+      <span>Design, not implementation</span>
+    </div>
+  </header>
+</div>
+
+<!-- ============================================================ 1 -->
+<section class="part">
+  <div class="wrap">
+    <div class="kicker"><span class="num">01</span><h2>The workflow</h2></div>
+    <p class="intro">Six steps, in a fixed order, each one a place you can stop and come back to. Steps 1–3 happen
+      on the setup page, which looks like LunarAtlas's home and progress screens. Steps 4–6 happen on the canvas,
+      which looks like LunarAtlas's viewer. There is no dashboard: the image is the interface.</p>
+
+    <div class="flow">
+      <div class="step"><span>STEP 1</span><b>Import L</b><p>Drop the folder of mono luminance panels. Count, sizes and optics are read.</p></div>
+      <div class="step"><span>STEP 2</span><b>Import RGB</b><p>Drop the colour panels as a separate set, with their own optics.</p></div>
+      <div class="step"><span>STEP 3</span><b>Build both</b><p>Two independent mosaic builds, nine steps each, side by side.</p></div>
+      <div class="step"><span>STEP 4</span><b>Match</b><p>The colour mosaic is scaled, turned and shifted onto the luminance canvas.</p></div>
+      <div class="step"><span>STEP 5</span><b>Edit</b><p>A chain of blocks per path, a merge, then a final chain. Judged on 1:1 previews.</p></div>
+      <div class="step"><span>STEP 6</span><b>Save &amp; export</b><p>A project you can reopen, and a flattened TIFF or PNG.</p></div>
+    </div>
+
+    <div class="callouts">
+      <div class="callout accent">
+        <b>The luminance mosaic is the canvas</b>
+        <p>Any mono capture can be the luminance &mdash; L, R, IR. Its pixel grid, size and orientation decide the result. The colour mosaic is always resampled onto it,
+          never the other way round. Everything downstream reads in those pixels.</p>
+      </div>
+      <div class="callout">
+        <b>Colour is a layer, not a bake</b>
+        <p>Colour reaches the image through a Color blend over the luminance base, exactly as in Photoshop.
+          Strength, saturation and smoothing stay live until you export.</p>
+      </div>
+      <div class="callout">
+        <b>Nothing is promised</b>
+        <p>The app says how well the two mosaics matched, in pixels, and shows where they did not. It never
+          reports "aligned" as a state.</p>
+      </div>
+      <div class="callout">
+        <b>Sources are never touched</b>
+        <p>As the command-line tools already guarantee: panels are read, never moved, renamed or written.
+          The project stores paths and numbers.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ 2 -->
+<section class="part">
+  <div class="wrap">
+    <div class="kicker"><span class="num">02</span><h2>Home</h2></div>
+    <p class="intro">The same shape as LunarAtlas's home: hero, one primary action, and your earlier work below it.
+      The difference is that a LunarMosaic project is a thing you return to, so the list carries state rather than
+      a solve status.</p>
+
+    <figure class="screen">
+      <div class="frame">
+        <div class="chrome"><i></i><i></i><i></i><b>LunarMosaic</b></div>
+        <div class="app">
+          <div class="hero">
+            <svg class="mark" viewBox="0 0 64 64" aria-hidden="true">
+              <defs>
+                <radialGradient id="hm" cx=".74" cy=".34" r=".8"><stop offset="0" stop-color="#FCF8EE"/><stop offset="1" stop-color="#D8CEB8"/></radialGradient>
+              </defs>
+              <rect x="2" y="2" width="60" height="60" rx="14" fill="#18224A" stroke="rgba(255,255,255,.1)"/>
+              <circle cx="32" cy="32" r="19" fill="#26326A"/>
+              <path d="M32 13a19 19 0 0 1 0 38a7 19 0 0 0 0-38z" fill="url(#hm)"/>
+              <g fill="none" stroke="#8FD8EC" stroke-opacity=".55" stroke-width="1">
+                <rect x="13" y="19" width="19" height="13"/><rect x="26" y="26" width="19" height="13"/>
+                <rect x="19" y="33" width="19" height="13"/>
+              </g>
+              <g fill="none" stroke="#F5A742" stroke-width="2" stroke-linecap="round">
+                <path d="M8 16V8h8M56 8h-8M56 48v8h-8M16 56H8v-8"/>
+              </g>
+            </svg>
+            <div>
+              <h3>LunarMosaic</h3>
+              <p>A gigapixel Moon from your panels: sharp luminance, separate colour, both still editable.</p>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="drop" style="padding: 22px 24px">
+              <svg class="glyph" viewBox="0 0 64 64" aria-hidden="true" style="width:76px;height:76px">
+                <g fill="none" stroke="#8FD8EC" stroke-opacity=".55" stroke-width="1.4">
+                  <rect x="6" y="14" width="26" height="18" rx="2"/><rect x="22" y="23" width="26" height="18" rx="2"/>
+                  <rect x="14" y="32" width="26" height="18" rx="2"/><rect x="30" y="14" width="26" height="18" rx="2"/>
+                </g>
+                <circle cx="32" cy="32" r="21" fill="none" stroke="#FCF8EE" stroke-opacity=".5" stroke-width="1.6"/>
+                <g fill="none" stroke="#F5A742" stroke-width="2.2" stroke-linecap="round">
+                  <path d="M4 12V4h8M60 4h-8M60 60v-8M12 60H4v-8"/>
+                </g>
+              </svg>
+              <div>
+                <b>Start a new mosaic</b>
+                <span class="hint">Drop a folder of panels here, or click to choose one. You add the second set next.</span>
+                <div class="formats"><span>TIFF</span><span>PNG</span><span>FITS</span><span>a folder of panels</span></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card">
+            <h4>Recent projects</h4>
+            <ul class="recent">
+              <li>
+                <div class="thumb"><canvas data-moon="colour" width="92" height="92"></canvas></div>
+                <div class="meta">
+                  <div class="name">2026-09-25 full Moon</div>
+                  <div class="sub"><span>101 L + 38 RGB panels</span><span>14792 × 13432 px</span><span class="tag ok">Matched 0.6 px</span></div>
+                </div>
+                <button class="btn">Open</button>
+              </li>
+              <li>
+                <div class="thumb"><canvas data-moon="lum" width="92" height="92"></canvas></div>
+                <div class="meta">
+                  <div class="name">2026-09-27 waning gibbous</div>
+                  <div class="sub"><span>64 L panels</span><span>colour not imported</span><span class="tag off">Luminance only</span></div>
+                </div>
+                <button class="btn">Open</button>
+              </li>
+              <li>
+                <div class="thumb"><canvas data-moon="part" width="92" height="92"></canvas></div>
+                <div class="meta">
+                  <div class="name">2026-09-18 Copernicus run</div>
+                  <div class="sub"><span>22 L + 12 RGB panels</span><span>stopped at step 6</span><span class="tag warn">Unfinished build</span></div>
+                </div>
+                <button class="btn">Resume</button>
+              </li>
+            </ul>
+          </div>
+        </div>
+      </div>
+      <figcaption><b>Reused directly:</b> the hero, <code>.card</code>, the <code>#drop</code> zone with all four of its
+        states, <code>ul.recent</code> with its thumbnail and hover, and the <code>.tag</code> status chips.
+        A project's chip states are <em>Luminance only</em>, <em>Unfinished build</em>, and a matched chip
+        carrying the real median error, so the list itself tells you what is left to do.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<!-- ============================================================ 3 -->
+<section class="part">
+  <div class="wrap">
+    <div class="kicker"><span class="num">03</span><h2>Importing the two sets</h2></div>
+    <p class="intro">One card, two drop zones — one per stream, luminance and colour — side by side and clearly
+      labelled by what took them rather than by file type. A stream can hold several sets at different scales (another
+      Barlow, another telescope). Each set keeps its own optics, which is where the 2× Barlow on luminance and the bare RGB
+      run get declared. A single set does not need them, and the app says so; a stream that mixes scales needs them, or
+      confirms a scale ratio the app measured.</p>
+
+    <figure class="screen">
+      <div class="frame">
+        <div class="chrome"><i></i><i></i><i></i><b>LunarMosaic — new project</b></div>
+        <div class="app">
+          <div class="card">
+            <h4>Panels <span class="side">Step 1 of 3</span></h4>
+            <div class="setgrid">
+              <div class="set l">
+                <div class="top">
+                  <div class="ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="8"/><path d="M12 4v16"/></svg></div>
+                  <div><b>Luminance</b><span class="sub3">mono camera · defines the canvas</span></div>
+                  <span class="tag ok" style="margin-left:auto">101 panels</span>
+                </div>
+                <div class="thumbs">
+                  <i></i><i></i><i></i><i></i><i></i><i></i><span class="thumbs more">+95</span>
+                </div>
+                <dl>
+                  <dt>Folder</dt><dd>2026-09-25/moon/panels_L</dd>
+                  <dt>Size</dt><dd>3720–3816 × 2088–2112 px</dd>
+                  <dt>Depth</dt><dd>16-bit, uncompressed</dd>
+                  <dt>Taken with</dt><dd>250 PDS · 2× Barlow · ASI174MM</dd>
+                  <dt>Scale</dt><dd>0.108 ″/px</dd>
+                </dl>
+                <button class="btn sm" style="margin-top:10px">Change optics…</button>
+              </div>
+
+              <div class="set c">
+                <div class="top">
+                  <div class="ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="9.5" cy="9.5" r="5"/><circle cx="14.5" cy="9.5" r="5"/><circle cx="12" cy="14.5" r="5"/></svg></div>
+                  <div><b>Colour</b><span class="sub3">colour camera · supplies hue only</span></div>
+                  <span class="tag ok" style="margin-left:auto">38 panels</span>
+                </div>
+                <div class="thumbs">
+                  <i></i><i></i><i></i><i></i><i></i><i></i><span class="thumbs more">+32</span>
+                </div>
+                <dl>
+                  <dt>Folder</dt><dd>2026-09-25/moon/panels_RGB</dd>
+                  <dt>Size</dt><dd>3096 × 2080 px</dd>
+                  <dt>Depth</dt><dd>16-bit, uncompressed</dd>
+                  <dt>Taken with</dt><dd>250 PDS · no Barlow · ASI585MC</dd>
+                  <dt>Scale</dt><dd>0.247 ″/px</dd>
+                </dl>
+                <button class="btn sm" style="margin-top:10px">Change optics…</button>
+              </div>
+            </div>
+
+            <div class="okbox">
+              <b>The colour panels are 2.29× coarser than the luminance panels.</b>
+              <p>That is what a 2× Barlow on the mono camera and none on the colour camera should give, allowing for
+                the two pixel sizes. LunarMosaic will search around this ratio when it matches the two mosaics. If the
+                optics are wrong, the match still runs, it just takes longer.</p>
+            </div>
+
+            <div class="rowbtns">
+              <button class="btn primary lg">Build both mosaics</button>
+              <button class="btn ghost lg">Build luminance only</button>
+              <span class="sub3" style="margin-left:auto">About 6 minutes on this computer</span>
+            </div>
+          </div>
+
+          <div class="card">
+            <h4>If something is missing</h4>
+            <div class="setgrid">
+              <div class="set" style="box-shadow:inset 3px 0 0 var(--accent)">
+                <div class="top">
+                  <div class="ic" style="color:var(--accent)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 4l9 16H3z" stroke-linejoin="round"/><path d="M12 10v4.5" stroke-linecap="round"/><circle cx="12" cy="17.3" r="1.1" fill="currentColor" stroke="none"/></svg></div>
+                  <div><b>4 panels could not be read</b><span class="sub3">the other 97 are fine</span></div>
+                </div>
+                <p class="hint">Two are 8-bit JPEGs and two have no image data. They are listed with their names and
+                  left out. You can build without them, or fix them and drop the folder again.</p>
+                <div class="rowbtns" style="margin-top:12px">
+                  <button class="btn sm">Show the four</button><button class="btn sm">Use the other 97</button>
+                </div>
+              </div>
+              <div class="set" style="box-shadow:inset 3px 0 0 var(--text-disabled)">
+                <div class="top">
+                  <div class="ic" style="color:var(--text-3)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="9.5" cy="9.5" r="5"/><circle cx="14.5" cy="9.5" r="5"/><circle cx="12" cy="14.5" r="5"/></svg></div>
+                  <div><b>No colour panels yet</b><span class="sub3">optional</span></div>
+                </div>
+                <p class="hint">A luminance-only project is a complete project. Add colour panels later from the canvas
+                  and the colour layer appears above the one you already have; nothing already built is rebuilt.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <figcaption><b>Reused directly:</b> two <code>#drop</code> zones in the <code>.drops</code> grid, the equipment
+        dialog <code>dialog#eqform</code> behind "Change optics…", with its telescope / Barlow chips / camera combo
+        from <code>equipment.js</code> and <code>cameras.json</code>, and the <code>.scale</code> readout. The scale
+        ratio box is new, and it is the one place the Barlow difference is explained in words rather than numbers.</figcaption>
+    </figure>
+
+    <p class="note">The sets are deliberately not symmetrical in the copy. Luminance is described as the thing that
+      <em>defines the canvas</em>; colour as the thing that <em>supplies hue only</em>. That one difference, stated at
+      import, is what makes the rest of the application predictable: a user who reads these two lines already knows why
+      the output is luminance-sized and why colour can be blurred without hurting anything.</p>
+  </div>
+</section>
+
+<!-- ============================================================ 4 -->
+<section class="part">
+  <div class="wrap">
+    <div class="kicker"><span class="num">04</span><h2>Building</h2></div>
+    <p class="intro">Two builds, each the existing nine steps of <code>mosaic_builder.py</code>, shown as two
+      independent stage lists. They are independent on screen because they are independent in fact: one can finish
+      while the other fails, and the finished one is kept.</p>
+
+    <figure class="screen">
+      <div class="frame">
+        <div class="chrome"><i></i><i></i><i></i><b>LunarMosaic — building</b></div>
+        <div class="app">
+          <div class="card">
+            <h4>Building both mosaics <span class="side">4 min 12 s elapsed</span></h4>
+            <div class="setgrid">
+
+              <div class="set l">
+                <div class="top">
+                  <div class="ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="8"/><path d="M12 4v16"/></svg></div>
+                  <div><b>Luminance</b><span class="sub3">101 panels</span></div>
+                  <span class="tag warn" style="margin-left:auto">Step 7 of 9</span>
+                </div>
+                <div class="pbar"><i style="width:74%"></i></div>
+                <ol class="stages">
+                  <li class="done"><span class="dot"></span>Checking the inputs<span class="note">2 s</span></li>
+                  <li class="done"><span class="dot"></span>Finding features<span class="note">31 s</span></li>
+                  <li class="done"><span class="dot"></span>Matching overlaps<span class="note">14 s</span></li>
+                  <li class="done"><span class="dot"></span>Placing panels<span class="note">101 placed · 0.54 px</span></li>
+                  <li class="done"><span class="dot"></span>Fine alignment<span class="note">44 s</span></li>
+                  <li class="done"><span class="dot"></span>Matching brightness<span class="note">1.06 % → 0.14 %</span></li>
+                  <li class="active"><span class="dot"></span>Choosing the sharpest regions<span class="note">63 of 101</span></li>
+                  <li><span class="dot"></span>Blending</li>
+                  <li><span class="dot"></span>Finishing</li>
+                </ol>
+                <p class="hint" style="margin-top:10px">Only the sharpest panel covering each piece of ground is used.</p>
+              </div>
+
+              <div class="set c">
+                <div class="top">
+                  <div class="ic" style="color:var(--accent)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="9.5" cy="9.5" r="5"/><circle cx="14.5" cy="9.5" r="5"/><circle cx="12" cy="14.5" r="5"/></svg></div>
+                  <div><b>Colour</b><span class="sub3">38 panels</span></div>
+                  <span class="tag ok" style="margin-left:auto">Finished</span>
+                </div>
+                <div class="pbar done"><i style="width:100%"></i></div>
+                <ol class="stages">
+                  <li class="done"><span class="dot"></span>Checking the inputs<span class="note">1 s</span></li>
+                  <li class="done"><span class="dot"></span>Finding features<span class="note">9 s</span></li>
+                  <li class="done"><span class="dot"></span>Matching overlaps<span class="note">4 s</span></li>
+                  <li class="done"><span class="dot"></span>Placing panels<span class="note">36 of 38 · 0.61 px</span></li>
+                  <li class="done"><span class="dot"></span>Fine alignment<span class="note">11 s</span></li>
+                  <li class="done"><span class="dot"></span>Matching brightness<span class="note">0.9 % → 0.2 %</span></li>
+                  <li class="done"><span class="dot"></span>Choosing the sharpest regions<span class="note">31 used</span></li>
+                  <li class="done"><span class="dot"></span>Blending<span class="note">7 levels</span></li>
+                  <li class="done"><span class="dot"></span>Finishing<span class="note">6412 × 5840 px</span></li>
+                </ol>
+                <div class="warnbox" style="margin-top:10px">
+                  <b>2 panels were left out.</b>
+                  <p>They did not overlap the rest enough to be placed. The colour mosaic covers a little less of
+                    the south-east limb because of it.</p>
+                </div>
+              </div>
+            </div>
+
+            <div class="rowbtns">
+              <button class="btn">Cancel the luminance build</button>
+              <span class="sub3" style="margin-left:auto">The colour mosaic is already saved in the project.</span>
+            </div>
+
+            <details class="log" open><summary>Details</summary>
+              <pre class="log">[L] stage 7/9 choosing the sharpest regions: 63/101 panels scored
+[L]   region map 3698 x 3358 at 1/4 scale, depth median 5
+[C] stage 9/9 finishing: sky pedestal 312 ADU removed
+[C]   highlands balance B/G 1.055 -> 1.000, R/G 0.966 -> 1.000
+[C] wrote colour_mosaic.tif  6412 x 5840  16-bit RGB  219.1 MiB
+[C] done in 1 min 48 s</pre>
+            </details>
+          </div>
+        </div>
+      </div>
+      <figcaption><b>Reused directly:</b> <code>ol.stages</code> with its pulsing active dot, cyan ticks and
+        right-aligned notes; the <code>.bar</code> progress bar including its failed variant; <code>details.log</code>
+        with the Copy button; and <code>friendly.js</code>'s job of turning raw log lines into one plain sentence.
+        The stage names are the nine already printed by <code>mosaic_builder.py</code>, unchanged.</figcaption>
+    </figure>
+
+    <h3 style="font-size:17px;font-weight:600;margin-top:40px">When a build fails</h3>
+    <p class="note">The failure is attached to the set that failed, the other set keeps its result, and the offered
+      actions are the ones that can actually recover. Nothing already computed is thrown away: features, matches and
+      poses are cached per set, so "Try again" resumes rather than restarts.</p>
+
+    <figure class="screen">
+      <div class="frame">
+        <div class="chrome"><i></i><i></i><i></i><b>LunarMosaic — build failed</b></div>
+        <div class="app" style="padding-bottom:22px">
+          <div class="card" style="margin-bottom:0">
+            <h4>Luminance build stopped</h4>
+            <div class="pbar failed"><i style="width:41%"></i></div>
+            <ol class="stages">
+              <li class="done"><span class="dot"></span>Checking the inputs<span class="note">2 s</span></li>
+              <li class="done"><span class="dot"></span>Finding features<span class="note">31 s</span></li>
+              <li class="done"><span class="dot"></span>Matching overlaps<span class="note">14 s</span></li>
+              <li class="failed"><span class="dot"></span>Placing panels<span class="note">73 of 101 placed</span></li>
+              <li><span class="dot"></span>Fine alignment</li>
+              <li><span class="dot"></span>Matching brightness</li>
+            </ol>
+
+            <div class="err">
+              <b>28 panels could not be joined to the rest</b>
+              <p>They form a separate group with no overlap to the main mosaic, usually a gap in the capture run or a
+                large move between sequences. LunarMosaic can build the mosaic from the 73 that do connect.</p>
+              <ul>
+                <li><b>The main group covers</b> <span>the whole disk except the north-west limb.</span>
+                  <small>largest component 73 nodes, second component 28 nodes, 0 verified pairs between them</small></li>
+                <li><b>The 28 left out</b> <span>are all from the folder's last sequence, 23:41 onwards.</span>
+                  <small>panels 2341_0 … 2352_7</small></li>
+              </ul>
+            </div>
+
+            <div class="rowbtns">
+              <button class="btn primary">Build from the 73 that connect</button>
+              <button class="btn">Show the two groups</button>
+              <button class="btn">Try again with a wider search</button>
+              <button class="btn ghost">Choose other panels</button>
+            </div>
+
+            <div class="okbox">
+              <b>The colour mosaic finished and is kept.</b>
+              <p>Whatever you choose here, you will not build it again.</p>
+            </div>
+
+            <details class="log"><summary>Details</summary>
+              <pre class="log">[L] stage 4/9 placing panels
+[L]   global solve over 418 verified pairs, reference 2103_9
+[L]   largest component 73/101; dropped component of 28
+[L] error: not all panels connect to the reference</pre>
+            </details>
+          </div>
+        </div>
+      </div>
+      <figcaption>The error block is LunarAtlas's <code>.err</code> component, including its pattern of a plain-language
+        line with the raw measurement in mono underneath — the same shape the quality gate uses. The recovery actions
+        read as sentences about this mosaic, not as generic retry buttons.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<!-- ============================================================ 5 -->
+<section class="part">
+  <div class="wrap">
+    <div class="kicker"><span class="num">05</span><h2>Checking the match</h2></div>
+    <p class="intro">Each colour panel is registered directly onto the luminance mosaic with its own transform — a
+      similarity, or an affine or cubic one where held-out points show it is needed. This is the step the interface
+      must be most honest about, so it gets its own view mode rail and a chip in the status bar that is always visible
+      afterwards.</p>
+
+    <figure class="screen">
+      <div class="frame">
+        <div class="chrome"><i></i><i></i><i></i><b>LunarMosaic — match</b></div>
+        <div class="stage">
+          <canvas class="map" data-moon="diffmap" width="1120" height="560"></canvas>
+
+          <header class="panel topbar">
+            <div class="brand">
+              <svg class="mark" viewBox="0 0 64 64" aria-hidden="true"><rect x="2" y="2" width="60" height="60" rx="14" fill="#18224A" stroke="rgba(255,255,255,.12)"/><circle cx="32" cy="32" r="18" fill="#26326A"/><path d="M32 14a18 18 0 0 1 0 36a7 18 0 0 0 0-36z" fill="#FCF8EE"/><g fill="none" stroke="#F5A742" stroke-width="2.4" stroke-linecap="round"><path d="M9 17V9h8M55 9h-8M55 47v8h-8M17 55H9v-8"/></g></svg>
+              <b>LunarMosaic</b><span class="file">2026-09-25 full Moon</span>
+            </div>
+          </header>
+
+          <nav class="panel tools">
+            <button title="Both layers"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="4" y="4" width="12" height="12" rx="1.5"/><rect x="8" y="8" width="12" height="12" rx="1.5"/></svg></button>
+            <button title="Luminance only"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="8"/><path d="M12 4v16"/></svg></button>
+            <button title="Colour only"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="9.5" cy="9.5" r="5"/><circle cx="14.5" cy="9.5" r="5"/><circle cx="12" cy="14.5" r="5"/></svg></button>
+            <hr>
+            <button title="Blink (B)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/></svg></button>
+            <button title="Split (S)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M12 4v16"/></svg></button>
+            <button class="on" title="Where it does not line up (D)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="9.5" cy="12" r="6"/><circle cx="14.5" cy="12" r="6"/></svg></button>
+            <hr>
+            <button title="Nudge the colour layer"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M12 3v18M3 12h18M12 3l-3 3M12 3l3 3M12 21l-3-3M12 21l3-3M3 12l3-3M3 12l3 3M21 12l-3-3M21 12l-3 3"/></svg></button>
+          </nav>
+
+          <aside class="panel layers" style="width:300px">
+            <h5>Match <span class="tag warn">Check this</span></h5>
+            <dl style="display:grid;grid-template-columns:auto 1fr;gap:5px 12px;margin:0 0 10px;font-size:12.5px">
+              <dt style="color:var(--text-3)">Common points</dt><dd style="margin:0;font-variant-numeric:tabular-nums">412</dd>
+              <dt style="color:var(--text-3)">Median error</dt><dd style="margin:0;font-variant-numeric:tabular-nums">0.6 px</dd>
+              <dt style="color:var(--text-3)">Worst 5 %</dt><dd style="margin:0;font-variant-numeric:tabular-nums">3.1 px</dd>
+              <dt style="color:var(--text-3)">Panels placed</dt><dd style="margin:0;font-variant-numeric:tabular-nums">17 of 18</dd>
+              <dt style="color:var(--text-3)">Pose models</dt><dd style="margin:0;font-variant-numeric:tabular-nums">12 · 4 · 1</dd>
+            </dl>
+            <div class="sep"></div>
+            <div class="sublabel">Show</div>
+            <div class="seg" style="margin-bottom:8px">
+              <button>Both</button><button>Blink</button><button>Split</button><button class="on">Errors</button>
+            </div>
+            <div class="slider">
+              <div class="lbl"><span>Flag anything over</span><b>2.0 px</b></div>
+              <div class="track"><i style="width:34%"></i><b style="left:34%"></b></div>
+            </div>
+            <div class="sublabel" style="margin-top:10px">Red patches are where the colour layer sits more than 2 px off
+              the luminance detail. Here that is the south-east limb, where the colour mosaic is thinnest.</div>
+            <div class="sep"></div>
+            <div class="disclose">Refine the match</div>
+            <div class="rowbtns" style="margin-top:10px">
+              <button class="btn primary sm">Accept and edit</button>
+              <button class="btn sm">Match again</button>
+            </div>
+          </aside>
+
+          <div class="vlegend">
+            <span class="sw" style="background:#F08A7E"></span><b>over 2 px</b>
+            <span class="sw" style="background:#F5A742;margin-left:8px"></span><b>1–2 px</b>
+            <span class="sw" style="background:#8FD8EC;margin-left:8px"></span><b>under 1 px</b>
+          </div>
+
+          <footer class="panel status">
+            <div class="left">
+              <div class="readout"><span class="k">x</span><b>8104</b><span class="k">y</span><b>5330</b></div>
+              <button class="qchip"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 4l9 16H3z" stroke-linejoin="round"/><path d="M12 10v4.5" stroke-linecap="round"/></svg><span>Match 0.6 px · worst 3.1 px</span></button>
+              <span class="save">Saved just now</span>
+            </div>
+            <div class="zoom">
+              <span class="pct">18 %</span>
+              <button class="btn ghost">Fit</button><button class="btn ghost">1:1</button>
+              <button class="btn primary">Edit layers</button>
+            </div>
+          </footer>
+        </div>
+      </div>
+      <figcaption><b>Reused directly:</b> the floating <code>.panel</code> with its blur, the left tool rail with its
+        amber side marker and tooltips, the right panel's <code>.seg</code> and <code>.slider</code>, and the
+        <code>.status</code> bar with <code>.qchip</code> — LunarAtlas's quality chip, carrying the match quality here.
+        The chip stays in the status bar for the life of the project, so the number is never out of sight.</figcaption>
+    </figure>
+
+    <p class="note">The wording never claims success. The chip reads <em>Match 0.6 px · worst 3.1 px</em>, not
+      "Aligned". Opening it gives the same popover treatment as LunarAtlas's quality explanation: a sentence in plain
+      language, then the raw measurement.</p>
+
+    <figure class="screen">
+      <div class="frame">
+        <div class="chrome"><i></i><i></i><i></i><b>The match chip, opened</b></div>
+        <div class="stage short">
+          <canvas class="map" data-moon="both" width="1120" height="400"></canvas>
+          <div class="popover" style="left:16px;bottom:72px;width:380px">
+            <h6 style="color:var(--accent);display:flex;align-items:center;gap:7px">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 4l9 16H3z" stroke-linejoin="round"/><path d="M12 10v4.5" stroke-linecap="round"/></svg>
+              How well the two mosaics match</h6>
+            <p>Over most of the disk the colour layer sits within a pixel of the luminance detail, which is closer
+              than colour needs to be. Two areas are worse:</p>
+            <ul style="list-style:none;margin:0;padding:0;display:grid;gap:9px">
+              <li><b style="display:block;font-weight:600;margin-bottom:2px">The south-east limb</b>
+                <span style="color:var(--text-2);font-size:13px">up to 3.1 px out, over about 4 % of the disk. Colour
+                  there may bleed a little past the edge of a crater.</span></li>
+              <li><b style="display:block;font-weight:600;margin-bottom:2px">The far north-west</b>
+                <span style="color:var(--text-2);font-size:13px">no colour panels reach it at all, so it stays grey
+                  unless you crop.</span></li>
+            </ul>
+            <p style="margin-top:10px;margin-bottom:0">Both are normal when the two sets were shot one after the other:
+              the Moon's libration and the air move a little between runs.</p>
+            <div class="raw">17 colour panels placed, 1 rejected (too few textured tiles) · models: 12 similarity, 4 affine,
+              1 cubic · held-out residual median 0.61 px, p95 3.08 px, max 5.4 px</div>
+            <div class="nub b"></div>
+          </div>
+          <footer class="panel status">
+            <div class="left">
+              <div class="readout"><span class="k">x</span><b>8104</b><span class="k">y</span><b>5330</b></div>
+              <button class="qchip" style="background:var(--accent);color:var(--accent-ink);border-color:var(--accent)"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 4l9 16H3z" stroke-linejoin="round"/><path d="M12 10v4.5" stroke-linecap="round"/></svg><span>Match 0.6 px · worst 3.1 px</span></button>
+            </div>
+            <div class="zoom"><span class="pct">18 %</span><button class="btn ghost">Fit</button><button class="btn ghost">1:1</button></div>
+          </footer>
+        </div>
+      </div>
+      <figcaption>The pressed chip turns solid amber and the popover appears above it with a nub, exactly as
+        <code>.gatepop</code> does in LunarAtlas. The raw transform is at the bottom in mono, for the user who wants it.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<!-- ============================================================ 6 -->
+<section class="part">
+  <div class="wrap">
+    <div class="kicker"><span class="num">06</span><h2>The canvas and the two layers</h2></div>
+    <p class="intro">The main screen. The image fills the window; one panel on the right holds both layers. Each layer
+      is a row with a thumbnail, a name, what it contributes and a switch. Selecting a row opens its adjustments
+      underneath it and closes the other, so the panel never grows past one screen.</p>
+
+    <figure class="screen">
+      <div class="frame">
+        <div class="chrome"><i></i><i></i><i></i><b>LunarMosaic — editing</b></div>
+        <div class="stage" style="height:620px">
+          <canvas class="map" data-moon="both" width="1120" height="620"></canvas>
+
+          <header class="panel topbar">
+            <div class="brand">
+              <svg class="mark" viewBox="0 0 64 64" aria-hidden="true"><rect x="2" y="2" width="60" height="60" rx="14" fill="#18224A" stroke="rgba(255,255,255,.12)"/><circle cx="32" cy="32" r="18" fill="#26326A"/><path d="M32 14a18 18 0 0 1 0 36a7 18 0 0 0 0-36z" fill="#FCF8EE"/><g fill="none" stroke="#F5A742" stroke-width="2.4" stroke-linecap="round"><path d="M9 17V9h8M55 9h-8M55 47v8h-8M17 55H9v-8"/></g></svg>
+              <b>LunarMosaic</b><span class="file">2026-09-25 full Moon</span>
+            </div>
+          </header>
+
+          <nav class="panel tools">
+            <button class="on" title="Pan and zoom (V)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M8 11V5.5a1.5 1.5 0 0 1 3 0V10m0-4.5V4a1.5 1.5 0 0 1 3 0v6m0-4.5a1.5 1.5 0 0 1 3 0V11m0-3a1.5 1.5 0 0 1 3 0v6c0 4-3 7-7 7h-1c-3 0-4.5-1.5-6-4l-2.6-4.3a1.6 1.6 0 0 1 2.6-1.8L8 13.5"/></svg></button>
+            <hr>
+            <button title="Both layers"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="4" y="4" width="12" height="12" rx="1.5"/><rect x="8" y="8" width="12" height="12" rx="1.5"/></svg></button>
+            <button title="Luminance only (1)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="8"/><path d="M12 4v16"/></svg></button>
+            <button title="Colour only (2)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="9.5" cy="9.5" r="5"/><circle cx="14.5" cy="9.5" r="5"/><circle cx="12" cy="14.5" r="5"/></svg></button>
+            <button title="Blink (B)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/></svg></button>
+            <button title="Where it does not line up (D)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="9.5" cy="12" r="6"/><circle cx="14.5" cy="12" r="6"/></svg></button>
+            <hr>
+            <button title="Undo (⌘Z)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 7L4.5 11.5 9 16M5 11.5h9.5a5 5 0 0 1 0 10H12"/></svg></button>
+            <button title="Redo (⇧⌘Z)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 7l4.5 4.5L15 16M19 11.5H9.5a5 5 0 0 0 0 10H12"/></svg></button>
+          </nav>
+
+          <aside class="panel layers">
+            <h5>Layers</h5>
+
+            <div class="lrow sel">
+              <div class="lt"><canvas data-moon="colourthumb" width="72" height="72"></canvas></div>
+              <div class="nm"><b>Colour</b><span>Color blend · 38 panels</span></div>
+              <label class="switch"><input type="checkbox" checked><span></span></label>
+            </div>
+            <div class="ladj">
+              <div class="slider">
+                <div class="lbl"><span>Colour strength</span><b>100 %</b></div>
+                <div class="track"><i style="width:100%"></i><b style="left:100%"></b></div>
+              </div>
+              <div class="slider">
+                <div class="lbl"><span>Saturation</span><b>×2.0</b></div>
+                <div class="track"><i style="width:50%"></i><b style="left:50%"></b></div>
+              </div>
+              <div class="slider">
+                <div class="lbl"><span>Smooth the colour</span><b>3.0 px</b></div>
+                <div class="track"><i style="width:30%"></i><b style="left:30%"></b></div>
+              </div>
+              <p class="sublabel" style="margin-top:7px">Blurring colour does not blur the image. The luminance layer
+                keeps every bit of detail.</p>
+              <div class="disclose">Advanced colour</div>
+            </div>
+
+            <div class="sep"></div>
+
+            <div class="lrow">
+              <div class="lt"><canvas data-moon="lumthumb" width="72" height="72"></canvas></div>
+              <div class="nm"><b>Luminance</b><span>Base · 101 panels · 14792 × 13432</span></div>
+              <label class="switch"><input type="checkbox" checked><span></span></label>
+            </div>
+
+            <div class="sep"></div>
+
+            <div class="sublabel">Where there is no colour</div>
+            <div class="seg">
+              <button class="on">Keep the full canvas</button><button>Crop</button>
+            </div>
+            <div class="outsize"><span>Output</span><b>14792 × 13432 px</b></div>
+            <p class="sublabel" style="margin-top:6px">4.1 % of the disk has no colour panels and stays grey.
+              <span class="linkbtn">Show it</span></p>
+          </aside>
+
+          <footer class="panel status">
+            <div class="left">
+              <div class="readout"><span class="k">x</span><b>8104</b><span class="k">y</span><b>5330</b>
+                <span class="k">L</span><b>41 %</b></div>
+              <button class="qchip ok"><span>Match 0.6 px</span></button>
+              <span class="save">Saved 2 min ago</span>
+            </div>
+            <div class="zoom">
+              <span class="pct">18 %</span>
+              <button class="btn ghost">Fit</button><button class="btn ghost">1:1</button>
+              <button class="btn primary"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7 10.5l5 5 5-5M5 20h14"/></svg>Export</button>
+            </div>
+          </footer>
+        </div>
+      </div>
+      <figcaption><b>Reused directly:</b> the whole <code>.layers</code> aside — its uppercase tracked heading,
+        <code>.row</code> rhythm, amber <code>.switch</code>, <code>.sep</code>, <code>.seg</code> and
+        <code>.slider</code> with its right-aligned tabular value — plus the <code>.status</code> bar's split layout
+        with the primary Export button on the right. The layer rows add a 32 px thumbnail, which is the only new
+        component on this screen.</figcaption>
+    </figure>
+
+    <h3 style="font-size:17px;font-weight:600;margin-top:40px">Why these four controls</h3>
+    <p class="note">Every control on the colour layer already exists in <code>lunar_finish.py</code> and is named here
+      the way an astrophotographer would say it. Nothing new is invented, and the advanced disclosure holds the rest.</p>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>On screen</th><th>What it does</th><th>Behind it</th></tr></thead>
+        <tbody>
+          <tr><td><b>Colour strength</b><br><span class="sub3">0–100 %</span></td>
+            <td>How much of the colour layer reaches the result. At 0 % the image is the plain luminance mosaic.</td>
+            <td>Opacity of the Color blend. New, and the one control with no command-line equivalent.</td></tr>
+          <tr><td><b>Saturation</b><br><span class="sub3">×1 – ×4</span></td>
+            <td>How strong the Moon's own blues and oranges are. Greens and pinks get much less, and the limb none.</td>
+            <td><code>--saturation</code>, <code>--saturation-passes</code>, <code>--limb-taper</code></td></tr>
+          <tr><td><b>Smooth the colour</b><br><span class="sub3">0–8 px</span></td>
+            <td>Blurs colour only. This is how colour noise goes away without touching a single detail.</td>
+            <td><code>--chroma-denoise</code></td></tr>
+          <tr><td><b>Highlights, Contrast</b><br><span class="sub3">on the luminance row</span></td>
+            <td>Brings back detail in the brightest areas; a gentle S-curve on brightness.</td>
+            <td><code>--highlights</code>, <code>--contrast</code></td></tr>
+          <tr><td><b>Advanced colour</b><br><span class="sub3">disclosure</span></td>
+            <td>Hue-range weighting, limb taper width, passes, and a white balance picker.</td>
+            <td>the remaining <code>lunar_finish</code> colour settings</td></tr>
+          <tr><td><b>Advanced luminance</b><br><span class="sub3">disclosure</span></td>
+            <td>Now blocks in their own right (section 07), collapsed until selected so their parameters stay out of the way.</td>
+            <td><code>--wavelets</code>, <code>--usm</code>, <code>--usm-mode</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p class="note" style="margin-top:22px"><strong>Superseded in part by section 07.</strong> These controls are now the blocks a new project starts with, not a fixed panel: the same parameters, but you can reorder, remove and add to them. The luminance row has no strength slider on purpose. It is the base; it is
+      either the image or it is not. Turning it off is the inspection mode "Colour only", and the switch does exactly
+      that rather than producing a half-image.</p>
+  </div>
+</section>
+
+
+<!-- ============================================================ 7 -->
+<section class="part">
+  <div class="wrap">
+    <div class="kicker"><span class="num">07</span><h2>Editing chains</h2></div>
+    <p class="intro">The fixed adjustments in section 06 become a starting chain rather than the whole story. Each path
+      &mdash; luminance and colour &mdash; carries its own ordered chain of building blocks; the two are merged; then a
+      final chain runs on the merged image, because that is where you do levels, curves and unsharp mask today. Order
+      is yours to change: drag a block up or down, switch it off, duplicate it. Any block can appear more than once &mdash; wavelets, then curves, then wavelets again &mdash; and each copy keeps its own settings.</p>
+
+    <div class="chain-flow" aria-label="How the chains connect">
+      <svg viewBox="0 0 900 230" role="img" aria-label="Luminance input to luminance chain, colour input to colour chain, both into merge, then final chain, then export">
+        <defs>
+          <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#97A1C2"/></marker>
+        </defs>
+        <g font-family="IBM Plex Sans, sans-serif" font-size="13">
+          <rect x="10" y="22" width="150" height="58" rx="10" fill="#18224A" stroke="rgba(255,255,255,.16)"/>
+          <text x="85" y="46" text-anchor="middle" fill="#FCF8EE" font-weight="600">Luminance input</text>
+          <text x="85" y="65" text-anchor="middle" fill="#97A1C2" font-size="11">L mosaic, or L split from one</text>
+          <rect x="10" y="150" width="150" height="58" rx="10" fill="#18224A" stroke="rgba(255,255,255,.16)"/>
+          <text x="85" y="174" text-anchor="middle" fill="#FCF8EE" font-weight="600">Colour input</text>
+          <text x="85" y="193" text-anchor="middle" fill="#97A1C2" font-size="11">RGB mosaic, or its chroma</text>
+
+          <rect x="200" y="14" width="250" height="74" rx="10" fill="#111934" stroke="#8FD8EC" stroke-opacity=".55"/>
+          <text x="216" y="36" fill="#8FD8EC" font-size="11" font-weight="600" letter-spacing="1.5">LUMINANCE CHAIN</text>
+          <rect x="216" y="48" width="66" height="26" rx="6" fill="#1F2C5A"/><text x="249" y="65" text-anchor="middle" fill="#FCF8EE" font-size="11.5">Wavelets</text>
+          <rect x="288" y="48" width="70" height="26" rx="6" fill="#1F2C5A"/><text x="323" y="65" text-anchor="middle" fill="#FCF8EE" font-size="11.5">Highlights</text>
+          <rect x="364" y="48" width="72" height="26" rx="6" fill="none" stroke="rgba(255,255,255,.22)" stroke-dasharray="4 3"/><text x="400" y="65" text-anchor="middle" fill="#97A1C2" font-size="11.5">+ block</text>
+
+          <rect x="200" y="142" width="250" height="74" rx="10" fill="#111934" stroke="#F5A742" stroke-opacity=".55"/>
+          <text x="216" y="164" fill="#F5A742" font-size="11" font-weight="600" letter-spacing="1.5">COLOUR CHAIN</text>
+          <rect x="216" y="176" width="66" height="26" rx="6" fill="#1F2C5A"/><text x="249" y="193" text-anchor="middle" fill="#FCF8EE" font-size="11.5">Blur</text>
+          <rect x="288" y="176" width="74" height="26" rx="6" fill="#1F2C5A"/><text x="325" y="193" text-anchor="middle" fill="#FCF8EE" font-size="11.5">Saturation</text>
+          <rect x="368" y="176" width="68" height="26" rx="6" fill="none" stroke="rgba(255,255,255,.22)" stroke-dasharray="4 3"/><text x="402" y="193" text-anchor="middle" fill="#97A1C2" font-size="11.5">+ block</text>
+
+          <rect x="490" y="84" width="110" height="62" rx="31" fill="#28386E" stroke="rgba(255,255,255,.22)"/>
+          <text x="545" y="111" text-anchor="middle" fill="#FCF8EE" font-weight="600">Merge</text>
+          <text x="545" y="129" text-anchor="middle" fill="#97A1C2" font-size="11">Color blend</text>
+
+          <rect x="640" y="78" width="160" height="74" rx="10" fill="#111934" stroke="rgba(255,255,255,.22)"/>
+          <text x="656" y="100" fill="#B7BFD8" font-size="11" font-weight="600" letter-spacing="1.5">FINAL CHAIN</text>
+          <text x="656" y="123" fill="#FCF8EE" font-size="11.5">Levels · Curves · USM</text>
+          <text x="656" y="141" fill="#97A1C2" font-size="11">on the merged image</text>
+
+          <rect x="830" y="92" width="62" height="46" rx="10" fill="#F5A742"/>
+          <text x="861" y="120" text-anchor="middle" fill="#1A1206" font-weight="600">Export</text>
+
+          <g stroke="#97A1C2" stroke-width="1.5" fill="none" marker-end="url(#ar)">
+            <path d="M160 51H196"/><path d="M160 179H196"/>
+            <path d="M450 51C475 51 470 100 488 106"/><path d="M450 179C475 179 470 130 488 124"/>
+            <path d="M600 115H636"/><path d="M800 115H826"/>
+          </g>
+        </g>
+      </svg>
+    </div>
+
+    <figure class="screen">
+      <div class="frame">
+        <div class="chrome"><i></i><i></i><i></i><b>LunarMosaic — editing chains</b></div>
+        <div class="stage" style="height:680px">
+          <canvas class="map" data-moon="both" width="1120" height="680"></canvas>
+
+          <div class="prev-rect" style="left:330px;top:300px;width:84px;height:84px"><i>P1 · Mare</i></div>
+          <div class="prev-rect" style="left:470px;top:180px;width:84px;height:84px"><i>P2 · Terminator</i></div>
+
+          <header class="panel topbar">
+            <div class="brand">
+              <svg class="mark" viewBox="0 0 64 64" aria-hidden="true"><rect x="2" y="2" width="60" height="60" rx="14" fill="#18224A" stroke="rgba(255,255,255,.12)"/><circle cx="32" cy="32" r="18" fill="#26326A"/><path d="M32 14a18 18 0 0 1 0 36a7 18 0 0 0 0-36z" fill="#FCF8EE"/><g fill="none" stroke="#F5A742" stroke-width="2.4" stroke-linecap="round"><path d="M9 17V9h8M55 9h-8M55 47v8h-8M17 55H9v-8"/></g></svg>
+              <b>LunarMosaic</b><span class="file">2026-10-04 crescent</span>
+            </div>
+          </header>
+
+          <nav class="panel tools">
+            <button title="Pan and zoom (V)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M8 11V5.5a1.5 1.5 0 0 1 3 0V10m0-4.5V4a1.5 1.5 0 0 1 3 0v6m0-4.5a1.5 1.5 0 0 1 3 0V11m0-3a1.5 1.5 0 0 1 3 0v6c0 4-3 7-7 7h-1c-3 0-4.5-1.5-6-4l-2.6-4.3a1.6 1.6 0 0 1 2.6-1.8L8 13.5"/></svg></button>
+            <button class="on" title="New preview (P)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="4" y="4" width="16" height="16" rx="1.5" stroke-dasharray="3 2.4"/><path d="M12 9v6M9 12h6" stroke-linecap="round"/></svg></button>
+            <hr>
+            <button title="Undo (⌘Z)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 7L4.5 11.5 9 16M5 11.5h9.5a5 5 0 0 1 0 10H12"/></svg></button>
+            <button title="Redo (⇧⌘Z)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 7l4.5 4.5L15 16M19 11.5H9.5a5 5 0 0 0 0 10H12"/></svg></button>
+          </nav>
+
+          <aside class="panel chains">
+            <div class="chain">
+              <div class="ch"><span class="dot" style="background:var(--grid)"></span><h5>Luminance</h5><span class="src">L mosaic · 14 panels</span></div>
+              <div class="blk sel"><span class="grip">⋮⋮</span><div class="bn"><b>À-trous wavelets</b><span>L1 0.60 · L2 1.10 · L3 0.20</span></div><label class="switch"><input type="checkbox" checked><span></span></label></div>
+              <div class="blk-body">
+                <div class="slider"><div class="lbl"><span>Layer 1 · 1 px</span><b>0.60 <span class="readout">×7.0</span></b></div><div class="track"><i style="width:20%"></i><b style="left:20%"></b></div></div>
+                <div class="slider"><div class="lbl"><span>Layer 2 · 2 px</span><b>1.10 <span class="readout">×12.0</span></b></div><div class="track"><i style="width:37%"></i><b style="left:37%"></b></div></div>
+                <div class="slider"><div class="lbl"><span>Layer 3 · 4 px</span><b>0.20 <span class="readout">×3.0</span></b></div><div class="track"><i style="width:7%"></i><b style="left:7%"></b></div></div>
+                <div class="slider"><div class="lbl"><span>Layer 4 · 8 px</span><b>0.00 <span class="readout">×1.0</span></b></div><div class="track"><i style="width:0%"></i><b style="left:0%"></b></div></div>
+                <p class="sublabel" style="margin-top:7px">PixInsight bias. Gain in grey is what it really does to the layer.</p>
+              </div>
+              <div class="blk"><span class="grip">⋮⋮</span><div class="bn"><b>Highlights</b><span>0.30 · knee p90</span></div><label class="switch"><input type="checkbox" checked><span></span></label></div>
+              <button class="addblk">+ Add a block</button>
+            </div>
+
+            <div class="chain">
+              <div class="ch"><span class="dot" style="background:var(--accent)"></span><h5>Colour</h5><span class="src">none for this mosaic</span></div>
+              <p class="sublabel" style="margin:0 2px 6px">This set is mono. Add colour panels and a colour chain appears here, starting as Blur 3 px · Saturation ×2. Sub-pixel RGB shift is one click away in the add menu.</p>
+            </div>
+
+            <div class="mergebar"><b>Merge</b> luminance only<span>nothing to blend</span></div>
+
+            <div class="chain">
+              <div class="ch"><span class="dot" style="background:var(--text-2)"></span><h5>Final</h5><span class="src">merged image</span></div>
+              <div class="blk"><span class="grip">⋮⋮</span><div class="bn"><b>Levels</b><span>black 0.012 · white 0.71 · γ 1.10</span></div><label class="switch"><input type="checkbox" checked><span></span></label></div>
+              <div class="blk"><span class="grip">⋮⋮</span><div class="bn"><b>Curves</b><span>4 points</span></div><label class="switch"><input type="checkbox" checked><span></span></label></div>
+              <div class="blk"><span class="grip">⋮⋮</span><div class="bn"><b>Unsharp mask</b><span>60 % · 1.3 px · 0</span></div><label class="switch"><input type="checkbox" checked><span></span></label></div>
+              <button class="addblk">+ Add a block</button>
+            </div>
+          </aside>
+
+          <div class="prev-strip">
+            <figure><canvas data-moon="zoomA" width="132" height="132"></canvas><figcaption>P1 · Mare <em>1:1</em></figcaption></figure>
+            <figure><canvas data-moon="zoomB" width="132" height="132"></canvas><figcaption>P2 · Terminator <em>1:1</em></figcaption></figure>
+          </div>
+
+          <footer class="panel status">
+            <div class="left">
+              <div class="readout"><span class="k">previews</span><b>2</b><span class="k">full image</span><b>not rendered</b></div>
+              <span class="save">Chain saved 1 min ago</span>
+            </div>
+            <div class="zoom">
+              <button class="btn ghost">Render full image</button>
+              <button class="btn primary"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7 10.5l5 5 5-5M5 20h14"/></svg>Export</button>
+            </div>
+          </footer>
+        </div>
+      </div>
+      <figcaption><b>Previews, PixInsight-style.</b> Drag a rectangle on the mosaic with the preview tool (<kbd>P</kbd>),
+        name it, and it renders at 1:1 in the strip, re-running the whole chain live on just those pixels. The full image
+        is only rendered when you ask, or at export. Previews are saved with the project, so the same mare patch is
+        there next time. <b>Reused:</b> the <code>.panel</code>, tool rail, <code>.switch</code>, <code>.slider</code> and
+        status bar are LunarAtlas's; the block row and the dashed preview rectangle are new.</figcaption>
+    </figure>
+
+    <h3 style="font-size:17px;font-weight:600;margin-top:40px">Adding a block, and the curves block open</h3>
+    <figure class="screen">
+      <div class="frame">
+        <div class="chrome"><i></i><i></i><i></i><b>Add a block · Curves</b></div>
+        <div class="app">
+          <div class="curvebox">
+            <div class="popover addpop" style="position:static">
+              <h6>Add to the luminance chain</h6>
+              <div class="grp">Tone</div>
+              <div class="it">Levels<small>black · white · gamma</small></div>
+              <div class="it">Curves<small>spline</small></div>
+              <div class="it">Highlights<small>lunar_finish</small></div>
+              <div class="it">Contrast<small>lunar_finish</small></div>
+              <div class="grp">Detail</div>
+              <div class="it">À-trous wavelets<small>PixInsight units</small></div>
+              <div class="it">Unsharp mask<small>Photoshop units</small></div>
+              <div class="it">Gaussian blur<small>sigma in px</small></div>
+              <div class="it">Deconvolution<small>synthetic PSF</small></div>
+              <div class="grp">Colour</div>
+              <div class="it dis">White balance<small>colour and final only</small></div>
+              <div class="it dis">Saturation<small>colour and final only</small></div>
+              <div class="it dis">Sub-pixel RGB shift<small>colour chain only</small></div>
+            </div>
+
+            <div class="card" style="flex:1;min-width:280px;margin:0">
+              <h4>Curves <span class="side">final chain</span></h4>
+              <svg viewBox="0 0 260 260" width="260" height="260" role="img" aria-label="A tone curve with four control points over a histogram">
+                <rect x="0" y="0" width="260" height="260" rx="6" fill="#0A0F25" stroke="rgba(255,255,255,.12)"/>
+                <g stroke="rgba(255,255,255,.06)"><path d="M65 0V260M130 0V260M195 0V260M0 65H260M0 130H260M0 195H260"/></g>
+                <g fill="rgba(183,191,216,.18)">
+                  <rect x="4" y="250" width="6" height="10"/><rect x="12" y="236" width="6" height="24"/><rect x="20" y="214" width="6" height="46"/>
+                  <rect x="28" y="190" width="6" height="70"/><rect x="36" y="168" width="6" height="92"/><rect x="44" y="150" width="6" height="110"/>
+                  <rect x="52" y="140" width="6" height="120"/><rect x="60" y="144" width="6" height="116"/><rect x="68" y="158" width="6" height="102"/>
+                  <rect x="76" y="176" width="6" height="84"/><rect x="84" y="194" width="6" height="66"/><rect x="92" y="210" width="6" height="50"/>
+                  <rect x="100" y="222" width="6" height="38"/><rect x="108" y="232" width="6" height="28"/><rect x="116" y="240" width="6" height="20"/>
+                  <rect x="124" y="246" width="6" height="14"/><rect x="132" y="250" width="6" height="10"/><rect x="140" y="253" width="6" height="7"/>
+                </g>
+                <path d="M0 260L260 0" stroke="rgba(255,255,255,.14)" stroke-dasharray="4 4" fill="none"/>
+                <path d="M0 260C30 248 46 214 70 182S120 104 160 72S230 18 260 0" stroke="#F5A742" stroke-width="2" fill="none"/>
+                <g fill="#0A0F25" stroke="#F5A742" stroke-width="2">
+                  <circle cx="0" cy="260" r="5"/><circle cx="70" cy="182" r="5"/><circle cx="160" cy="72" r="6" fill="#F5A742"/><circle cx="260" cy="0" r="5"/>
+                </g>
+              </svg>
+              <dl style="display:grid;grid-template-columns:auto 1fr;gap:4px 12px;margin:10px 0 0;font-size:12.5px">
+                <dt style="color:var(--text-3)">Selected point</dt><dd style="margin:0;font-family:var(--font-mono)">in 0.615 → out 0.723</dd>
+                <dt style="color:var(--text-3)">Channel</dt><dd style="margin:0">Luminance (RGB together on the final chain)</dd>
+              </dl>
+              <p class="hint" style="margin-top:8px">Click to add a point, drag to move it, drag off the box to remove it.
+                The histogram is of the image arriving at this block, so it reflects every block above.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+      <figcaption>Blocks that make no sense on a path are shown but greyed, with the reason, rather than hidden &mdash;
+        saturation on a luminance chain does nothing, and saying so teaches the model. The curves histogram is taken
+        <em>at that point in the chain</em>, which is what makes moving a curve above or below unsharp mask a visible
+        decision rather than an invisible one.</figcaption>
+    </figure>
+
+    <h3 style="font-size:17px;font-weight:600;margin-top:40px">The building blocks</h3>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Block</th><th>Parameters, and their units</th><th>Paths</th><th>Behaviour it must match</th></tr></thead>
+        <tbody>
+          <tr><td><b>Levels</b></td><td>black, white, gamma</td><td>all</td><td>Photoshop Levels on the values as stored</td></tr>
+          <tr><td><b>Curves</b></td><td>spline control points, in → out</td><td>all</td><td>Photoshop Curves (monotone cubic through the points)</td></tr>
+          <tr><td><b>Highlights</b></td><td>strength, knee percentile</td><td>luminance, final</td><td><code>lunar_finish --highlights</code>, edge-aware base layer</td></tr>
+          <tr><td><b>Contrast</b></td><td>strength 0 – &lt;0.5</td><td>luminance, final</td><td><code>lunar_finish --contrast</code> S-curve, black and white fixed</td></tr>
+          <tr><td><b>À-trous wavelets</b></td><td>bias per layer, PixInsight scale; gain shown beside it</td><td>all</td><td>PixInsight ATWT: gain <code>1+10b</code>, <code>1/(1+10|b|)</code> below zero — measured exact</td></tr>
+          <tr><td><b>Unsharp mask</b></td><td>amount %, radius px, threshold levels</td><td>all</td><td>Photoshop USM: soft threshold, σ ≈ 1.03–1.08 × radius — measured</td></tr>
+          <tr><td><b>Gaussian blur</b></td><td>sigma px</td><td>all</td><td>on the colour path this <em>is</em> chroma denoise</td></tr>
+          <tr><td><b>Deconvolution</b></td><td>PSF: Airy disk radius, diffraction intensity, seeing index &mdash; or an uploaded PSF image; then iterations, dering strength and radius, blend raw. Live PSF preview</td><td>all; best first, before the other detail blocks</td><td>LuckyStackWorker&rsquo;s synthetic PSF, read from its code and reproduced exactly; WPL deconvolution</td></tr>
+          <tr><td><b>Sub-pixel RGB shift</b></td><td>automatic: measures R and B against G and applies the correction, showing dx and dy; then, as in LuckyStackWorker, an eight-way nudge pad per channel and a reset</td><td>colour chain; also before the split for a single colour mosaic</td><td>sub-pixel channel shift, as in LuckyStackWorker; re-measures whenever its input changes</td></tr>
+          <tr><td><b>White balance</b></td><td>background reference and white reference, each auto or a rectangle you draw; shows the per-channel offsets and gains it found</td><td>colour, final</td><td>PixInsight ColorCalibration&rsquo;s colour, measured: gains that make the background-subtracted white reference neutral, with the background as the fixed point, so the sky is left exactly as it was. PixInsight sometimes also rescales overall brightness (on a real panel it put the peak at exactly 1.0); the block never does, and says so rather than guessing the amount. White limits as in PixInsight (you use 0.10–0.99); structure detection off by default. Optional background neutralisation to a fixed target</td></tr>
+          <tr><td><b>Saturation</b></td><td>factor, passes, lunar-hue weighting</td><td>colour, final</td><td><code>lunar_finish</code> colour stage, without the limb taper</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p class="note" style="margin-top:22px"><strong>One chain format for the app and the command line.</strong> The project
+      stores the three chains as plain JSON &mdash; block type, parameters, enabled flag, order &mdash; next to the preview
+      rectangles. <code>lunar_finish.py</code> becomes a chain runner that reads that file, so anything you build here can
+      be re-run from a script, and your existing flags become a built-in default chain. Every block applies to the whole
+      image, with one computed exception: any block can be set to fade out within a chosen distance of the limb. North-up is not a block: it is geometry. Previews and export
+      share one orientation, but the pixels are turned once, after the chains, so every block works on the unrotated
+      data exactly as PixInsight and Photoshop would.</p>
+    <p class="note"><strong>Deconvolution is the one block that recovers detail rather than amplifying it.</strong> Wavelets
+      and unsharp mask make surviving structure louder; deconvolution estimates the blur that destroyed it and inverts it.
+      Its three PSF sliders are LuckyStackWorker&rsquo;s, read from that application&rsquo;s own code and reproduced:
+      an Airy pattern <code>(2&middot;J&#8321;(v)/v)&sup2;</code> out to three times the <b>Airy disk radius</b>, then a log
+      stretch <code>ln(1&nbsp;+&nbsp;I&middot;D)</code> &mdash; which is what <b>diffraction intensity</b> really is, a
+      visibility control on the rings, not an optical quantity &mdash; then a Gaussian of
+      <code>&sigma; = R&middot;(5&nbsp;&minus;&nbsp;S)/16</code>, which is what the <b>seeing index</b> does: 5 leaves the
+      rings crisp, 1 smears them into a blob. Each channel uses its own wavelength (red 630&nbsp;nm, green 532, blue 465),
+      so the PSF is genuinely chromatic; a mono image uses 532 for all three. The block also accepts a measured PSF image.
+      This is the most promising lead on the unexplained red edge excess in section 12, which is exactly a per-channel PSF
+      difference.</p>
+    <p class="note"><strong>White balance measures two places and corrects everywhere.</strong> As in PixInsight, it
+      takes a background reference (the sky) to neutralise the per-channel offsets, and a white reference on the lunar
+      surface to set the per-channel gains. Both default to automatic &mdash; sky pixels, and the highlands, which is what
+      the builder already does at the end of every build &mdash; and either can be replaced by a rectangle you draw. Those
+      rectangles only decide what is measured; the correction applies to the whole image, so this is not a mask. Measured
+      against PixInsight: ColorCalibration makes the white reference neutral but puts each channel&rsquo;s background back
+      afterwards, so the sky stays tinted; BackgroundNeutralization in its default mode also rescales the whole image to
+      fit &mdash; by 10&ndash;13&nbsp;% &mdash; and ignores its target. On a raw 25 September limb panel, background
+      preview, white limits 0.10&ndash;0.99, and both together gave the same colour to within 0.1&nbsp;%; turning
+      structure detection on left the highlands 1.5&nbsp;% bluer. The block does calibration and neutralisation as
+      separate, visible steps, matches PixInsight&rsquo;s colour exactly, and never changes overall brightness silently.</p>
+    <p class="note"><strong>Sub-pixel RGB shift finds the alignment itself.</strong> It runs twice, both times
+      automatically. In the build, every panel&rsquo;s R and B offsets against G are measured as it is read and corrected
+      when they exceed about 0.1&nbsp;px; the build log says what was found either way. As a block, it measures the image
+      arriving at it and applies the shift, showing the dx and dy it found; LuckyStackWorker&rsquo;s eight-way nudge pads
+      adjust it from there. Detection uses two independent measures and only applies a shift when they agree: on the
+      25 September Saturn frame, channel centroids reproduced LuckyStackWorker&rsquo;s correction to within 0.2&nbsp;px,
+      while phase correlation &mdash; which worked on lunar texture &mdash; was 1&nbsp;px out on a smooth disk. When the
+      two disagree the block says so and leaves the image alone. On the 25 September
+      set both would find nothing to do: sampled across the 68-minute run, the channels sit 0.04&nbsp;px apart with no drift,
+      which is what AutoStakkert&rsquo;s RGB align (always on) leaves behind. Where it earns its place is a night shot at
+      prime focus without the ADC, or a stack where RGB align was off. It does not cure the coloured edges in that set:
+      there, red features read about 0.2&nbsp;px larger on every edge whatever its direction, which no shift can undo.</p>
+  </div>
+</section>
+
+<!-- ============================================================ 8 -->
+<section class="part">
+  <div class="wrap">
+    <div class="kicker"><span class="num">08</span><h2>Incomplete colour coverage</h2></div>
+    <p class="intro">The colour set will usually cover less of the disk than the luminance set. This is the one place
+      where the two coverage choices live, and both are shown on the image before anything is written.</p>
+
+    <figure class="screen">
+      <div class="frame">
+        <div class="chrome"><i></i><i></i><i></i><b>"Show it" — colour coverage on the canvas</b></div>
+        <div class="stage">
+          <canvas class="map" data-moon="coverage" width="1120" height="560"></canvas>
+
+          <aside class="panel layers" style="top:12px">
+            <h5>Where there is no colour</h5>
+            <div class="seg" style="margin-bottom:10px">
+              <button class="on">Keep the full canvas</button><button>Crop</button>
+            </div>
+            <p class="sublabel">The grey areas have luminance detail but no colour panel behind them. Keeping the full
+              canvas leaves them grey; cropping cuts the image down to where both layers reach.</p>
+            <div class="sep"></div>
+            <dl style="display:grid;grid-template-columns:auto 1fr;gap:5px 12px;margin:0;font-size:12.5px">
+              <dt style="color:var(--text-3)">Full canvas</dt><dd style="margin:0;font-variant-numeric:tabular-nums">14792 × 13432 px</dd>
+              <dt style="color:var(--text-3)">Cropped</dt><dd style="margin:0;font-variant-numeric:tabular-nums">13180 × 12004 px</dd>
+              <dt style="color:var(--text-3)">Grey if kept</dt><dd style="margin:0;font-variant-numeric:tabular-nums">4.1 % of the disk</dd>
+              <dt style="color:var(--text-3)">Lost if cropped</dt><dd style="margin:0;font-variant-numeric:tabular-nums">the NW limb</dd>
+            </dl>
+            <div class="sep"></div>
+            <div class="sublabel">The choice is only about this export. Both layers keep everything they have either way.</div>
+          </aside>
+
+          <div class="vlegend" style="left:16px">
+            <span class="sw" style="background:#97A1C2"></span><b>luminance only</b>
+            <span class="sw" style="background:#F5A742;margin-left:8px"></span><b>crop line</b>
+          </div>
+
+          <footer class="panel status">
+            <div class="left">
+              <div class="readout"><span class="k">coverage</span><b>95.9 %</b></div>
+              <span class="save">Nothing written yet</span>
+            </div>
+            <div class="zoom"><span class="pct">18 %</span><button class="btn ghost">Fit</button>
+              <button class="btn primary">Export…</button></div>
+          </footer>
+        </div>
+      </div>
+      <figcaption>The uncovered area is shaded with <code>--text-3</code> rather than coloured red: it is a fact about
+        the capture, not a fault. The amber dashed rectangle is the crop the second option would apply, drawn live as
+        you hover the segmented control, so the trade is visible before it is made.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<!-- ============================================================ 8 -->
+<section class="part">
+  <div class="wrap">
+    <div class="kicker"><span class="num">09</span><h2>Saving and exporting</h2></div>
+    <p class="intro">Two different actions, kept apart in the interface and in the words. The project is the thing you
+      come back to; the export is a flat picture for everything else. Neither is PSD and neither is a layered TIFF,
+      because neither is supported today and the design does not assume they will be.</p>
+
+    <div class="callouts" style="margin-bottom:8px">
+      <div class="callout accent">
+        <b>Save project — ⌘S</b>
+        <p>Writes a folder <code>name.lunarmosaic/</code> holding <code>project.json</code>: the panel paths, both
+          mosaic layouts, the match transform and every adjustment, plus the two built mosaics as 16-bit TIFFs.
+          Saves continuously while you work; the status bar says when.</p>
+      </div>
+      <div class="callout">
+        <b>Export image — ⌘E</b>
+        <p>Flattens the two layers as they look right now, at the luminance canvas's own resolution, into one TIFF
+          or PNG. It is a result, not a document: reopening it gives you a picture, not layers.</p>
+      </div>
+      <div class="callout">
+        <b>Export the layers separately</b>
+        <p>For people who want to finish in Photoshop: the luminance mosaic and the matched, adjusted colour mosaic
+          as two files on the same pixel grid, ready to stack with a Color blend by hand.</p>
+      </div>
+    </div>
+
+    <figure class="screen">
+      <div class="frame">
+        <div class="chrome"><i></i><i></i><i></i><b>Export</b></div>
+        <div class="stage" style="height:640px">
+          <canvas class="map" data-moon="both" width="1120" height="640"></canvas>
+          <div class="modal">
+            <div class="dialog">
+              <div class="top">
+                <div>
+                  <h4>Export image</h4>
+                  <p class="lead">The two layers as you see them now, flattened into one file. Your project keeps its
+                    layers.</p>
+                </div>
+                <div class="preview"><canvas data-moon="exportprev" width="320" height="240"></canvas><span>Preview</span></div>
+              </div>
+
+              <div class="fieldset">
+                <div class="legend">Where there is no colour</div>
+                <div class="opts">
+                  <div class="opt on">Keep the full canvas<small>14792 × 13432 px · 4.1 % grey</small></div>
+                  <div class="opt">Crop to where both reach<small>13180 × 12004 px · no grey</small></div>
+                </div>
+              </div>
+
+              <div class="fieldset">
+                <div class="legend">Size</div>
+                <div class="opts three">
+                  <div class="opt on">1:1<small>full resolution</small></div>
+                  <div class="opt">1:2<small>half size</small></div>
+                  <div class="opt">Longest side<small>8192 px</small></div>
+                </div>
+              </div>
+
+              <div class="fieldset">
+                <div class="legend">Format</div>
+                <div class="opts three">
+                  <div class="opt on">TIFF<small>16-bit, uncompressed</small></div>
+                  <div class="opt">PNG<small>16-bit</small></div>
+                  <div class="opt">JPEG<small>8-bit, quality 92</small></div>
+                </div>
+              </div>
+
+              <div class="fieldset">
+                <div class="legend">Include</div>
+                <div class="checks">
+                  <label><span class="cb"></span>Colour layer, as adjusted</label>
+                  <label><span class="cb off"></span>A second file per layer</label>
+                  <label><span class="cb"></span>Capture dates in the metadata</label>
+                  <label><span class="cb off"></span>Observing site in the metadata</label>
+                </div>
+              </div>
+
+              <div class="outsize"><span>Output</span><b>14792 × 13432 px · 16-bit TIFF · about 1.2 GB</b></div>
+
+              <div class="foot">
+                <span class="spread sub3" style="align-self:center">Writes to the project folder</span>
+                <button class="btn ghost">Close</button>
+                <button class="btn primary"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7 10.5l5 5 5-5M5 20h14"/></svg>Export</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <figcaption><b>Reused directly:</b> LunarAtlas's export dialog almost unchanged — <code>.modal</code> over the
+        scrim, the <code>.opt</code> cards with their amber selected state, the live <code>.preview</code> thumbnail
+        that follows every choice, the <code>.checks</code> grid and the <code>.outsize</code> summary bar. The one
+        new row is the coverage choice, placed first because it changes the output size everything below it reports.</figcaption>
+    </figure>
+
+    <p class="note"><strong>Observing site stays off by default.</strong> It is a checkbox in the export dialog, not a
+      setting you forget. The Settings page repeats LunarAtlas's promise word for word: the location lives in your
+      settings on this computer, is never sent anywhere, and is never written into an exported image or its metadata
+      unless you tick that box for that export.</p>
+  </div>
+</section>
+
+<!-- ============================================================ 9 -->
+<section class="part">
+  <div class="wrap">
+    <div class="kicker"><span class="num">10</span><h2>The states that matter</h2></div>
+    <p class="intro">Everything above is the path where it works. These are the rest, and they are the part worth
+      arguing about first, because they decide whether a four-minute build is ever lost.</p>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th style="width:22%">State</th><th>What the user sees</th><th style="width:28%">What it is built on</th></tr></thead>
+        <tbody>
+          <tr><td><b>Reading panels</b></td>
+            <td>The two set cards fill in as the headers are read: count first, then sizes, then the scale ratio.
+              No spinner — the numbers arriving <em>is</em> the progress.</td>
+            <td>Stage 1 of the builder, run on import</td></tr>
+
+          <tr><td><b>Building</b></td>
+            <td>Two stage lists, one per set, with real per-step notes. The elapsed time is in the card header. Cancel
+              is per set and takes effect at the next step boundary.</td>
+            <td><code>ol.stages</code>, <code>.bar</code>, <code>friendly.js</code></td></tr>
+
+          <tr><td><b>Cancelled</b></td>
+            <td>"Stopped at step 6. Everything up to there is kept." The card stays, with <em>Resume</em> as the primary
+              action. The partial file naming already used by the tools means nothing half-written exists on disk.</td>
+            <td><code>.NAME.partial.EXT</code> rename-on-success</td></tr>
+
+          <tr><td><b>Build failed</b></td>
+            <td>Red stage, a plain-language title, the reasons with the raw measurement under each, and recovery actions
+              that name what they will do. The other set's result is kept and the card says so.</td>
+            <td><code>.err</code>, <code>friendly.error()</code></td></tr>
+
+          <tr><td><b>Match failed</b></td>
+            <td>"The two mosaics could not be matched." Offers: search a wider scale range, place three points by hand,
+              or carry on with luminance only. Never blocks the project.</td>
+            <td><code>.err</code> plus a manual three-point mode</td></tr>
+
+          <tr><td><b>Poor match</b></td>
+            <td>Amber chip in the status bar with the real numbers, the error map one click away, and colour smoothing
+              suggested as the practical fix. Not an error; a measurement.</td>
+            <td><code>.qchip</code> + <code>.gatepop</code></td></tr>
+
+          <tr><td><b>No colour coverage</b></td>
+            <td>Grey areas on the canvas, the percentage in the layers panel, and the two coverage options with live
+              output sizes. Never silently cropped.</td>
+            <td><code>.seg</code> + <code>.outsize</code></td></tr>
+
+          <tr><td><b>Crashed or quit</b></td>
+            <td>On reopening: "This project was building when it closed. The colour mosaic finished; the luminance
+              mosaic stopped at step 5." One button: <em>Carry on</em>.</td>
+            <td>per-stage cache + project state in <code>project.json</code></td></tr>
+
+          <tr><td><b>Out of disk or memory</b></td>
+            <td>Caught before the build starts, as stage 1 already does, with the number needed and the number free.
+              Offers building at half resolution as a first pass.</td>
+            <td>existing preflight checks</td></tr>
+
+          <tr><td><b>Nothing imported</b></td>
+            <td>The home drop zone, with its four states. The empty project list says what a project is, in one line.</td>
+            <td><code>#drop</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <figure class="screen">
+      <div class="frame">
+        <div class="chrome"><i></i><i></i><i></i><b>Reopening after a crash</b></div>
+        <div class="app" style="padding-bottom:22px">
+          <div class="card" style="margin-bottom:0">
+            <h4>2026-09-25 full Moon</h4>
+            <div class="okbox" style="margin-top:0">
+              <b>This project was building when it closed.</b>
+              <p>Nothing was lost. The colour mosaic finished and is on disk. The luminance build stopped during
+                step 5, and the first four steps are cached, so carrying on takes about 90 seconds rather than four
+                minutes.</p>
+            </div>
+            <div class="setgrid" style="margin-top:14px">
+              <div class="set l">
+                <div class="top"><div class="ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="8"/><path d="M12 4v16"/></svg></div>
+                  <div><b>Luminance</b><span class="sub3">stopped at step 5</span></div>
+                  <span class="tag warn" style="margin-left:auto">Unfinished</span></div>
+                <div class="pbar"><i style="width:48%"></i></div>
+                <p class="hint">Features, overlaps and panel positions are cached.</p>
+              </div>
+              <div class="set c">
+                <div class="top"><div class="ic" style="color:var(--accent)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="9.5" cy="9.5" r="5"/><circle cx="14.5" cy="9.5" r="5"/><circle cx="12" cy="14.5" r="5"/></svg></div>
+                  <div><b>Colour</b><span class="sub3">6412 × 5840 px</span></div>
+                  <span class="tag ok" style="margin-left:auto">Finished</span></div>
+                <div class="pbar done"><i style="width:100%"></i></div>
+                <p class="hint">Saved in the project folder.</p>
+              </div>
+            </div>
+            <div class="rowbtns">
+              <button class="btn primary lg">Carry on</button>
+              <button class="btn lg">Start the luminance build again</button>
+              <button class="btn ghost lg">Open what there is</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <figcaption>Recovery is a normal screen, not a dialog. It names what survived before it names what did not, and
+        gives the time saved, because that is the number that decides which button the user presses.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<!-- ============================================================ 10 -->
+<section class="part">
+  <div class="wrap">
+    <div class="kicker"><span class="num">11</span><h2>What comes from LunarAtlas</h2></div>
+    <p class="intro">Almost all of it, and from named files rather than by imitation. The intent is that
+      <code>theme.css</code> becomes a shared file between the two applications, so a change to the family's look lands
+      in both.</p>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th style="width:30%">Source</th><th>Taken</th></tr></thead>
+        <tbody>
+          <tr><td><code>lunaratlas/viewer/theme.css</code><br><span class="sub3">the whole file, unchanged</span></td>
+            <td>Every token: the navy ladder <code>--bg-0…4</code>, the ivory text ramp, the single amber accent and its
+              hover/press/soft/line/ink variants, cyan <code>--grid</code>, <code>--danger</code>, radii, shadow, easing,
+              the focus ring, <code>color-scheme: dark</code>. Plus the shared controls: <code>.btn</code> with its
+              primary / ghost / danger / lg / sm variants and all four interaction states, <code>.linkbtn</code>,
+              <code>.switch</code>, <code>.chip</code>, <code>.tag</code>, <code>kbd</code>, the selection colour and
+              the reduced-motion block.</td></tr>
+
+          <tr><td><code>lunaratlas/viewer/viewer.css</code><br><span class="sub3">the canvas screen</span></td>
+            <td>The floating <code>.panel</code> with its blur and saturate; <code>.topbar</code> with brand and file
+              name; the <code>.tools</code> rail with its 38 px targets, hairline groups, amber side marker and the
+              <code>.tip</code> tooltip; the <code>.layers</code> aside with <code>.row</code>, <code>.swatch</code>,
+              <code>.sep</code>, <code>.seg</code>, <code>.slider</code>, <code>.sub</code>; the <code>.status</code>
+              bar's split layout; <code>.qchip</code> and its popover; <code>.popover</code> with its four nub
+              positions; the <code>.modal</code> / <code>.dialog</code> / <code>.opts</code> / <code>.checks</code> /
+              <code>.outsize</code> / <code>.preview</code> export machinery; <code>.toast</code>; and the three
+              responsive breakpoints at 1240, 1100 and 860 px.</td></tr>
+
+          <tr><td><code>lunaratlas/viewer/app.html</code><br><span class="sub3">the setup screens</span></td>
+            <td>The hero; <code>.card</code> with its uppercase tracked heading; the <code>#drop</code> zone with its
+              idle, hover, focus and drag-over states and its format chips; <code>ol.stages</code> and
+              <code>.bar</code>; the <code>.err</code> block; <code>details.log</code> with the Copy button;
+              <code>ul.recent</code> and <code>.thumb</code>; and the footer with the folder path as a
+              <code>.linkbtn</code> beside the Settings and Quit <code>.tool</code> buttons.</td></tr>
+
+          <tr><td><code>lunaratlas/viewer/app.html</code> → <code>dialog#eqform</code><br>
+            <code>lunaratlas/viewer/equipment.js</code><br><code>lunaratlas/viewer/cameras.json</code></td>
+            <td>The equipment dialog as the per-set optics editor, unchanged: telescope name and focal length, the
+              Barlow chip row with its "Other…" field, the camera combo box searching model or sensor with its grouped
+              list and pixel-size fallback, binning, and the live scale readout. This is exactly the form that makes
+              "2× Barlow on L, none on RGB" a two-click statement.</td></tr>
+
+          <tr><td><code>lunaratlas/viewer/friendly.js</code><br><span class="sub3">the pattern, with its own table</span></td>
+            <td>The idea that raw log lines and raw errors are mapped to one plain sentence for the page while the raw
+              text stays in Details, and that an error becomes <code>{title, text, reasons}</code> with the measurement
+              in mono under each reason. LunarMosaic needs its own table of patterns for the builder's nine steps and
+              the match.</td></tr>
+
+          <tr><td><code>lunaratlas/viewer/settings.html</code></td>
+            <td>The settings page shape — cards, the sticky save bar with its message area, the equipment tables — and
+              the observing-site section with its privacy note kept word for word.</td></tr>
+
+          <tr><td><code>lunaratlas/fonts/ibmplexsans/</code></td>
+            <td>IBM Plex Sans as <code>--font-ui</code>, bundled so nothing is downloaded. Headings at 600, body at 400,
+              uppercase labels at 11 px with 0.14 em tracking, and <code>font-variant-numeric: tabular-nums</code>
+              everywhere digits align.</td></tr>
+
+          <tr><td><code>lunaratlas/viewer/index.html</code> → the SVG symbol sprite<br>
+            <code>packaging/icon/</code></td>
+            <td>The inline <code>&lt;symbol id="i-*"&gt;</code> approach for icons, with the existing hand, undo, redo,
+              warning, chevron, close and download glyphs reused and a small set added for layers, blink, split and
+              difference. The app icon follows the same construction so the two sit together in a dock.</td></tr>
+
+          <tr><td><code>design/shoot.mjs</code>, <code>design/README.md</code></td>
+            <td>The screenshot harness and the design-review README: every screen and state captured from the real
+              pages, with the progress and failure screens driven by a scripted log so they can be shown without
+              waiting for a failure.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p class="note" style="margin-top:24px"><strong>What is genuinely new.</strong> Four things, and they are small:
+      the two-up set card used at import and during the build; the layer row with a thumbnail, blend label and switch;
+      the match error map with its three-colour legend; and the coverage segmented control with its live crop preview.
+      Everything else is an existing component carrying different content.</p>
+  </div>
+</section>
+
+<!-- ============================================================ 11 -->
+<section class="part">
+  <div class="wrap narrow">
+    <div class="kicker"><span class="num">12</span><h2>Decisions still open</h2></div>
+    <p class="intro">Two left. Everything else has been settled; it is listed under &ldquo;resolved&rdquo; below.</p>
+
+    <ol class="decisions">
+      <li>
+        <h4>How should daylight sky be removed?</h4>
+        <p>A daytime sky is not flat. The 4 October set kept a glow up to 11&nbsp;% of the disk&rsquo;s peak off the limb,
+          because the builder subtracts one constant per channel. Fitting a smooth surface to the sky with the Moon masked
+          out &mdash; as Siril does for starry fields &mdash; covers most of it, with two lunar catches. The sky glow lies on
+          the disk as well, so the model has to be subtracted everywhere, not only around it. And the scattered light rises
+          steeply towards the limb, which a smooth polynomial cannot follow, so the model needs a term that depends on
+          distance from the limb. Per panel, before blending, is where it belongs, since each panel was shot under its own
+          sky.</p>
+        <p class="lean"><b>Leaning:</b> per-panel smooth model plus a limb-distance term, subtracted everywhere; then the
+          sky is flat, and setting a black point just above its noise makes it pitch-black without clipping faint limb or
+          terminator detail, which is where raising the black level by hand goes wrong today.</p>
+      </li>
+      <li>
+        <h4>What causes the coloured edges, if not misalignment?</h4>
+        <p>On the 25 September set every strong edge &mdash; limb, crater rims, terminator &mdash; shows red reaching about
+          0.2&nbsp;px further into the dark side than green, in every direction. Matching the channels&rsquo; blur did not
+          change it, only 0.08&nbsp;px of it behaves like a shift, and AutoStakkert&rsquo;s RGB align was on. That points at
+          something tonal &mdash; a different response curve per channel, or AutoStakkert&rsquo;s colour handling. It is
+          not established, and no block is designed for it yet.</p>
+        <p class="lean"><b>Leaning:</b> test a per-channel tone match on one panel before designing anything.</p>
+      </li>
+    </ol>
+
+    <p class="note" style="margin-top:26px"><strong>Resolved.</strong> The luminance input can be any mono capture &mdash;
+      L, R, IR or anything else that carries the detail. Colour is not mosaicked separately: the luminance mosaic is built
+      first, then each colour panel is registered straight onto it and blended there, so drifting refraction is corrected
+      panel by panel and colour is resampled once. Measured on 25 September colour with the 3&nbsp;px colour blur and
+      &times;2 saturation, a 1&nbsp;px colour error is invisible; at 2&ndash;3&nbsp;px a coloured rim starts to show at the
+      limb, while the interior tolerates about 5&nbsp;px &mdash; so the target is 1&ndash;2&nbsp;px, which per-panel
+      registration beats comfortably, and no mesh is needed. Built mosaics are kept in the project, with their size shown
+      and one action to delete them. Colour never supplies detail where luminance is missing. Panel quality is one line
+      per set. Any block can carry a &ldquo;fade near the limb&rdquo; setting &mdash; the one exception to whole-image
+      blocks, computed from the limb and never drawn. Structure detection in white balance is off by default. North-up
+      is applied once, after the chains. A stream may hold several sets at different scales; where luminance sets
+      overlap, the one that resolves the finest detail — measured, not read from its pixel scale — wins. The app and the command line share the chain file. Blocks operate on stored values, may
+      repeat, and include an automatic sub-pixel RGB shift. The merge is a Color blend with a strength slider. Both inputs
+      are accepted however they were made.</p>
+    <p class="note"><strong>Screens still to redraw to match.</strong> Section 04 builds the colour set as a second
+      mosaic; it becomes a luminance build followed by colour panels placed onto it. Section 03 needs the
+      single-colour-mosaic path and more than one set per stream, with the canvas size stated before building;
+      section 05's match panel needs a per-panel table (placed or rejected, pose model, held-out residual); the editor
+      needs a resolution view for mixed-scale luminance; section 09 must save the chains and previews, and chain
+      presets are not yet drawn.</p>
+  </div>
+</section>
+
+<div class="wrap">
+  <footer class="end">
+    <p>Design proposal for LunarMosaic, drawn from the LunarAtlas interface at
+      <code>kvandebeek/lunaratlas</code> and the existing mosaic pipeline in <code>mosaic/</code>. Every colour,
+      control and panel on this page is rendered from LunarAtlas's own <code>theme.css</code> tokens. No application
+      code has been changed.</p>
+  </footer>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  // deterministic PRNG so the Moon looks the same on every load and republish
+  function rng(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+
+  // craters: fixed layout in unit-disk coordinates
+  var CRATERS = (function () {
+    var r = rng(20260925), out = [], i, a, d;
+    for (i = 0; i < 150; i++) {
+      a = r() * Math.PI * 2; d = Math.sqrt(r()) * 0.97;
+      out.push({ x: Math.cos(a) * d, y: Math.sin(a) * d, r: 0.012 + Math.pow(r(), 3) * 0.085, t: r() });
+    }
+    return out;
+  })();
+
+  var MARIA = [
+    { x: -0.30, y: -0.38, r: 0.34 }, { x: 0.12, y: -0.46, r: 0.26 },
+    { x: -0.52, y: -0.05, r: 0.24 }, { x: 0.34, y: -0.14, r: 0.20 },
+    { x: -0.10, y: -0.12, r: 0.22 }, { x: 0.46, y: -0.44, r: 0.16 }
+  ];
+
+  // paint one Moon. mode controls colour, offset fakes a misregistration.
+  function paintMoon(ctx, cx, cy, R, mode, dx, dy) {
+    var g, i, c, m, px, py, pr;
+    dx = dx || 0; dy = dy || 0;
+
+    ctx.save();
+    ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.clip();
+
+    // base disk
+    g = ctx.createRadialGradient(cx - R * 0.3, cy - R * 0.35, R * 0.1, cx, cy, R * 1.15);
+    g.addColorStop(0, '#d7d2c8'); g.addColorStop(0.62, '#b2ada4'); g.addColorStop(1, '#6d6a66');
+    ctx.fillStyle = g; ctx.fillRect(cx - R, cy - R, R * 2, R * 2);
+
+    // maria, darker
+    for (i = 0; i < MARIA.length; i++) {
+      m = MARIA[i];
+      px = cx + m.x * R; py = cy + m.y * R; pr = m.r * R;
+      g = ctx.createRadialGradient(px, py, 0, px, py, pr);
+      g.addColorStop(0, 'rgba(70,68,66,0.60)'); g.addColorStop(1, 'rgba(70,68,66,0)');
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(px, py, pr, 0, Math.PI * 2); ctx.fill();
+    }
+
+    // craters
+    for (i = 0; i < CRATERS.length; i++) {
+      c = CRATERS[i];
+      px = cx + c.x * R; py = cy + c.y * R; pr = c.r * R;
+      if (pr < 0.7) continue;
+      g = ctx.createRadialGradient(px - pr * 0.3, py - pr * 0.3, 0, px, py, pr);
+      if (c.t > 0.72) { g.addColorStop(0, 'rgba(255,252,244,0.50)'); g.addColorStop(0.7, 'rgba(255,252,244,0.10)'); g.addColorStop(1, 'rgba(255,252,244,0)'); }
+      else { g.addColorStop(0, 'rgba(46,44,42,0.42)'); g.addColorStop(0.75, 'rgba(46,44,42,0.14)'); g.addColorStop(1, 'rgba(255,255,255,0.14)'); }
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(px, py, pr, 0, Math.PI * 2); ctx.fill();
+    }
+
+    // colour, offset by (dx,dy) to show a mismatch
+    if (mode === 'colour' || mode === 'both') {
+      ctx.save();
+      ctx.translate(dx, dy);
+      ctx.globalCompositeOperation = (mode === 'both') ? 'color' : 'source-atop';
+      if (mode === 'colour') { ctx.fillStyle = '#8a8276'; ctx.fillRect(cx - R - 40, cy - R - 40, R * 2 + 80, R * 2 + 80); }
+      // titanium blues over the maria, iron oranges over the highlands
+      for (i = 0; i < MARIA.length; i++) {
+        m = MARIA[i];
+        px = cx + m.x * R; py = cy + m.y * R; pr = m.r * R * 1.25;
+        g = ctx.createRadialGradient(px, py, 0, px, py, pr);
+        g.addColorStop(0, 'rgba(96,140,196,0.95)'); g.addColorStop(1, 'rgba(96,140,196,0)');
+        ctx.fillStyle = g; ctx.beginPath(); ctx.arc(px, py, pr, 0, Math.PI * 2); ctx.fill();
+      }
+      g = ctx.createRadialGradient(cx + R * 0.42, cy + R * 0.40, 0, cx + R * 0.42, cy + R * 0.40, R * 0.95);
+      g.addColorStop(0, 'rgba(214,150,86,0.85)'); g.addColorStop(1, 'rgba(214,150,86,0)');
+      ctx.fillStyle = g; ctx.fillRect(cx - R - 40, cy - R - 40, R * 2 + 80, R * 2 + 80);
+      g = ctx.createRadialGradient(cx - R * 0.55, cy + R * 0.55, 0, cx - R * 0.55, cy + R * 0.55, R * 0.8);
+      g.addColorStop(0, 'rgba(206,158,110,0.70)'); g.addColorStop(1, 'rgba(206,158,110,0)');
+      ctx.fillStyle = g; ctx.fillRect(cx - R - 40, cy - R - 40, R * 2 + 80, R * 2 + 80);
+      ctx.restore();
+    }
+
+    // limb shading
+    ctx.globalCompositeOperation = 'source-over';
+    g = ctx.createRadialGradient(cx, cy, R * 0.80, cx, cy, R);
+    g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(1, 'rgba(0,0,0,0.52)');
+    ctx.fillStyle = g; ctx.fillRect(cx - R, cy - R, R * 2, R * 2);
+    ctx.restore();
+  }
+
+  function bg(ctx, w, h) {
+    ctx.fillStyle = '#05080f'; ctx.fillRect(0, 0, w, h);
+  }
+
+  function render(cv) {
+    var mode = cv.getAttribute('data-moon');
+    var w = cv.width, h = cv.height, ctx = cv.getContext('2d');
+    var cx = w / 2, cy = h / 2, R = Math.min(w, h) * 0.44;
+    var i, c, px, py, pr, g, err;
+
+    bg(ctx, w, h);
+
+    if (mode === 'lum' || mode === 'lumthumb') { paintMoon(ctx, cx, cy, R, 'lum', 0, 0); return; }
+    if (mode === 'colour' || mode === 'colourthumb') { paintMoon(ctx, cx, cy, R, 'colour', 0, 0); return; }
+    if (mode === 'both' || mode === 'exportprev') { paintMoon(ctx, cx, cy, R, 'both', 0, 0); return; }
+    if (mode === 'zoomA' || mode === 'zoomB') {           // a 1:1 preview: a small patch of a large Moon
+      var RZ = w * 3.2, tx = mode === 'zoomA' ? -0.30 : 0.52, ty = mode === 'zoomA' ? -0.36 : 0.20;
+      paintMoon(ctx, w / 2 - tx * RZ, h / 2 - ty * RZ, RZ, 'lum', 0, 0); return;
+    }
+
+    if (mode === 'part') {
+      paintMoon(ctx, cx, cy, R, 'lum', 0, 0);
+      ctx.save(); ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.clip();
+      ctx.fillStyle = 'rgba(10,15,37,0.82)'; ctx.fillRect(cx - R, cy, R * 2, R);
+      ctx.restore();
+      return;
+    }
+
+    // the match error map: luminance underneath, error patches over it
+    if (mode === 'diffmap') {
+      paintMoon(ctx, cx, cy, R, 'lum', 0, 0);
+      ctx.save(); ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.clip();
+      ctx.fillStyle = 'rgba(10,15,37,0.42)'; ctx.fillRect(cx - R, cy - R, R * 2, R * 2);
+      var r2 = rng(7781);
+      for (i = 0; i < 260; i++) {
+        var a = r2() * Math.PI * 2, d = Math.sqrt(r2()) * 0.99;
+        px = cx + Math.cos(a) * d * R; py = cy + Math.sin(a) * d * R;
+        // error grows towards the south-east (lower right) limb
+        err = 0.25 + Math.max(0, (Math.cos(a) * d * 0.5 + Math.sin(a) * d * 0.9)) * 3.4 + r2() * 0.5;
+        pr = R * (0.045 + r2() * 0.05);
+        var col = err > 2 ? '240,138,126' : (err > 1 ? '245,167,66' : '143,216,236');
+        var al = err > 2 ? 0.52 : (err > 1 ? 0.34 : 0.20);
+        g = ctx.createRadialGradient(px, py, 0, px, py, pr);
+        g.addColorStop(0, 'rgba(' + col + ',' + al + ')'); g.addColorStop(1, 'rgba(' + col + ',0)');
+        ctx.fillStyle = g; ctx.beginPath(); ctx.arc(px, py, pr, 0, Math.PI * 2); ctx.fill();
+      }
+      ctx.restore();
+      return;
+    }
+
+    // coverage: colour everywhere except a north-west wedge, which stays grey
+    if (mode === 'coverage') {
+      paintMoon(ctx, cx, cy, R, 'both', 0, 0);
+      ctx.save();
+      ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.clip();
+      // desaturate the uncovered wedge by laying a grey over it
+      ctx.beginPath();
+      ctx.moveTo(cx - R * 1.2, cy - R * 1.2);
+      ctx.lineTo(cx + R * 0.10, cy - R * 1.2);
+      ctx.quadraticCurveTo(cx - R * 0.42, cy - R * 0.30, cx - R * 1.2, cy + R * 0.12);
+      ctx.closePath();
+      ctx.globalCompositeOperation = 'saturation';
+      ctx.fillStyle = '#808080'; ctx.fill();
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.fillStyle = 'rgba(151,161,194,0.20)'; ctx.fill();
+      ctx.restore();
+      // the crop rectangle the second option would apply
+      ctx.save();
+      ctx.strokeStyle = '#F5A742'; ctx.lineWidth = 2; ctx.setLineDash([9, 7]);
+      ctx.strokeRect(cx - R * 0.72, cy - R * 0.60, R * 1.62, R * 1.52);
+      ctx.restore();
+      return;
+    }
+
+    paintMoon(ctx, cx, cy, R, 'both', 0, 0);
+  }
+
+  function paintAll() {
+    var list = document.querySelectorAll('canvas[data-moon]'), i;
+    for (i = 0; i < list.length; i++) {
+      try { render(list[i]); } catch (e) { /* a canvas we cannot paint simply stays dark */ }
+    }
+  }
+
+  paintAll();
+})();
+</script>
+</body>
+</html>

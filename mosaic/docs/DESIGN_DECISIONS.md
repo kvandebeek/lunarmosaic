@@ -1,5 +1,9 @@
 # Two-layer implementation decisions
 
+> These are the choices behind the 3 October 2026 implementation and remain accurate about it.
+> Decisions taken since, and the measured filter behaviour the blocks must match, are in
+> [DESIGN.md](DESIGN.md), which supersedes this file where the two differ.
+
 These are the initial implementation choices, made with the project owner's authorization.
 They can be revised after trying real mono and colour capture sets.
 

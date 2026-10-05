@@ -15,6 +15,11 @@ import numpy as np
 import tifffile
 import sharpen
 
+# Single source of truth for the JPEG ceiling: the server enforces it in Scene.export(),
+# and /api/export-preview publishes it so the UI can warn before the click.
+JPEG_MAX_SIDE = 65000
+JPEG_MAX_PIXELS = 80_000_000
+
 
 class Image:
     def __init__(self, path):
@@ -392,7 +397,7 @@ class Scene:
         suffix = output.suffix.lower()
         if suffix not in ('.tif', '.tiff', '.png', '.jpg', '.jpeg'):
             raise ValueError('Choose TIFF, PNG or JPEG.')
-        if suffix in ('.jpg', '.jpeg') and (max(w, h) > 65000 or w*h > 80_000_000):
+        if suffix in ('.jpg', '.jpeg') and (max(w, h) > JPEG_MAX_SIDE or w*h > JPEG_MAX_PIXELS):
             raise ValueError('This JPEG is too large. Choose a smaller scale or TIFF/PNG.')
         output.parent.mkdir(parents=True, exist_ok=True)
         fd, temp = tempfile.mkstemp(prefix='.'+output.stem+'-', suffix=suffix, dir=output.parent)

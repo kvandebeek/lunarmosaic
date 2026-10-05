@@ -258,7 +258,7 @@ def write_report(path, man, recs, key, stats):
 
     L.append("## Summary\n")
     tiers = Counter(r["tier"] for r in ok if r["tier"])
-    L.append(f"- Tier counts: " + ", ".join(f"{t}: {tiers.get(t, 0)}" for t in ("Excellent", "Good", "Marginal", "Poor")))
+    L.append("- Tier counts: " + ", ".join(f"{t}: {tiers.get(t, 0)}" for t in ("Excellent", "Good", "Marginal", "Poor")))
     L.append(f"- Rejected: {sum(r['reject'] for r in recs)}")
     if "pairs" in stats:
         L.append(f"- Overlapping pairs: {stats['pairs']} accepted from {stats['candidates']} candidates; "

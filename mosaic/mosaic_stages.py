@@ -677,7 +677,6 @@ def photometry(nodes, pair_keys, P, rgb4, m4, sat4, f, ref, sigma_meas=0.003, si
         va = np.percentile(rgb4[a][common].astype(np.float32), qs, axis=0)
         vb = np.percentile(Bw[common], qs, axis=0)
         obs.append((a, b, va, vb, np.sqrt(common.sum() / 1e4)))
-    idx = {n: k for k, n in enumerate(nodes)}
     free = [n for n in nodes if n != ref]
     col = {n: j for j, n in enumerate(free)}
     N = len(free)

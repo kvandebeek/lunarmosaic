@@ -30,7 +30,7 @@ from urllib.parse import parse_qs, unquote, urlencode
 import cv2
 import numpy as np
 
-from atlas_geo import (DATA, PPD, R_MOON, Reference, image_signature, load_geo, resolve_sidecar, sidecar_path,
+from atlas_geo import (DATA, PPD, R_MOON, Reference, image_signature, resolve_sidecar, sidecar_path,
                        sky_to_latlon, unit, write_json_atomic)
 from atlas_names import load_features
 from atlas_paths import (CACHE as CACHE_ROOT, FONTS as BUNDLED_FONTS, cv_imread, cv_imwrite, file_lock, private_dir,

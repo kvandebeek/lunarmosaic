@@ -1,11 +1,14 @@
 """Regression checks for bugs found in the 2026-09-27 reviews (synthetic data, a few seconds).
 
     python3 tests/review_regressions.py          exit status 1 if any check fails
+
+Each check is also exposed as a `unittest` test case, so `unittest discover` runs them too.
 """
 import itertools
 import os
 import sys
 import tempfile
+import unittest
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace as NS
 from unittest import mock
@@ -228,9 +231,29 @@ def atlas_limb_failure_falls_back():
         assert matrix is None and reason == 'no usable limb', (matrix, reason)
 
 
-for fn in (bridge_drop, fine_all_fallback, photometry_no_overlap, pyramid_levels_and_border0, proxy_non_divisible, finish_cancel,
-           contrast_curve_monotonic, no_gaps_at_panel_edges, lit_peaks_beyond_terminator_kept, json_safe_and_bounded_map,
-           mesh_model_round_trip, sky_pedestal_neutralised, atlas_limb_failure_falls_back):
-    test(fn)
-print(f"\n{'ALL OK' if not FAILED else 'FAILED: ' + ', '.join(FAILED)}")
-sys.exit(1 if FAILED else 0)
+CHECKS = (bridge_drop, fine_all_fallback, photometry_no_overlap, pyramid_levels_and_border0, proxy_non_divisible, finish_cancel,
+          contrast_curve_monotonic, no_gaps_at_panel_edges, lit_peaks_beyond_terminator_kept, json_safe_and_bounded_map,
+          mesh_model_round_trip, sky_pedestal_neutralised, atlas_limb_failure_falls_back)
+
+
+class ReviewRegressions(unittest.TestCase):
+    """Expose the checks above to `unittest discover` as one test case each."""
+
+
+def _case(fn):
+    def run(self):
+        fn()
+    run.__name__ = run.__qualname__ = f'test_{fn.__name__}'
+    run.__doc__ = fn.__doc__
+    return run
+
+
+for _fn in CHECKS:
+    setattr(ReviewRegressions, f'test_{_fn.__name__}', _case(_fn))
+
+
+if __name__ == '__main__':
+    for fn in CHECKS:
+        test(fn)
+    print(f"\n{'ALL OK' if not FAILED else 'FAILED: ' + ', '.join(FAILED)}")
+    sys.exit(1 if FAILED else 0)
