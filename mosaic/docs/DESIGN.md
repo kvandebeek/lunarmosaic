@@ -771,9 +771,10 @@ The commands catch up with the interface, and the documentation with the code.
      section keeps only what remains open.
 3. **Two faults the acceptance run found.**
    - lunar_finish's north-up never ended on a mosaic whose panel names carry no capture time, when run from the
-     session folder. moon_atlas's `capture_time` looks such a panel up in the working folder's layout, which is
-     the mosaic's own, again and again. lunar_finish now gives such a mosaic no capture time, so the close-up
-     search is skipped with a message. The fault itself is in moon_atlas, left for its owner.
+     session folder. moon_atlas's `capture_time` looked such a panel up in the working folder's layout, which is
+     the mosaic's own, again and again. Fixed in moon_atlas at the owner's request: a panel's time now comes from
+     its name alone (recorded in `moon_atlas/UPSTREAM.md`, to report upstream; regression check
+     `capture_time_from_a_layout_ends`).
    - `design_mockups/render_mockups.py` assumed the 101-panel night: 62 panels in its placement frame, and a
      residual for every panel.
 
@@ -789,7 +790,7 @@ The commands catch up with the interface, and the documentation with the code.
 
    It fails if a documented command was not run or printed a traceback, and takes about 5 minutes.
 
-All fourteen suites pass: 125 unittest tests, and the 14 regressions of `review_regressions.py`.
+All fourteen suites pass: 125 unittest tests, and the 15 regressions of `review_regressions.py`.
 
 ### Changes made 2026-10-05 to `lunar_finish.py`
 

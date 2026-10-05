@@ -235,9 +235,16 @@ SHARPCAP = re.compile(r'(\d{4})-(\d{2})-(\d{2})-(\d{2})(\d{2})_(\d)')
 def capture_time(name):
     """UTC datetime from a SharpCap / WinJUPOS name 'YYYY-MM-DD-HHMM_T-…' (T = tenths of a minute); for a mosaic
     without one, the middle of its panels' times (IMAGE_layout.json or mosaic_layout.json next to it); else None."""
+    if not SHARPCAP.search(os.path.basename(name)):
+        return _sidecar_time(name) or _layout_time(name)
+    return _name_time(name)
+
+
+def _name_time(name):
+    """The UTC time a SharpCap / WinJUPOS file name carries, else None: from the name alone."""
     m = SHARPCAP.search(os.path.basename(name))
     if not m:
-        return _sidecar_time(name) or _layout_time(name)
+        return None
     y, mo, d, h, mi, tenth = (int(v) for v in m.groups())
     try:
         return datetime(y, mo, d, h, mi, tenth * 6, tzinfo=timezone.utc)
@@ -279,8 +286,9 @@ def _layout_time(path):
                 panels = json.load(fh).get('panels', {})
         except (OSError, ValueError, AttributeError):
             continue
-        times = sorted(t for t in (capture_time(os.path.basename(v.get('path', k))) for k, v in panels.items()
-                                   if isinstance(v, dict)) if t)
+        # a panel's time is the one in its name: a bare panel name looked up as a file would be searched in the
+        # working folder, and when that folder holds this very layout the lookup never ended
+        times = sorted(t for t in (_name_time(v.get('path', k)) for k, v in panels.items() if isinstance(v, dict)) if t)
         if times:
             return times[len(times) // 2]
     return None

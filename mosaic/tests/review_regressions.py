@@ -250,9 +250,35 @@ def atlas_limb_failure_falls_back():
         assert matrix is None and reason == 'no usable limb', (matrix, reason)
 
 
+def capture_time_from_a_layout_ends():
+    """A mosaic's capture time is the middle of its panels' named times. With the working folder holding the
+    mosaic's own layout and a panel name carrying no time, the lookup used to search that layout again for the bare
+    panel name, without end (RecursionError, 2026-10-05)."""
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(mb.__file__)), 'moon_atlas'))
+    import json
+    from datetime import datetime, timezone
+    import atlas_ephem
+    folder = tempfile.mkdtemp(dir=HERE)
+    panels = {'a': dict(path='panels/2026-09-25-2103_9-L.tif'), 'b': dict(path='/data/2026-09-25-2109_2-L.tif'),
+              'c': dict(path='panels/plain.tif'), 'd': dict(path='other.tif')}
+    old = os.getcwd()
+    try:
+        os.chdir(folder)
+        with open('mosaic_layout.json', 'w') as fh:
+            json.dump(dict(panels=panels), fh)
+        when = atlas_ephem.capture_time('mosaic.tif')
+        assert when == datetime(2026, 9, 25, 21, 9, 12, tzinfo=timezone.utc), when      # the middle of the two named
+        with open('mosaic_layout.json', 'w') as fh:
+            json.dump(dict(panels={k: panels[k] for k in 'cd'}), fh)
+        assert atlas_ephem.capture_time('mosaic.tif') is None                            # no time anywhere: none
+        assert atlas_ephem.capture_time('2026-09-25-2110_0-panel.tif') == datetime(2026, 9, 25, 21, 10, 0, tzinfo=timezone.utc)
+    finally:
+        os.chdir(old)
+
+
 CHECKS = (bridge_drop, fine_all_fallback, mesh_no_tiles_fallback, photometry_no_overlap, pyramid_levels_and_border0, proxy_non_divisible, finish_cancel,
           contrast_curve_monotonic, no_gaps_at_panel_edges, lit_peaks_beyond_terminator_kept, json_safe_and_bounded_map,
-          mesh_model_round_trip, sky_pedestal_neutralised, atlas_limb_failure_falls_back)
+          mesh_model_round_trip, sky_pedestal_neutralised, atlas_limb_failure_falls_back, capture_time_from_a_layout_ends)
 
 
 class ReviewRegressions(unittest.TestCase):

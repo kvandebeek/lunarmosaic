@@ -64,27 +64,6 @@ WAVELET_PRESETS = {"pixinsight": dict(biases=(2.3, 0.0, 0.0, 0.0), kernel="linea
 
 # ---------------------------------------------------------------- north up
 
-def capture_time(path):
-    """atlas_ephem.capture_time, except for a mosaic whose layout lists a panel without a capture time in its name.
-    For such a panel atlas_ephem looks the bare name up in the layout of the working folder, which loops for ever
-    when the working folder holds this mosaic's own layout (a moon_atlas fault, left for its owner). Such a mosaic
-    gets no time here, so the close-up search is skipped rather than the run lost."""
-    import json
-    from atlas_ephem import SHARPCAP, capture_time as atlas_time
-    if SHARPCAP.search(os.path.basename(path)):
-        return atlas_time(path)
-    for layout in (os.path.splitext(os.path.abspath(path))[0] + "_layout.json",
-                   os.path.join(os.path.dirname(os.path.abspath(path)), "mosaic_layout.json")):
-        try:
-            with open(layout, encoding="utf-8") as fh:
-                panels = json.load(fh).get("panels", {})
-        except (OSError, ValueError, AttributeError):
-            continue
-        if any(isinstance(v, dict) and not SHARPCAP.search(os.path.basename(v.get("path", k))) for k, v in panels.items()):
-            return None
-    return atlas_time(path)
-
-
 def north_up(small_final, F, input_path=None):
     """Where lunar north is in the finished image (moon_atlas on the reduced copy), and the turn that puts it up:
     dict(M, rot, mirror, north_was, identity, T full-resolution affine, size), or a reason string."""
@@ -98,6 +77,7 @@ def north_up(small_final, F, input_path=None):
         geo, _ = atlas_geo.locate(grey, log=lambda *a: None)
     except (SystemExit, atlas_geo.NoUsableLimb) as e:
         # no limb (a close-up mosaic): search the input blind, lit by the Sun at its panels' capture time
+        from atlas_ephem import capture_time
         when = capture_time(input_path) if input_path else None
         if when is None:
             return f"the Moon could not be located ({e}) and there is no capture time for a close-up search"

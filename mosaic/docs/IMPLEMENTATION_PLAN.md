@@ -770,7 +770,7 @@ import and close-and-reopen; `ui_autosave.py` tests `save.js` directly.
 interface. `tools/update_docs.py` documents the built-in defaults (`LUNAR_TOOLS_DEFAULTS=1`, so one machine's
 `.env` no longer leaks into COMMANDS.md) and has `--check`. The acceptance suite is `cli_checks.py`, which also
 asserts that every command COMMANDS.md lists was run. A moon_atlas fault (`capture_time` recursing through a layout
-in the working folder) is worked around in lunar_finish and left to moon_atlas's owner.
+in the working folder) was fixed there at the owner's request and recorded in `moon_atlas/UPSTREAM.md`.
 
 ### Phase 9 — Later (not part of "first try")
 
