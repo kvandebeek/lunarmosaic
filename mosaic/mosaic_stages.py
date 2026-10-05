@@ -607,6 +607,12 @@ def refine_mesh(nodes, pair_keys, sizes, L, M, tex4, f, theta, idx, ref, model, 
         cs.append(Xa - Xb)
         ws.append(weight(r))
         obs.append((a, b, pa, pb, r))
+    if not cols:
+        # No dense tile survived (small or low-texture panels). The mesh only refines fine_align's poly3
+        # poses, so keep those rather than failing the build on an empty normal-equation system.
+        if log:
+            log("mesh refinement skipped: no dense tiles survived, so the fine-alignment poses are kept")
+        return theta, idx, {"skipped": "no dense tiles survived"}
     D = _cg_mesh(k, np.vstack(cols), np.vstack(vals), np.vstack(cs), np.concatenate(ws), smooth, lam_s, lam_0)
     rows = [model.pack(th2[ix2[n]], sizes[n], D[base[n]:base[n] + shapes[n][0] * shapes[n][1]]) for n in nodes]
     width = max(len(r) for r in rows)

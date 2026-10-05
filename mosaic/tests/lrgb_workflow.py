@@ -23,17 +23,10 @@ from alignment import measure
 from recent import RecentProjects
 import orient
 from atlas_geo import Geometry, NoUsableLimb, similarity as atlas_similarity
-
-
-def detail(size=640):
-    rng = np.random.default_rng(924)
-    texture = rng.random((size, size), dtype=np.float32)
-    texture = cv2.GaussianBlur(texture, (0, 0), 2)*.5+.1
-    for _ in range(350):
-        x, y = rng.integers(15, size-15, 2)
-        radius = int(rng.integers(2, 14))
-        cv2.circle(texture, (int(x), int(y)), radius, float(rng.uniform(.15, .7)), 1)
-    return np.clip(texture, 0, 1)
+if __package__:
+    from .synthetic import detail
+else:
+    from synthetic import detail
 
 
 class Workflow(unittest.TestCase):

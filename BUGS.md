@@ -1,5 +1,108 @@
 # Bug Report — LunarMosaic
 
+## Phase 0 triage — 2026-10-05
+
+Checked the committed baseline `3c3fba3` on `impl/phase-0`. This section supersedes the
+historical statuses below; the original findings are retained for context. The baseline already
+contains most of the reported fixes. Subsequent Phase 0 repairs are recorded below.
+
+| Bug | Current status | Evidence (baseline unless noted) |
+|---|---|---|
+| 1 | Fixed | `mosaic/tests/review_regressions.py:239` exposes 13 unittest cases; the script runner is guarded at line 255. Discovery runs all 37 checks successfully. |
+| 2 | Fixed | `mosaic/mosaic_stages.py:660` uses `col` in `photometry()`; the unused `idx` assignment is gone. |
+| 3 | Dead code fixed; allocation claim unsupported | `fs_prev` is gone. At `mosaic/mosaic_builder.py:1221`, each fit scale is bounded by its preview area's width and height; the maximum selects one of those fitted sizes. `canvas_preview()` allocates that fitted size plus two pixels per dimension. A larger scale for a smaller source does not imply an unbounded output allocation. |
+| 4 | Fixed | The discarded `after8` resize is gone from the stage-8 movie block in `mosaic/mosaic_builder.py`. |
+| 5 | Fixed before Phase 0; outside modification scope | `mosaic/experiments/registration/harness.py:2` imports `os` once. Its current import block passes pyflakes. |
+| 6 | Reported dead code fixed; numerical result unverified | `mosaic/experiments/registration/resid_structure.py:10` no longer defines the unused locals. It crops the inputs and translates returned coordinates, with a comment explaining the internal margins. Numerical validity of the held-out residuals was not revalidated; this experiment remains outside Phase 0 modification scope. |
+| 7 | Fixed | `mosaic/lunar_finish.py:418` uses a plain literal for the layer-gain prefix; pyflakes passes. The historical hypothetical guard divergence is not a reproduced crash. |
+| 8 | Fixed | `mosaic/panel_classifier.py:261` uses a plain literal for the tier-count prefix; pyflakes passes. |
+| 9 | Fixed before Phase 0; outside modification scope | The three unused imports are absent from `moon_atlas/atlas_closeup.py:27` and `moon_atlas/atlas_view.py:33`; pyflakes passes. |
+| 10 | Reported import-time execution fixed; outside modification scope | Importing `resid_structure`, `mesh_round2`, `mesh_proto`, `noise_floor`, `seam_eval`, `seams`, and `subpix` succeeds with `harness.capture` patched to fail if called. Their capture/processing entry points are guarded. This does not validate their real-data output. |
+| 11 | Fixed in Phase 0; JavaScript regression checks pass | The baseline restored single failed edits but lost earlier values when another control changed during a save. `currentEdits()` now includes the submitted snapshot for ordinary controls and wavelet layers. Seven new regression checks pass; browser verification remains pending. |
+| 12 | Fixed | `mosaic/lrgb.py:20` defines the JPEG limits, `Scene.export()` enforces them, `mosaic/app.py:437` publishes them, and `mosaic/ui/mosaic.js:235` consumes them. The existing export-preview workflow test checks the response against the constants. |
+| 13 | Fixed | `mosaic/mosaic_common.py:85` returns for `total <= 0`. Runtime probes of `tick(0, 0)` and `tick(0, -1)` both emit no output. |
+
+`moon_atlas/` and `mosaic/experiments/` were inspected only. Their files were not changed by
+this triage, as required by IMPLEMENTATION_PLAN.md Phase 0, step 2.
+
+### Bug 11: autosave race reproduced at baseline and repaired in Phase 0
+
+Baseline locations: `mosaic/ui/mosaic.js:145` (`changeEdit`) and `:150–153` (`flushEdits`).
+
+1. Begin with server edits `{saturation: 1, smoothing: 0}`.
+2. Change saturation to `2` and start the save, keeping its response pending.
+3. While that request is in flight, change smoothing to `3`.
+4. Reject the first save (for example, a revision conflict), then let the state refresh return
+   the unchanged server edits.
+5. Inspect the pending edit that will be retried.
+
+Observed by executing the actual `changeEdit` and `flushEdits` function bodies in a Node VM,
+with a deferred API promise and stubbed rendering/timers:
+
+```text
+Failed save alone:                 pending {saturation: 2, smoothing: 0}, saveFailed true
+Failed save with newer smoothing:  pending {saturation: 1, smoothing: 3}, saveFailed true
+Expected after both adjustments:   pending {saturation: 2, smoothing: 3}
+```
+
+Root cause: `flushEdits()` clears `pendingEdits` while keeping the submitted snapshot only in
+its local `edits`. A concurrent `changeEdit()` therefore starts a new full snapshot from the
+old `state.project.edits`. The catch handler overlays that full snapshot onto the failed one,
+so unchanged stale fields win alongside the genuinely newer field. The next retry can save the
+old saturation value even though the user never reverted it.
+
+Correction implemented: keep the submitted snapshot in `savingEdits` until the request and its
+preview refresh finish. `currentEdits()` returns pending edits, then the submitted snapshot,
+then the server state. Both ordinary controls and individual wavelet layers use it. Newer
+values for the same field still win, including an intentional return to the original value.
+The snapshot is cleared in `finally`, so subsequent edits can use refreshed server values.
+
+The checks in `mosaic/tests/ui_autosave.py` run the complete shipped JavaScript in Node's VM
+through its input handlers, rendering, and fetch parsing. DOM elements, timers, and server
+responses are simulated. Coverage includes failed and successful saves with a second field,
+same-field changes and reversions, disconnection during state refresh, two wavelet layers,
+retry payloads, saved indicators, and a later edit after refreshing server state.
+Four of the seven checks failed before the repair; all seven pass after it. This is JavaScript
+behavior verification, not a browser journey. Automatic retry after a failed save is unchanged:
+the UI retains the edits and offers retry by another adjustment or the save shortcut.
+
+### Verification for this triage
+
+- `.venv/bin/python -m unittest discover -s mosaic/tests -p '*.py' -v`: **37 passed** in 4.362 s.
+  The missing-file fixture emits an OpenCV warning; the HTTP error paths also emit resource
+  warnings. Neither causes a test failure.
+- Pyflakes passes for all 11 Python files directly implicated by the original findings.
+- Targeted probes verified empty-job progress and guarded experiment imports. The initial
+  JavaScript probe reproduced the autosave race that the original Python suites missed.
+- After the repair, `.venv/bin/python mosaic/tests/ui_autosave.py`: **7 passed**. This suite
+  requires Node.js on PATH, with no npm packages, and participates in Python unittest discovery.
+- Full discovery after the repair: **44 passed** in 4.657 s. JavaScript syntax checks and
+  pyflakes for the new Python suite also pass.
+- Synthetic generators subsequently added with nine fixture checks; full discovery now passes
+  **53 tests** in 4.536 s. See DESIGN.md §9 for Phase 0 progress.
+- Phase 0 remains incomplete: add golden fixtures, builder determinism evidence, and the
+  combined test runner. *(Completed — see the next section.)*
+
+### Phase 0 completion
+
+Golden fixtures (`golden.py`), the builder-determinism record (`determinism.py`) and the combined
+runner (`run_all.py`) were added; DESIGN.md §9 has the details. One further repair:
+
+**Mesh refinement crashed the build when no dense tile survived** (`mosaic/mosaic_stages.py`,
+`refine_mesh`). On small or low-texture panels every pair's tile list is empty, so the normal
+equations were assembled with `np.vstack([])` and the whole build died with
+`ValueError: need at least one array to concatenate` at stage 4. Found by building synthetic panels.
+The mesh only refines `fine_align`'s poly3 poses, so `refine_mesh` now returns those poses with
+`{"skipped": …}` and logs why; `mosaic_builder.py` also catches the mesh's own `RuntimeError`
+("dense tiles left panels without a constraint") and keeps the fine-alignment poses with a warning
+instead of a traceback. Regression `mesh_no_tiles_fallback` in `review_regressions.py`; it was run
+against a copy of the code with the guard removed and fails there with the original `ValueError`.
+
+Verification: full discovery **60 passed** in 23 s; `run_all.py` 6 of 6 suites; pyflakes clean on
+`mosaic/` apart from the deliberate `layer_noise` re-export in `sharpen.py` (now commented).
+
+## Historical review
+
 Full review of the repository at commit `0151e68` (working tree included).
 
 Method: full read of every Python module, a `pyflakes` static pass, byte-compilation of the
@@ -553,6 +656,11 @@ script is executed directly.
 ---
 
 ## Bug 11 — a failed autosave silently discards the user's layer adjustments
+
+**Current status (2026-10-05): fixed in Phase 0, verified by seven JavaScript behavior checks.**
+Single-edit recovery existed in `3c3fba3`; the subsequent repair preserves edits made while a
+save is in flight. The Phase 0 section above records the evidence and browser-verification
+limit. The code excerpt below describes the original implementation.
 
 **Severity: High** (silent data loss in the app's headline "autosave" feature)
 

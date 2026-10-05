@@ -2,7 +2,7 @@
 const $ = (s, root=document) => root.querySelector(s);
 const $$ = (s, root=document) => [...root.querySelectorAll(s)];
 let state = {project:null, job:{state:'idle'}}, page='import', view='composite';
-let pendingEdits=null, saving=false, saveFailed=false, saveTimer, previewVersion=0, geometry=null;
+let pendingEdits=null, savingEdits=null, saving=false, saveFailed=false, saveTimer, previewVersion=0, geometry=null;
 let scale=1, offset={x:0,y:0}, fitted=true, detailTimer, toastTimer, polling=false, importing=false;
 let loadedProject=null;
 let recentVersion=0, exportVersion=0;
@@ -142,16 +142,18 @@ function render() {
 function showVisibility(){ const editing=page==='edit';$('#setup').hidden=editing;$('#workspace').hidden=!editing;$('#welcome').hidden=!!state.project&&page!=='projects';$('#close-project').hidden=!state.project;$('#import-page').hidden=!state.project||page!=='import';$('#build-page').hidden=!state.project||page!=='build';if(state.project&&page!=='projects')$('#recent-projects').hidden=true; }
 function syncEdits(e){ $$('[data-edit]').forEach(el=>{el.value=e[el.dataset.edit]; updateOutput(el.dataset.edit,e[el.dataset.edit]);}); $$('[data-visible]').forEach(el=>el.checked=e[el.dataset.visible]);$('#coverage').value=e.coverage;$('#rotation').value=e.rotation;$('#mirror').checked=e.mirror;$('#wavelet-kernel').value=e.wavelet_kernel;$$('[data-wave]').forEach(el=>{el.value=e.wavelets[Number(el.dataset.wave)];$(`[data-wave-output="${el.dataset.wave}"]`).textContent=Number(el.value).toFixed(2);}); }
 function updateOutput(key,v){const out=$(`[data-output="${key}"]`);if(out) out.textContent=key==='strength'||key==='highlights'?`${Math.round(v*100)}%`:key==='saturation'?`${Number(v).toFixed(2)}×`:key==='smoothing'?`${Number(v).toFixed(1)} px`:Number(v).toFixed(key==='usm_threshold'?3:2);}
-function changeEdit(key,value){pendingEdits={...(pendingEdits||state.project.edits),[key]:value};saveFailed=false;updateOutput(key,value);$('#saved').textContent='Saving…';clearTimeout(saveTimer);saveTimer=setTimeout(()=>flushEdits().catch(e=>message(e.message)),180);}
+// Edits made during a save build on the submitted values until the server acknowledges them.
+function currentEdits(){return pendingEdits||savingEdits||state.project.edits;}
+function changeEdit(key,value){pendingEdits={...currentEdits(),[key]:value};saveFailed=false;updateOutput(key,value);$('#saved').textContent='Saving…';clearTimeout(saveTimer);saveTimer=setTimeout(()=>flushEdits().catch(e=>message(e.message)),180);}
 async function flushEdits(){
   clearTimeout(saveTimer);
   if(saving){while(saving) await new Promise(r=>setTimeout(r,30)); if(pendingEdits) return flushEdits(); return;}
   if(!pendingEdits) return;
-  const edits=pendingEdits;pendingEdits=null;saving=true;
+  const edits=pendingEdits;savingEdits=edits;pendingEdits=null;saving=true;
   try {state=await api('edits',payload({edits,revision:state.project.revision}));saveFailed=false;await refreshPreview(false);}
   // the rejected values go back into pendingEdits (newer keystrokes win), so render() keeps showing what the user chose
   catch(e){pendingEdits={...edits,...(pendingEdits||{})};saveFailed=true;try{state=await api('state');}catch(_){}render();throw e;}
-  finally {saving=false;render();}
+  finally {savingEdits=null;saving=false;render();}
   if(pendingEdits) await flushEdits();
 }
 async function refreshPreview(reset=true){
@@ -219,7 +221,7 @@ $$('[data-layer]').forEach(b=>b.onclick=()=>{$('#rgb-controls').hidden=b.dataset
 $$('[data-edit]').forEach(el=>el.oninput=()=>changeEdit(el.dataset.edit,Number(el.value)));
 $('#coverage').onchange=()=>{fitted=true;changeEdit('coverage',$('#coverage').value);};$('#rotation').onchange=()=>{fitted=true;changeEdit('rotation',Number($('#rotation').value));};
 $('#mirror').onchange=()=>{fitted=true;changeEdit('mirror',$('#mirror').checked);};$('#wavelet-kernel').onchange=()=>changeEdit('wavelet_kernel',$('#wavelet-kernel').value);
-$$('[data-wave]').forEach(el=>el.oninput=()=>{const waves=[...(pendingEdits||state.project.edits).wavelets];waves[Number(el.dataset.wave)]=Number(el.value);$(`[data-wave-output="${el.dataset.wave}"]`).textContent=Number(el.value).toFixed(2);changeEdit('wavelets',waves);});
+$$('[data-wave]').forEach(el=>el.oninput=()=>{const waves=[...currentEdits().wavelets];waves[Number(el.dataset.wave)]=Number(el.value);$(`[data-wave-output="${el.dataset.wave}"]`).textContent=Number(el.value).toFixed(2);changeEdit('wavelets',waves);});
 $('#reset-edits').onclick=()=>{pendingEdits=structuredClone(defaultEdits);fitted=true;flushEdits().then(()=>render()).catch(e=>message(e.message));};
 $$('[data-view]').forEach(b=>b.onclick=()=>{view=b.dataset.view;$$('[data-view]').forEach(x=>x.classList.toggle('active',x===b));refreshPreview(false);});
 $('#fit').onclick=fit;$('#zoom-in').onclick=()=>zoom(1.4);$('#zoom-out').onclick=()=>zoom(1/1.4);$('#one-to-one').onclick=()=>zoom(1/scale);

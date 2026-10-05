@@ -400,6 +400,48 @@ diverges:
 
 That table is the migration list for the chain editor.
 
+### Phase 0 — 2026-10-05
+
+Baseline `3c3fba3` is committed; work continues on `impl/phase-0`. The bug triage and autosave
+repair are recorded in `BUGS.md`. **Phase 0 is complete apart from its closing commit.**
+
+`mosaic/tests/synthetic.py` now provides in-memory, seeded fixtures: uint16 RGB/mono lunar
+disks and crescents, enclosed crater shadows below 1022 ADU, overlapping panels with up to
+15 % size variation, optional coarser sets and per-panel radial distortion, the Appendix F
+white-balance probe, and textures with known spectral cutoffs plus white noise. Masks identify
+space, the lit disk, and enclosed shadows. Panel metadata records the actual sampling and
+pixel-centre mapping, including dimension rounding at noninteger scales; `panel_coordinates()`
+also includes the specified radial distortion. These are synthetic test inputs, not evidence
+of alignment quality on real captures.
+
+The existing `lrgb_workflow.detail()` helper moved into `synthetic.py`; its default output
+was checked byte-for-byte against the previous version. Nine new checks cover fixture truth,
+repeatability, coverage, coordinate mappings, and calibration values. A contact sheet of the
+generated disk, crescent, panels, and probes was inspected. Full discovery passes **53 tests**
+(37 original, 7 autosave, 9 fixture checks), in 4.536 s on the development Mac.
+
+Completed afterwards:
+
+1. **Golden fixtures.** `mosaic/tests/golden.py` freezes today's `lunar_finish` output for three cases as
+   16-bit zlib fixtures (4.9 MB), with every setting pinned twice (flag and environment variable) so `.env`
+   cannot leak in; reruns are bit-identical. `--report` gives rms / p99.9 / max; `--capture --exact` writes the
+   phase-1 set.
+2. **Builder determinism recorded.** `determinism.py`: three full builds — fine alignment (50 tiles) and mesh
+   (876 tiles) included — gave bit-identical mosaics; the layout reports differed only in `created`. The
+   fixture had to be sized for this: fine-alignment tiles need overlaps of at least 352 px, and small panels
+   need `--proxy-factor 1` (plan, phase 5 traps).
+3. **Runner.** `run_all.py` runs every suite as its own process and exits non-zero on any failure.
+4. **Crash fixed.** The mesh refinement crashed the whole build (`np.vstack` of nothing) when no dense tile
+   survived, which happens on small or low-texture panels. It now keeps the fine-alignment poses and says so,
+   and the builder survives the mesh's own "no constraint" error the same way. Regression
+   `mesh_no_tiles_fallback`, checked to fail without the fix.
+5. **Defect found, not yet fixed:** a mono image comes out of `lunar_finish` with a 34 ADU channel spread. The
+   cause is OpenCV's float Lab conversion, which gives a neutral grey |a*|, |b*| up to 0.125 instead of 0;
+   exact Lab (plan D17, phase 1) removes it, and `golden.py` then tightens its mono check from 80 to 1 ADU.
+
+Full discovery now passes **60 tests** (53 above, one new regression, three golden, three determinism) in
+23 s; `run_all.py` passes all six suites.
+
 ### Changes made 2026-10-05 to `lunar_finish.py`
 
 1. **Wavelets match PixInsight.** `wavelet_gain()` applies the measured law; sharpening runs on each

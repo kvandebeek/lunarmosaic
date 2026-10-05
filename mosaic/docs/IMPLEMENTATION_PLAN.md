@@ -34,12 +34,16 @@ not LZW (OpenCV reads LZW), so write test fixtures with zlib compression.
 The owner's `.env` sets `LUNAR_FINISH_WAVELETS=pixinsight`, and north-up, the preview window and the display
 TIFF default to on. Every test that runs a command-line tool passes all relevant flags explicitly.
 
-**Running the tests** (both from the repository root, both currently pass):
+**Running the tests** (from the repository root; all pass as of phase 0):
 
 ```
-.venv/bin/python mosaic/tests/review_regressions.py     # 13 builder/finish regressions → "ALL OK"
-.venv/bin/python mosaic/tests/lrgb_workflow.py          # 24 application checks → "OK"
+.venv/bin/python mosaic/tests/run_all.py                # every suite, one process each; non-zero exit on failure
+.venv/bin/python mosaic/tests/run_all.py golden lrgb    # only suites whose file name contains a word
+.venv/bin/python mosaic/tests/golden.py --report        # golden fixtures: rms / p99.9 / max in ADU
 ```
+
+Suites today: `review_regressions` (14 builder/finish regressions), `lrgb_workflow` (24 application checks),
+`synthetic_checks` (fixture ground truth), `ui_autosave` (needs Node.js), `golden`, `determinism` (about 20 s).
 
 New tests go in `mosaic/tests/` as `unittest` modules with an `if __name__ == '__main__':` guard, runnable the
 same way. Never put work at module top level (see BUGS.md bug 1).
@@ -336,6 +340,8 @@ remain working through the compatibility layer of phase 4 until phase 7 removes 
    3.5 MB uncompressed; keep the three under 10 MB). Commit the fixtures. They carry OpenCV's Lab error (D17); phase 1 records it and re-captures them.
 5. Record builder determinism: build the synthetic panel set twice with identical flags and note in the test
    output whether the mosaics are bit-identical. Phase 5's single-scale check depends on the answer.
+   **Recorded (`determinism.py`): three full builds were bit-identical; the layout reports differed only in
+   their `created` timestamp.** The fixture must be big enough to exercise fine alignment — see phase 5's traps.
 6. Add a test runner script `mosaic/tests/run_all.py` that runs every suite and exits non-zero on any failure.
 
 **Accept.** All existing tests green; golden fixtures committed; determinism recorded; `run_all.py` green.
@@ -352,9 +358,10 @@ change, exact Lab (D17), isolated so it is measured on its own.
 2. Point `sharpen.py` at `filters` (keep `layer_noise` importable through it: `lrgb.py` calls
    `sharpen.layer_noise`).
 3. Add `rgb_to_lab` and `lab_to_rgb` to `filters.py` (float32, the constants of §4.3) and switch every Lab
-   conversion in `lunar_finish.py` to them. Run the golden cases, record rms / p99.9 / max against the phase-0
-   fixtures in the test output (expect tens of ADU rms: that is OpenCV's error leaving), then re-capture the
-   fixtures as `golden_*_exact.tif`. Phase 2 compares against these. The builder keeps its own conversions.
+   conversion in `lunar_finish.py` to them. Run `golden.py --report` to record rms / p99.9 / max against the
+   phase-0 fixtures (expect tens of ADU rms: that is OpenCV's error leaving), then `golden.py --capture --exact`
+   to write `golden_*_exact.tif`. Phase 2 compares against these, and `golden.py` switches to them by itself.
+   The builder keeps its own conversions.
 
 **Accept.** After step 2, golden outputs reproduced bit-exactly; after step 3, T-LAB passes and the measured
 difference is recorded; both suites green.
@@ -396,6 +403,9 @@ highlights, contrast, saturation), with `lunar_finish.py` as a runner and matchi
   rule froze them; D7 processes them, and the S-curve's slope near black is 1 − 2c, so they come out up to 24 %
   darker at c = 0.12 — report their count): cases (a) and (b) rms ≤ 1 ADU and 99.9th-percentile |Δ| ≤ 16 ADU;
   case (c) channels equal within 1 ADU. If a case exceeds this, find the cause; do not raise the tolerance.
+  Case (c) fails today by 34 ADU — measured in phase 0, and caused by OpenCV's Lab conversion (one float round
+  trip gives a perfectly grey image a 70 ADU channel spread). `golden.py` tightens its mono limit from 80 to 1 ADU
+  automatically once the exact-Lab fixtures exist.
 - T-MERGE-ID: merging identical luminance and colour inputs at strength 1 returns the input within 1e-5 (exact
   Lab; with OpenCV's conversion this would be off by up to 291 ADU).
 - T-TILE: for every block and for the default chain, rendering a 1500² region in 256² tiles with the declared
@@ -575,14 +585,20 @@ data winning wherever it reaches. DESIGN.md §1 and §8.3.
   with a 100 % and a 200 % unsharp mask: the coarse panel wins **0 %** of the cells the fine panel validly covers
   in every case. And a set at the finest pixel scale but blurred by σ 3 px (an oversampled small telescope) loses
   every overlap to a 2× coarser, sharper set, because tiers follow measured resolution.
-- All 13 regressions green; a single-scale build without the panel scales file equals the old output —
-  bit-identical if phase 0 found builds reproducible, otherwise within 1 ADU with the same layout.
+- All regressions green; a single-scale build without the panel scales file equals the old output **bit for
+  bit** (phase 0 recorded that full builds are bit-reproducible).
 
 **Traps.** Do not try to make per-pixel sharpness comparable across scales by resampling the panels: measured,
 it does not survive pre-sharpened coarse data (D14). Do not order tiers by pixel scale either: an oversampled set
 would then win everywhere it reaches. `proxy_factor` is one integer for all panels; with large
 scale ratios coarse proxies get small — acceptable up to about 4×, beyond that warn in the log. `fine_align`'s
 `tiles_for_pair` already warps B into A's frame before correlating, so it is scale-aware — do not "fix" it.
+**Size synthetic test panels for the stage under test.** Fine-alignment tiles are 256 px and their centres must
+sit `tile/2 + 48` = 176 px inside *both* panels, so an overlap below about 352 px yields no tiles and the builder
+quietly falls back to keypoint placement — a test would then pass without exercising fine alignment. And the
+default proxy factor of 4 leaves too few SIFT keypoints on small panels (below the 150 minimum). Measured in
+phase 0: 2048 px disk, 1024 px panels, overlap 0.45, `--proxy-factor 1` runs every stage in about 10 s;
+assert from the log that tiles were found and the mesh ran (`determinism.py` shows how).
 
 ### Phase 6 — Colour placed per panel onto the luminance canvas
 
@@ -893,3 +909,6 @@ movie stay outside the chain.
 | Pose residuals (D15) | similarity 1.19, affine 0.97, cubic 0.55 px RMS held out, 25 Sep | `mosaic_stages.py:66` |
 | RGB shift (D16) | truth +0.30/−0.20: centroid −0.006/+0.046; with red blurred σ 1.2: phase correlation ×3 0.375/−0.221, Lucas–Kanade 0.311/−0.173 | review |
 | T-ATWT | re-decomposition 11–268 % error on correct code; reconstruction 3.6e-7 | review |
+| Mono through `lunar_finish` today | output channel spread 34 ADU on a perfectly mono input; one OpenCV float Lab round trip alone: 70.5 ADU, with \|a*\|, \|b*\| up to 0.125 on grey | phase 0 |
+| Builder determinism | three full builds (fine alignment 50 tiles, mesh 876 tiles) bit-identical; layouts equal apart from `created` | phase 0 |
+| Fine-alignment tile placement | 256 px tiles, centres ≥ 176 px inside both panels → overlaps ≥ 352 px; default proxy factor 4 → too few keypoints below ~1000 px panels | phase 0 |

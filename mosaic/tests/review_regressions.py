@@ -77,6 +77,24 @@ def fine_all_fallback():
     assert st["tile_pairs"] == 0 and np.allclose(th[ix["b"]], [1, 0, 30, 0], atol=1e-6), th[ix["b"]]
 
 
+def mesh_no_tiles_fallback():
+    """refine_mesh with no surviving dense tile keeps fine_align's poses (it used to crash on np.vstack([]))."""
+    p = np.array([[-30.0, -30], [30, -30], [-30, 30], [30, 30]])
+    sz = {n: (256, 256) for n in "ab"}
+    model = ms.make_model("poly3+mesh", sz)
+    sim = np.array([[1.0, 0, 0, 0], [1, 0, 30, 0]])
+    theta = np.array([model.from_similarity(t) for t in sim])
+    logged = []
+    with ThreadPoolExecutor(1) as pool:
+        th, ix, st = ms.refine_mesh(["a", "b"], [("a", "b")], sz, {n: np.ones((256, 256), np.float32) for n in sz},
+                                    {n: np.zeros((256, 256), bool) for n in sz},          # no mask -> no tiles
+                                    {n: np.ones((64, 64), np.float32) for n in sz}, 4, theta, {"a": 0, "b": 1}, "a",
+                                    model, {("a", "b"): (p, p - [30, 0])}, sim, {"a": 0, "b": 1}, pool,
+                                    log=logged.append)
+    assert "skipped" in st and np.allclose(th, theta) and ix == {"a": 0, "b": 1}, (st, th)
+    assert any("mesh refinement skipped" in m for m in logged), logged
+
+
 def photometry_no_overlap():
     names = ["a", "b"]
     g, o, st = ms.photometry(names, [("a", "b")], {n: np.eye(3) for n in names}, {n: np.full((32, 32, 3), 0.2, np.float32) for n in names},
@@ -231,7 +249,7 @@ def atlas_limb_failure_falls_back():
         assert matrix is None and reason == 'no usable limb', (matrix, reason)
 
 
-CHECKS = (bridge_drop, fine_all_fallback, photometry_no_overlap, pyramid_levels_and_border0, proxy_non_divisible, finish_cancel,
+CHECKS = (bridge_drop, fine_all_fallback, mesh_no_tiles_fallback, photometry_no_overlap, pyramid_levels_and_border0, proxy_non_divisible, finish_cancel,
           contrast_curve_monotonic, no_gaps_at_panel_edges, lit_peaks_beyond_terminator_kept, json_safe_and_bounded_map,
           mesh_model_round_trip, sky_pedestal_neutralised, atlas_limb_failure_falls_back)
 

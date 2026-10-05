@@ -1237,12 +1237,18 @@ def run_stages_4_to_8(args, pr, pv, stg, main, pairs, ref, theta, idx, sizes, da
     if isinstance(model, mst.MeshModel):
         pv.checkpoint()
         tm = time.time()
-        theta_f, idx_f, stm = mst.refine_mesh(main, list(coarse), sizes, L, M, tex4, f, theta_f, idx_f, ref, model, coarse,
-                                              theta, idx, pool, dropped=st4["dropped"], fit_pairs=st4["fit_pairs"],
-                                              log=pr.info)
-        pr.info(f"mesh refinement {time.time() - tm:.0f} s · on the fine-alignment tiles: RMS {st4['rms']:.3f} → "
-                f"{stm.get('rms', st4['rms']):.3f} px, median {st4['median']:.3f} → {stm.get('median', st4['median']):.3f} px")
-        st4.update({k: stm[k] for k in ("rms", "median", "per_rms") if k in stm})
+        try:
+            # The mesh refines fine_align's poses; if it cannot run, keep them instead of failing the build.
+            theta_f, idx_f, stm = mst.refine_mesh(main, list(coarse), sizes, L, M, tex4, f, theta_f, idx_f, ref, model, coarse,
+                                                  theta, idx, pool, dropped=st4["dropped"], fit_pairs=st4["fit_pairs"],
+                                                  log=pr.info)
+        except RuntimeError as e:
+            pr.warn(f"mesh refinement skipped ({e}); the fine-alignment poses are kept")
+            stm = {"skipped": str(e)}
+        if "skipped" not in stm:
+            pr.info(f"mesh refinement {time.time() - tm:.0f} s · on the fine-alignment tiles: RMS {st4['rms']:.3f} → "
+                    f"{stm.get('rms', st4['rms']):.3f} px, median {st4['median']:.3f} → {stm.get('median', st4['median']):.3f} px")
+            st4.update({k: stm[k] for k in ("rms", "median", "per_rms") if k in stm})
         st4["mesh"] = stm
     orientation = {"turned": False}
     if args.north_up:
