@@ -21,6 +21,7 @@ import mosaic_common as mc  # noqa: E402
 import mosaic_stages as ms  # noqa: E402
 import mosaic_builder as mb  # noqa: E402
 import lunar_finish as lf  # noqa: E402
+import filters  # noqa: E402
 import preview_style as ps  # noqa: E402
 
 HERE = tempfile.mkdtemp(prefix="mosaic_regress_")
@@ -146,7 +147,7 @@ def finish_cancel():
 def contrast_curve_monotonic():
     z = np.linspace(0, 1, 10001)
     for c in (0.12, 0.49):
-        assert np.diff(lf.s_curve(z, 0.4, c)).min() >= 0, c
+        assert np.diff(filters.s_curve(z, 0.4, c)).min() >= 0, c
 
 
 def no_gaps_at_panel_edges():

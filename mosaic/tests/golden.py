@@ -12,7 +12,7 @@ Since phase 1 (exact Lab, D17) the fixtures are `golden_<case>_exact.tif`; `--ca
 is accepted as an alias). The phase-0 set, made with OpenCV's Lab, lives in the phase-0 commit; the exact set
 differed from it by 68–79 ADU rms, which is OpenCV's conversion error leaving.
 
-Fixtures are 16-bit RGB, zlib-compressed. The test compares the whole image exactly; `--report` also gives
+Fixtures are 16-bit RGB, zlib-compressed. The test applies T-GOLD (phase 2 onwards); `--report` gives
 the T-GOLD statistics over the disk, excluding interior pixels whose input L* < 1, which the old code froze
 and the chain engine processes (plan, phase 2).
 """
@@ -32,6 +32,8 @@ if __package__:
     from .synthetic import lunar_disk
 else:
     from synthetic import lunar_disk
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import filters  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = Path(__file__).resolve().parent/'fixtures'
@@ -80,16 +82,18 @@ def run_case(name, workdir):
 
 
 def metrics(result, reference, source):
-    """T-GOLD statistics in ADU over the disk, excluding interior pixels the old code froze (input L* < 1)."""
-    lab_in = cv2.cvtColor((np.atleast_3d(source['image']).astype(np.float32)/65535).repeat(
-        3 if source['image'].ndim == 2 else 1, axis=2), cv2.COLOR_RGB2Lab)
-    frozen = source['disk'] & (lab_in[..., 0] < 1)
+    """T-GOLD statistics in ADU over the disk, excluding interior pixels the old code froze (input L* < 1, exact
+    Lab as the phase-1 fixtures' old rule used it): the chain engine processes them (plan D7)."""
+    img = source['image'] if source['image'].ndim == 3 else np.repeat(source['image'][..., None], 3, axis=2)
+    frozen = source['disk'] & (filters.lstar(img.astype(np.float32)/65535) < 1)
     mask = source['disk'] & ~frozen
     d = np.abs(result[mask].astype(np.float64)-reference[mask].astype(np.float64))
+    f = np.abs(result[frozen].astype(np.float64)-reference[frozen].astype(np.float64))
     return dict(rms=float(np.sqrt((d**2).mean())) if d.size else 0.0,
                 p999=float(np.percentile(d, 99.9)) if d.size else 0.0,
                 worst=float(d.max()) if d.size else 0.0,
-                excluded=int(frozen.sum()), compared=int(mask.sum()))
+                excluded=int(frozen.sum()), compared=int(mask.sum()),
+                frozen_worst=float(f.max()) if f.size else 0.0)
 
 
 def fixture_path(name, exact=False):
@@ -125,7 +129,8 @@ def report():
             m = metrics(result, reference, source)
             same = 'identical' if np.array_equal(result, reference) else 'DIFFERS'
             print(f'{name:14s} {same:9s} rms {m["rms"]:8.2f}  p99.9 {m["p999"]:8.1f}  max {m["worst"]:8.1f} ADU'
-                  f'   ({m["compared"]} px compared, {m["excluded"]} frozen px excluded)')
+                  f'   ({m["compared"]} px compared, {m["excluded"]} frozen px excluded, which moved up to '
+                  f'{m["frozen_worst"]:.0f} ADU)')
 
 
 class Golden(unittest.TestCase):
@@ -143,14 +148,15 @@ class Golden(unittest.TestCase):
         cls.work.cleanup()
 
     def check(self, name):
+        """T-GOLD (plan, phase 2): rms ≤ 1 ADU and p99.9 ≤ 16 ADU over the disk, excluding the interior shadows
+        the old code froze. If it fails, find the cause; do not raise the tolerance."""
         result, source, _ = run_case(name, self.work.name)
         reference = tifffile.imread(fixture_path(name, self.exact))
         self.assertEqual(result.shape, reference.shape, f'{name}: output size changed')
-        if not np.array_equal(result, reference):
-            m = metrics(result, reference, source)
-            self.fail(f'{name} differs from the stored fixture: rms {m["rms"]:.2f}, p99.9 {m["p999"]:.1f}, '
-                      f'max {m["worst"]:.1f} ADU over {m["compared"]} disk px. If this change is intended '
-                      f'(phase 1 exact Lab), record the numbers and re-capture.')
+        m = metrics(result, reference, source)
+        self.assertTrue(m['rms'] <= 1 and m['p999'] <= 16,
+                        f'{name}: rms {m["rms"]:.2f}, p99.9 {m["p999"]:.1f}, max {m["worst"]:.1f} ADU over '
+                        f'{m["compared"]} disk px (limits rms 1, p99.9 16).')
 
     def test_a_tone(self):
         self.check('a_tone')

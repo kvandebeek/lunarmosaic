@@ -110,8 +110,8 @@ Each is a default where DESIGN.md is silent. Implement each in exactly one place
 | D3 | White balance ships **without structure detection** (parameter accepted only as `false`), pending DESIGN.md §8.4. | `blocks.white_balance` |
 | D4 | Curves interpolate with a **natural cubic spline**, clamped; Levels use the formula in Appendix A. Neither has been measured against Photoshop yet (optional validation V2). | `blocks.curves`, `blocks.levels` |
 | D5 | Deconvolution follows the structure of Wendykier's WPL (Appendix C); its numerical parity with LuckyStackWorker is **unverified**. Dering and blend-raw are this project's own definitions. The PSF is min-max scaled exactly as LuckyStackWorker does before it is normalised (Appendix B). | `deconv.py` |
-| D6 | "Fade near the limb" is generic: `out = in + w·(block(in) − in)`, `w = clip(limb_distance / fade_px, 0, 1)`. Limb distance is the distance to the edge of the lit, hole-filled disk, so it also fades along the terminator (as `--limb-taper` does today). This differs slightly from the old `--limb-taper` when saturation has several passes. | `chain.run_block()` |
-| D7 | **Space is protected, softly, and only space.** After every block the output is pulled back towards the chain input by `p = s·t`: `s` is the space region (the part of the proxy's L* < 1 connected to the canvas edge, dilated 8 canvas px and feathered — crater shadows enclosed by the lit disk are *not* space); `t = 1 − clip((L* − 0.5)/1.0, 0, 1)` of the chain input. Chain option `protect_space`, default `true`. Measured: the old rule (hard L* < 1 anywhere) freezes every value under 1022 ADU, crater shadows included; under a shadow-lifting curve, inputs 917 and 1049 ADU came out 917 and 3707. | `chain.run_chain()` |
+| D6 | "Fade near the limb" is generic — `out = in + w·(block(in) − in)`, `w = clip(limb_distance / fade_px, 0, 1)` — for every block **except saturation, which fades its own factor**, `f = 1 + (s − 1)·w(hue)·clip(limb / fade_px, 0, 1)`, exactly as `--limb-taper` did (found in phase 2: the old taper divided by max(taper, 1), so even `--limb-taper 0` tapered the outermost pixel, and a blend of the output differs whenever saturation has several passes). Limb distance is the distance to the edge of the lit, hole-filled disk, so it also fades along the terminator. | `chain._fade`, `blocks` saturation |
+| D7 | **Space is restored, near-black colour is held, nothing else is frozen.** After every block, space is pulled back to the chain input by `p = s·t`: `s` is the space region (the part of the proxy's L* < 1 connected to the canvas edge, dilated 8 canvas px and feathered); `t = 1 − clip((L* − 0.5)/1.0, 0, 1)` of the chain input. At each chain's end, near-black pixels anywhere keep their input's a*b* (1 below input L* 1, fading to 0 at L* 2) while their lightness is processed. Chain option `protect_space`, default `true`. Measured: the old rule (hard L* < 1 anywhere) freezes every value under 1022 ADU — under a shadow lift, inputs 917 and 1049 ADU came out 917 and 3707, and on the 4 Oct mosaic it left an unsharpened patch with a speckled edge on dim terminator surface; but protecting space alone let the 3 px chroma blur carry crater rims' colour into their shadows, and saturation ×4 took it out of gamut (L* 0.76, chroma 0.10 → RGB (0, 1053, 7717)). The hold runs once, at the end: after every block it changed what the blur spread into the rims (60 ADU). | `chain.Protection` |
 | D8 | The colour stream is placed into a **colour canvas** at the colour data's own sampling: `canvas = K · colour canvas`, `K = [[k, 0, (k−1)/2], [0, k, (k−1)/2], [0, 0, 1]]`, `k` = finest colour arcsec/px ÷ canvas arcsec/px as a **float** ≥ 1 (not rounded: rounding either upsamples or discards). For a `both` set the luminance mosaic itself is the colour canvas (`k = 1`, no placement). | `colour_place.py` |
 | D9 | A set may feed `luminance`, `colour` or `both` (a single colour mosaic "fed instead and split"). The command line treats its single input image as a `both` set, so all three chains of a chain file run. | schema 4, `lunar_finish.py` |
 | D10 | When a stream holds sets of different scales, optics are required for each set, or the scale ratio is estimated from image evidence and shown for confirmation before building. | phase 5 |
@@ -421,9 +421,10 @@ highlights, contrast, saturation), with `lunar_finish.py` as a runner and matchi
 - T-USM: an impulse of 0.02 on backgrounds of 0.25 and 0.50 (no clipping even at 200 %): peak response exactly
   linear in amount (50/100/200 % → 1:2:4 within 1e-6) and equal on both backgrounds; a staircase with threshold
   T matches `I + A·sign(d)·max(abs(d) − T/255, 0)`.
-- T-SPACE: on the synthetic disk with a Curves block that lifts shadows (gamma 2 below 0.2): enclosed crater
-  shadows are processed exactly like the rest of the disk (output = curve(input) within 1 ADU); a sky ramp from
-  0 to 3000 ADU comes out monotonic; sky pixels with L* < 0.5 are unchanged within 1 ADU.
+- T-SPACE: on the synthetic disk with a block that lifts shadows (gamma 2 below 0.2; a test block until phase 3's
+  Curves exists): enclosed crater shadows follow the lift in lightness (within 0.05 L*) and keep their input's
+  near-zero colour; a sky ramp from 0 to 3000 ADU comes out monotonic; sky pixels with L* < 0.5 are unchanged
+  within 1 ADU.
 - T-MOVIE: a chain with no contrast block and two saturation blocks records the movie and prints the facts
   without error.
 - `lunar_finish --help` still lists every flag; `.env` settings still apply.
@@ -756,12 +757,14 @@ are identity in the statistics pass (D1).
 | `deconvolution` (detail) | `psf`: `{kind: synthetic, airy_radius` px 1–100 (3), `diffraction_intensity` 10–200 (100), `seeing_index` 1–5 (3)`}` or `{kind: file, path}`; `iterations` 1–100 (10); `dering_strength` 0–1 (0), `dering_radius` px 1–20 (3); `blend_raw` 0–1 (0) | L C F (best first) | Appendix C, per channel with that channel's PSF | 128, validated at 100 iterations (Appendix C) | mono flag (data mono → 532 nm for all); dering gradient threshold from the probes | warning if not first in its chain; first dark ring radius = 0.284 / 0.324 / 0.384 × R (465 / 532 / 630 nm) |
 | `white_balance` | `background` `{mode: auto or rect, rect}`, `white` `{mode, rect}`, `white_low` 0–1 (0.10), `white_high` 0–1 (0.99), `structure_detection` false only, `neutralize_background` (false), `background_target` 0–0.2 (0) | C F | `B_c` = median of the background reference; `W_c` = mean of the white reference − `B_c`; `g_c = ΣW / (3·W_c)` (D2); `out_c = B_c + g_c·(x_c − B_c)`; neutralising then adds `target − B_c` | 0 | B, W, g (proxy) | gains; ratios; "PixInsight sometimes also rescales overall brightness; this block never does" |
 | `rgb_shift` (detail) | `mode` auto or manual (auto), `manual` `{r: [dx, dy], b: [dx, dy]}` px, ±5 | C (and per panel at build) | translate R and B, Lanczos-4, BORDER_REFLECT | 9 (5 px maximum shift + Lanczos 4) | every estimate per crop and estimator; agreement (D16) | estimates; applied or why not |
-| `saturation` | `factor` 0.1–8 (2.0), `passes` 0–5 (2), `lunar_hue` (true), `chroma_blur_px` 0–20 (0) | C F | `lunar_finish`: blur a*b* by `chroma_blur_px`, `f = 1 + (s−1)·w(hue)`, `w = lunar_weight` (or 1 when `lunar_hue` is false), chroma × `f^passes` | `ceil(4·chroma_blur) + 2` | — | chroma on lunar hues before → after |
+| `saturation` | `factor` 0.1–8 (2.0), `passes` 0–5 (2), `lunar_hue` (true), `chroma_blur_px` 0–20 (0) | C F | `lunar_finish`: blur a*b* by `chroma_blur_px`, `f = 1 + (s−1)·w(hue)·t`, `w = lunar_weight` (or 1 when `lunar_hue` is false), `t` = its own limb fade (D6), chroma × `f^passes`; passes 0 = colour smoothing only | `ceil(4·chroma_blur) + 2` | — | chroma on lunar hues, before and after each pass |
 
-Limb fade (any block): `w = clip(limb_distance_px / limb_fade_px, 0, 1)`, `out = in + w·(block(in) − in)`; the
-limb distance is measured to the edge of the lit, hole-filled disk, terminator included.
+Limb fade (any block but saturation, which fades its factor): `w = clip(limb_distance_px / limb_fade_px, 0, 1)`,
+`out = in + w·(block(in) − in)`; the limb distance is measured to the edge of the lit, hole-filled disk, terminator
+included.
 
-Space protection (chain level, D7): after every block, `out = p·chain_input + (1 − p)·out` with `p = s·t`.
+Protection (chain level, D7): after every block, `out = p·chain_input + (1 − p)·out` with `p = s·t`; at the chain's
+end, near-black pixels' a*b* go back to the input's by `1 − clip((L*_in − 1)/1, 0, 1)` before that last restore.
 
 ## Appendix B — LuckyStackWorker 7.0.0 PSF (verified port)
 
@@ -883,8 +886,9 @@ stay empty:
 1. `wavelets` ← `--wavelets` (biases or the `pixinsight` preset: `[2.3, 0, 0, 0]`, linear), `--wavelet-kernel`,
    `--wavelet-denoise`
 2. `highlights` ← `--highlights` (> 0), `--knee-percentile`
-3. `saturation` ← `--saturation`, `--saturation-passes` (> 0 and the image is not mono), `chroma_blur_px` ←
-   `--chroma-denoise`, `limb_fade_px` ← `--limb-taper`
+3. `saturation` ← `--saturation`, `--saturation-passes`, `chroma_blur_px` ← `--chroma-denoise`, `limb_fade_px` ←
+   max(`--limb-taper`, 1) — present when the image is not mono and there is a pass or colour smoothing (the old
+   code smoothed colour even with no pass)
 4. `contrast` ← `--contrast` (> 0)
 5. `unsharp_mask` ← `--usm A,R,T` (amount %, radius, threshold levels), `mode` ← `--usm-mode`
 
@@ -912,6 +916,10 @@ movie stay outside the chain.
 | Pose residuals (D15) | similarity 1.19, affine 0.97, cubic 0.55 px RMS held out, 25 Sep | `mosaic_stages.py:66` |
 | RGB shift (D16) | truth +0.30/−0.20: centroid −0.006/+0.046; with red blurred σ 1.2: phase correlation ×3 0.375/−0.221, Lucas–Kanade 0.311/−0.173 | review |
 | T-ATWT | re-decomposition 11–268 % error on correct code; reconstruction 3.6e-7 | review |
+| T-GOLD (chain engine) | synthetic cases rms 0.00 / 0.02 / 0.00 ADU, max 1 (rounding); real 4 Oct mosaic, 8.6 Mpx disk: rms 0.02, max 1 against the phase-1 code | phase 2 |
+| Old freeze rule on real data | 4 Oct terminator: 51 % of a 170 px square left equal to the input (unsharpened patch, speckled edge); faint sky L* 0.5–1.5 differs by 163 ADU rms under the soft gate | phase 2 |
+| Shadow colour without the hold | crater shadow L* 0.76, chroma 0.10 → RGB (0, 1053, 7717), chroma 15.3; shadow chroma median 0.08 → 3.42; with the hold: median 0.08, max 0.10 | phase 2 |
+| Runtime of lunar_finish | 4 Oct mosaic 14 s → 10 s (snapshots converted on the reduced copy) | phase 2 |
 | Mono through `lunar_finish` | phase 0: output channel spread 34 ADU on a perfectly mono input (one OpenCV float Lab round trip alone: 70.5 ADU, \|a*\|, \|b*\| up to 0.125 on grey); phase 1, exact Lab: 0 ADU | phases 0, 1 |
 | Exact Lab (D17) | round trip ≤ 0.004 ADU on greys, lunar colours, near-black; 0.05 on saturated colours (float32: 0.49); grey \|a*\|, \|b*\| < 1e-13; output vs the OpenCV-era code 68–79 ADU rms | phase 1 |
 | Builder determinism | three full builds (fine alignment 50 tiles, mesh 876 tiles) bit-identical; layouts equal apart from `created` | phase 0 |

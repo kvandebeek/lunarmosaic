@@ -388,7 +388,7 @@ diverges:
 
 | Area | Implemented 3 October | Decided since |
 |---|---|---|
-| Editing model | Two layers with fixed adjustments | Three chains of reorderable blocks |
+| Editing model | Two layers with fixed adjustments in the application; `lunar_finish` runs chains since phase 2 | Three chains of reorderable blocks |
 | Colour placement | Colour built as its own mosaic, then sampled onto L by one global transform | Each colour panel registered directly onto the luminance mosaic |
 | Wavelet units | Amount 0–3 meaning gain 1 + amount, on CIE lightness | PixInsight biases (gain 1 + 10b) on stored values |
 | Unsharp mask | Amount 0–1, threshold 0–0.05 of full scale, hard cut-off, sigma = radius | Photoshop units, soft threshold, measured radius law |
@@ -465,6 +465,38 @@ Filters moved into their own module, then exact Lab.
 
 Tests: `lab_checks.py` (T-LAB) added; all seven suites pass.
 
+### Phase 2 — 2026-10-05
+
+The chain engine, and `lunar_finish` running on it.
+
+1. **Engine.** `mosaic/blocks.py` holds the five blocks `lunar_finish` had — wavelets, unsharp mask, highlights,
+   contrast, saturation — with the schemas of plan Appendix A; `mosaic/chain.py` the documents, validation, the
+   statistics pass (once, on the 1/4 proxy with sharpening skipped, plus a full-resolution probe for the
+   sharpening blocks' own statistics and readouts), tiled rendering and the merge.
+2. **`lunar_finish` runs chains.** Its flags compile into a chain; `--chain FILE` runs a chain file and
+   `--write-chain FILE` writes one (without `-o` it stops there). The movie and the printed facts are built per
+   block, so any chain works — checked with no contrast and two saturation blocks. Snapshots are converted on the
+   reduced copy, so the 4 October mosaic now takes 10 s instead of 14.
+3. **Same pixels.** The golden cases match the old code within rms 0.02 ADU (max 1, rounding); on the real
+   4 October mosaic the 8.6 Mpx disk matches the phase-1 code with rms 0.02 ADU, max 1.
+4. **Two refinements of the plan, both measured.** Saturation fades its own *factor* near the limb, as
+   `--limb-taper` always did: the old taper divided by max(taper, 1), so even `--limb-taper 0` tapered the outermost
+   pixel, and blending the output instead differs whenever there are several passes. And protection (D7) now holds
+   near-black colour: protecting only space let the 3 px chroma blur carry a crater rim's colour into its shadow,
+   and saturation ×4 took it out of gamut — L* 0.76, chroma 0.10 became RGB (0, 1053, 7717), chroma 15.3; across the
+   synthetic shadows the median chroma went from 0.08 to 3.42. Near-black pixels now keep their input colour while
+   their lightness is processed.
+5. **What changes on real images.** The old rule froze every pixel below L* 1. On the 4 October mosaic that left
+   an unsharpened patch with a speckled edge on the dim terminator surface — 51 % of a 170 px square was simply the
+   input — which the soft gate now processes continuously. Faint sky between L* 0.5 and 1.5 fades its processing in
+   instead of switching it at L* 1 (163 ADU rms difference there, outside the disk). Crater shadows keep their colour
+   and get their lightness processed, so sharpening now deepens them. Images:
+   `/Volumes/Astro/moontest_04102026/phase2/`.
+
+Tests: `chain_checks.py` (T-TILE for every block and the default chain — checked to catch a halo even 8 px short —
+T-ATWT, T-USM, T-MERGE-ID, T-SPACE, T-MOVIE, validation, flags and environment); `golden.py` now applies T-GOLD.
+All eight suites pass; 79 tests.
+
 ### Changes made 2026-10-05 to `lunar_finish.py`
 
 1. **Wavelets match PixInsight.** `wavelet_gain()` applies the measured law; sharpening runs on each
@@ -492,6 +524,7 @@ setting) instead of the old, unintended gain 4. Divide any pre-2026-10-05 bias b
 | Sharpening study data | `/Volumes/Astro/moontest_04102026/sharpen_study/`, `limits_study/` |
 | LuckyStackWorker PSF port and dump | `/Volumes/Astro/moontest_04102026/lsw_psf/` |
 | 4 October test build | `/Volumes/Astro/moontest_04102026/` |
+| Chain engine against the old code on real data (terminator patch, movie frames) | `/Volumes/Astro/moontest_04102026/phase2/` |
 | LunarAtlas reference checkout | `/Volumes/Astro/LunarAtlas` |
 
 Driving the applications headless: PixInsight with

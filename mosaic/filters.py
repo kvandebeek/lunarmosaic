@@ -156,6 +156,22 @@ def _to_rgb(lab):
     return np.where(lin <= 0.0031308, 12.92 * lin, 1.055 * np.maximum(lin, 0.0031308) ** (1 / 2.4) - 0.055)
 
 
+def _lstar(v):
+    lin = np.where(v <= 0.04045, v / 12.92, ((np.maximum(v, 0.04045) + 0.055) / 1.055) ** 2.4)
+    y = lin @ _TO_T[1]
+    return 116 * np.where(y > 0.008856, np.cbrt(y), 7.787 * y + 16 / 116) - 16
+
+
+def lstar(rgb):
+    """CIE L* alone, identical to rgb_to_lab's, for (..., 3) stored RGB: cheaper when a* and b* are not needed."""
+    a = np.asarray(rgb)
+    flat = a.reshape(-1, 3)
+    out = np.empty(len(flat), np.float32)
+    for i in range(0, len(flat), _CHUNK):
+        out[i:i + _CHUNK] = _lstar(flat[i:i + _CHUNK].astype(np.float64))
+    return out.reshape(a.shape[:-1])
+
+
 def rgb_to_lab(rgb):
     """Stored (sRGB-encoded) float RGB, nominally 0–1 -> float32 CIE Lab: L* 0–100, a*, b*. Not clipped."""
     return _per_chunk(_to_lab, rgb)
