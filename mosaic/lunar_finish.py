@@ -126,7 +126,51 @@ def detail_kept(img16, M, R=512):
 # ---------------------------------------------------------------- main work
 
 STEP_NAMES = {"wavelets": "wavelets", "highlights": "highlights", "saturation": "lunar colour",
-              "contrast": "contrast", "unsharp_mask": "sharpening"}
+              "contrast": "contrast", "unsharp_mask": "sharpening", "gaussian_blur": "blur",
+              "white_balance": "white balance", "rgb_shift": "RGB shift"}
+
+
+def step_name(t):
+    return STEP_NAMES.get(t, t.replace("_", " "))
+
+
+def describe(e, st, ro):
+    """A printed line and up to four movie rows for the blocks that need no special picture."""
+    t, p = e["type"], e["params"]
+    fmt3 = lambda v: " ".join(f"{x:.3f}" for x in v)
+    if t == "levels":
+        rows = [("black", f"{p['black']:g}"), ("white", f"{p['white']:g}"), ("gamma", f"{p['gamma']:.2f}"),
+                ("output", f"{p['out_black']:g}–{p['out_white']:g}")]
+        return f"levels: black {p['black']:g}, white {p['white']:g}, gamma {p['gamma']:.2f}", rows
+    if t == "curves":
+        pts = " ".join(f"{a:g}→{b:g}" for a, b in p["points"])
+        return f"curves: {pts}", [("points", str(len(p["points"]))), ("curve", pts[:40])]
+    if t == "gaussian_blur":
+        return f"Gaussian blur: σ {p['sigma']:g} px", [("sigma", f"{p['sigma']:g} px")]
+    if t == "white_balance":
+        g = st.get("g", [1, 1, 1])
+        line = f"white balance: gains R {g[0]:.4f} · G {g[1]:.4f} · B {g[2]:.4f}"
+        if "ratios" in st:
+            line += " (ratios " + fmt3(st["ratios"]) + ")"
+        return line + (f" · {st['note']}" if st.get("note") else ""), [
+            ("gains", fmt3(g)), ("background", fmt3(st.get("B", [0, 0, 0]))),
+            ("background target", f"{p['background_target']:g}" if p["neutralize_background"] else "kept")]
+    if t == "rgb_shift":
+        if p["mode"] == "manual":
+            m = p["manual"]
+            return f"RGB shift (manual): R {m['r']}, B {m['b']} px", [("red", f"{m['r']}"), ("blue", f"{m['b']}")]
+        why = {ch: st.get(ch, {}).get("why", "not measured") for ch in "rb"}
+        return f"RGB shift: red {why['r']} · blue {why['b']}", [("red", why["r"]), ("blue", why["b"])]
+    if t == "deconvolution":
+        q = p["psf"]
+        psf = (f"Airy {q['airy_radius']:g} px, intensity {q['diffraction_intensity']:g}, seeing {q['seeing_index']:g}"
+               if q["kind"] == "synthetic" else f"file {q['path']}")
+        line = (f"deconvolution (WPL, {p['iterations']} iterations, PSF {psf}): fine-detail amplitude × "
+                f"{ro.get('fine_detail', 1):.2f} (probe)")
+        return line + (f" · {ro['warning']}" if ro.get("warning") else ""), [
+            ("iterations", str(p["iterations"])), ("PSF", psf[:40]), ("dering", f"{p['dering_strength']:g}"),
+            ("fine detail", f"× {ro.get('fine_detail', 1):.2f}")]
+    return f"{step_name(t)}", []
 
 
 def lab_stats(bgr):
@@ -216,6 +260,8 @@ def block_facts(order, small_st, stats, args):
         elif t == "unsharp_mask":
             lines.append(f"sharpening (unsharp mask {p['amount']:.0f} %, {p['radius']:g} px, {p['threshold']:g} levels, "
                          f"{p['mode']}): fine-detail amplitude × {ro.get('fine_detail', 1):.2f} (probe, full resolution)")
+        else:
+            lines.append(describe(e, st, ro)[0])
         prev = last
     if args.mono and not mono_said:
         lines.append("colour: a mono image, so there is no colour to saturate (colour stages skipped)")
@@ -262,7 +308,9 @@ def run(args, pv, stg):
     m0 = float(np.median((rgb_to_lab(small)[..., 0] / 100)[stats.disk]))
     print(f"      disk {stats.disk.sum() * q * q / 1e6:.0f} Mpx · brightness median L {m0 * 100:.1f}" +
           (f" · highlight knee L {hl['knee'] * 100:.1f} · top L {hl['top'] * 100:.1f}" if hl else "") +
-          f" · chain: {', '.join(e['type'].replace('_', ' ') for e in blocks) or 'nothing to do'}", flush=True)
+          f" · chain: {', '.join(e['type'].replace('_', ' ') for e in blocks) or 'nothing to do'}" +
+          "".join(f" · {path} chain: {', '.join(e['type'].replace('_', ' ') for e in chain.enabled(doc, path))}"
+                  for path in ("luminance", "colour") if chain.enabled(doc, path)), flush=True)
 
     # full resolution, in strips with the chain's halo; reduced copies of every stage for the movie and the facts
     F = max(1, int(np.ceil(max(H, W) / 1100)))
@@ -396,6 +444,16 @@ def movie(args, pv, small_st, facts, groups, stats, doc, source, info):
                           [("contrast", f"+{p['strength'] * 100:.0f} % at midtones"), ("pivot", f"L {sb['m'] * 100:.0f}"),
                            ("black · white", "kept"), ("spread", f"{facts[prev]['std']:.2f} → {facts[last]['std']:.2f}")]))
             closeup_last = False
+        else:
+            if t == "deconvolution":
+                c = crop("detail")
+                before, after = tone(c[prev]), tone(c[last])
+                closeup_last = True
+            else:
+                before, after = tone(small_st[prev]), tone(small_st[last])
+                closeup_last = False
+            steps.append((step_name(t).capitalize(), "close up, enlarged" if t == "deconvolution" else "the whole disk",
+                          before, after, describe(e, sb, ro)[1][:4]))
         prev = last
     turn = info.get("turn")
     n_steps = len(steps) + (1 if turn else 0)
@@ -483,7 +541,7 @@ def movie(args, pv, small_st, facts, groups, stats, doc, source, info):
             return full_after[id(st)]
         pv.show(last_full, record=0.6 if pv.outputs else None)
         last = last_full
-    names = list(dict.fromkeys(STEP_NAMES[e["type"]] for e, _ in groups)) + (["north up"] if turn else [])
+    names = list(dict.fromkeys(step_name(e["type"]) for e, _ in groups)) + (["north up"] if turn else [])
     final_frame = {}
 
     def render_final(st):

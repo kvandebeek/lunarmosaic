@@ -120,7 +120,7 @@ Each is a default where DESIGN.md is silent. Implement each in exactly one place
 | D13 | **Chains run on the canvas grid, in canvas orientation; rotation, mirror, coverage crop and export scale are applied once, to the chain output** — rotation with Lanczos-4, reduction with INTER_AREA. This is what `lunar_finish` (north-up last) and today's app (`Image.warp`'s processor runs before the remap) already do, and it keeps blocks on stored values. Measured: rotating first (23.7°, bilinear) keeps 78 % of wavelet layer-1 detail, and the owner's wavelet setting then differs by 576 ADU rms. | `lrgb.Scene` |
 | D14 | **Mixed-scale luminance is selected in tiers, ordered by measured resolution.** Before building, each set's finest real detail is measured (`measurements.cutoff` on up to three textured panels; detail = arcsec/px ÷ cutoff); sets within 10 % form one tier. A canvas cell takes the best-resolving tier that validly covers it; sharpness competes only inside a tier; worse-resolving tiers fill only cells no better tier covers. Pixel scale alone is not enough: an oversampled small telescope has the finest pixels and coarse detail. Measured (synthetic): per-pixel scoring let a 2× coarser panel with a 100 % unsharp mask beat a finer one in 100 % of the overlap; measured resolution kept the order (fine 3.3, fine pre-sharpened 3.6, coarse 4.7 units) and put an oversampled set at the finest pixel scale last (7.6 units). | `measurements.cutoff`, `mosaic_stages.select_regions` |
 | D15 | **Colour panels escalate their pose model** — similarity → affine → poly3 (the existing `mosaic_stages` models, poly3 regularised towards affine) — when held-out tiles justify it. No displacement mesh (DESIGN.md §3). Measured in the code (`mosaic_stages.py:66`): between panels of one set, held-out residuals are similarity 1.19 px RMS, affine 0.97, cubic 0.55. | `colour_place.py` |
-| D16 | **RGB shift uses two estimators that work on lunar texture**: phase correlation of high-passed, unit-rms channels iterated three times, and a global Lucas–Kanade translation fit, over three textured probe crops. Measured: a gradient-weighted centroid is blind to translation on texture (−0.006/+0.046 px for a true +0.30/−0.20); iterated phase correlation and Lucas–Kanade agree within 0.07 px even with red blurred by σ 1.2 px. | `measurements.rgb_shift` |
+| D16 | **RGB shift uses two estimators that work on lunar texture**: phase correlation of high-passed, unit-rms channels iterated until a step is below 0.001 px, and a global Lucas–Kanade translation fit, over three textured crops of the probe. Measured: a gradient-weighted centroid is blind to translation on texture (−0.006/+0.046 px for a true +0.30/−0.20); a fixed three iterations of phase correlation stop at 0.21–0.25 px on noise-free texture; converged, both estimators are within 0.04 px even with red blurred by σ 1.2 px. | `measurements.rgb_shift` |
 | D17 | **CIE Lab is computed with exact float math** (`filters.rgb_to_lab` / `lab_to_rgb`, OpenCV's sRGB and D65 constants), never with `cv2.cvtColor`, in every new module and in `lunar_finish`. Adjacent Lab-domain blocks share one conversion. Measured: OpenCV's float Lab round trip is off by 66 ADU rms (p99.9 126 ADU, max 291) even on greys, and its forward L* by up to 0.23; exact math round-trips to 0.0000 ADU. | `filters.py` |
 
 ---
@@ -215,8 +215,10 @@ validator returns a reason string per block.
 ```
 prepare(sources, doc) — once per (sources, chain prefix); frozen; independent of rotation, coverage, export scale
   proxy  = luminance canvas and colour canvas on one grid, reduced 4× with INTER_AREA   (stats_q = 4)
-  probes = full-resolution canvas crops of 1024², ranked by texture inside the lit disk (and inside the finest
-           tier once phase 5 exists — the best-resolving one): one for noise and cutoff, three spread apart for RGB shift
+  probe  = one full-resolution canvas crop, 2R × 2R with R = min(1024, H/2, W/2), at the lit disk's centre of mass
+           (as lunar_finish took it): noise, cutoff and readouts. Noise wants flat tiles, so the crop is not chosen
+           for texture; RGB shift picks three textured crops inside it (once phase 5 exists, the centre of mass of
+           the best-resolving tier)
   space  = filled lit-disk mask, limb-distance map and space region (D7), from the luminance proxy
   for chain in (luminance, colour, merge, final):
       for block in chain (enabled only):
@@ -451,18 +453,22 @@ measurements that drive the readouts. Pure functions with tests; no interface ye
 3. `measurements.py`:
    - `space(lum_proxy)` and `limb_distance(lum_proxy)` — lift the filled-disk logic from `lunar_finish.run()`;
      the space region is the canvas-edge-connected part of L* < 1 (D7).
-   - `probes(canvas, proxy, n)` — 1024² crops ranked by texture (fine-band energy over brightness) inside the
-     lit disk, and inside the best-resolving tier once phase 5's set report exists; the three for RGB shift are spread
-     apart. On a crescent they must land in the lit part.
+   - `textured_boxes(gray, n, size)` — up to n square crops ranked by texture (fine-band energy over brightness),
+     non-overlapping; none below 5 % of the best or below 1e-6 at all (a flat image scores 6e-15 from rounding,
+     the synthetic disk's least textured tenth 2.5e-4). RGB shift uses three, a third of the probe each (≤ 512 px).
+     On a crescent they must land in the lit part.
    - `cutoff(gray, box=1024)` — DESIGN.md §7 method exactly: bright interior patch, Hann window, radially
      averaged power, noise floor = median over 0.42–0.5 cycles/px, cutoff = first frequency above 0.02 where
      power − floor ≤ 0.1 × floor. Returns cycles/px.
    - `suggest_layer(cutoff)` — the finest (lowest-numbered) layer whose whole band `[1/(4s), 1/(2s)]`,
      s = 2^(n−1), lies below the cutoff: the smallest s with `1/(2s) ≤ cutoff`. 0.443 → layer 2; 0.173 → layer 3.
    - `rgb_shift(probes)` (D16) — per crop, each channel minus a Gaussian (σ 8) and divided by its rms. Estimator
-     (a): phase correlation with a Hann window, iterated three times (shift the channel by the running estimate
-     with Lanczos-4, correlate again, accumulate). Estimator (b): global Lucas–Kanade — pre-smooth σ 1, Sobel
-     gradients of green, six Gauss–Newton iterations of the 2×2 normal equations over the crop inset by 32 px.
+     (a): phase correlation with a Hann window, iterated **until a step is below 0.001 px** (at most 20): shift the
+     channel back by the running estimate with Lanczos-4, correlate again, accumulate. Measured in phase 3: on
+     noise-free texture one OpenCV step captures only about 43 % of the remaining shift (0.128 of 0.30 px), so three
+     steps stop at 0.21–0.25; at zero shift the estimate is unbiased, so the converged one is (≤ 0.04 px in every
+     case tested). Estimator (b): global Lucas–Kanade — pre-smooth σ 1, Sobel gradients of green, six Gauss–Newton
+     iterations of the 2×2 normal equations over the crop inset by 32 px; no estimate on a crop without gradient.
      Returns every estimate per crop.
    - `fine_detail_amplitude(before, after)` — `lunar_finish`'s measure: ratio of rms of `G(0.8) − G(2.0)` on the
      channel mean.
@@ -859,7 +865,12 @@ crop the padding
 Numerical parity with LuckyStackWorker is not established (phase 9, V3). Keep γ, τ, the dering definition and
 the margin in named constants with a comment saying so. The declared margin (128 px) must pass T-TILE at 100
 iterations with dering on; if it does not, make the margin a function of the iterations, measure it, and write
-that function into Appendix A.
+that function into Appendix A. **Measured in phase 3:** tiles are bit-identical to a whole render at 100
+iterations. With γ = 1e-3 the preconditioner nearly inverts the PSF in one step: with the default PSF (Airy
+radius 3) the iteration converges within 5 steps and is identical afterwards (10 iterations cut the error 62 %),
+while a broad PSF (radius 8) keeps changing beyond 30 steps, with full-scale swings at a hard limb. So
+`iterations` matters mostly for broad PSFs — whether LuckyStackWorker's iterations behave alike is what V3 must
+settle before γ and τ are trusted.
 
 ## Appendix D — Migration from schema 3
 
@@ -920,6 +931,9 @@ movie stay outside the chain.
 | Old freeze rule on real data | 4 Oct terminator: 51 % of a 170 px square left equal to the input (unsharpened patch, speckled edge); faint sky L* 0.5–1.5 differs by 163 ADU rms under the soft gate | phase 2 |
 | Shadow colour without the hold | crater shadow L* 0.76, chroma 0.10 → RGB (0, 1053, 7717), chroma 15.3; shadow chroma median 0.08 → 3.42; with the hold: median 0.08, max 0.10 | phase 2 |
 | Runtime of lunar_finish | 4 Oct mosaic 14 s → 10 s (snapshots converted on the reduced copy) | phase 2 |
+| Phase correlation convergence | one OpenCV step captures ~43 % of the remaining shift on noise-free texture (0.128 of 0.30 px); three steps 0.21–0.25 px; converged ≤ 0.04 px | phase 3 |
+| Texture floor | flat image 6e-15 (rounding); synthetic disk's least textured tenth 2.5e-4, median 4.5e-4 | phase 3 |
+| WPL | Appendix B vectors to 5e-8; 10 iterations −62 % error (5: −70 %); default PSF converges in 5 steps, a broad PSF keeps changing past 30; tiles bit-identical at 100 iterations | phase 3 |
 | Mono through `lunar_finish` | phase 0: output channel spread 34 ADU on a perfectly mono input (one OpenCV float Lab round trip alone: 70.5 ADU, \|a*\|, \|b*\| up to 0.125 on grey); phase 1, exact Lab: 0 ADU | phases 0, 1 |
 | Exact Lab (D17) | round trip ≤ 0.004 ADU on greys, lunar colours, near-black; 0.05 on saturated colours (float32: 0.49); grey \|a*\|, \|b*\| < 1e-13; output vs the OpenCV-era code 68–79 ADU rms | phase 1 |
 | Builder determinism | three full builds (fine alignment 50 tiles, mesh 876 tiles) bit-identical; layouts equal apart from `created` | phase 0 |

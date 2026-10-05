@@ -393,7 +393,7 @@ diverges:
 | Wavelet units | Amount 0–3 meaning gain 1 + amount, on CIE lightness | PixInsight biases (gain 1 + 10b) on stored values |
 | Unsharp mask | Amount 0–1, threshold 0–0.05 of full scale, hard cut-off, sigma = radius | Photoshop units, soft threshold, measured radius law |
 | Saturation | Chroma multiplier | Lunar-hue weighting |
-| Missing | — | White balance, sub-pixel RGB shift, deconvolution, limb fade, daylight sky model, named previews |
+| Missing | In the application: all of these. As chain blocks (run by `lunar_finish --chain`) since phase 3: white balance, sub-pixel RGB shift, deconvolution, limb fade, levels, curves, Gaussian blur | White balance, sub-pixel RGB shift, deconvolution, limb fade, daylight sky model, named previews |
 | Build recovery | Interrupted builds restart | Resume from completed stages |
 | Luminance sets | One set; pairs outside a 0.97–1.03 scale ratio are rejected | Several sets and scales per stream, selected in tiers by measured resolution |
 | Lab conversion | OpenCV's float conversion in the application (round trip off by 66 ADU rms); exact in `lunar_finish` since phase 1 | Exact float math with the same constants |
@@ -496,6 +496,34 @@ The chain engine, and `lunar_finish` running on it.
 Tests: `chain_checks.py` (T-TILE for every block and the default chain — checked to catch a halo even 8 px short —
 T-ATWT, T-USM, T-MERGE-ID, T-SPACE, T-MOVIE, validation, flags and environment); `golden.py` now applies T-GOLD.
 All eight suites pass; 79 tests.
+
+### Phase 3 — 2026-10-05
+
+The remaining blocks, and the measurements behind them.
+
+1. **Blocks.** Levels and Curves (natural cubic spline, applied through a 65 536-step table); Gaussian blur; white
+   balance — PixInsight ColorCalibration's colour with the background as the fixed point, gains normalised to keep
+   the white reference's brightness, structure detection refused for now; sub-pixel RGB shift; deconvolution —
+   LuckyStackWorker's PSF and WPL. `lunar_finish --chain` runs and describes all of them, movie included.
+2. **Measurements** (`mosaic/measurements.py`): the disk and space maps (moved out of `chain.py`), textured crops,
+   the information cutoff and the wavelet layer it suggests (shown with the wavelets block), the two RGB-shift
+   estimators, and the fine-detail amplitude.
+3. **Corrections found while building, all measured.** Phase correlation must iterate to convergence: one OpenCV
+   step captures only about 43 % of the remaining shift on noise-free texture, so the planned three steps stopped
+   at 0.21–0.25 px for a true 0.30; converged, both estimators are within 0.04 px in every case tested. A flat
+   image scores 6e-15 on the texture measure from rounding alone, against 2.5e-4 for the least textured tenth of
+   the synthetic disk, so crops need an absolute floor (1e-6). The noise and cutoff probe stays at the disk's
+   centre of mass, as `lunar_finish` always took it — noise is estimated on flat tiles, so a texture-picked crop
+   would be the wrong one; RGB shift picks three textured crops inside it.
+4. **Deconvolution, as defined, converges fast.** The PSF reproduces LuckyStackWorker's to 5e-8; 10 iterations
+   cut the error against the sharp image by 62 %. But with the default PSF (Airy radius 3) the result is identical
+   from the fifth iteration on, while a broad PSF (radius 8) keeps changing past 30 — the Wiener preconditioner
+   nearly inverts the PSF in one step. Whether LuckyStackWorker's iterations behave alike is open (plan phase 9,
+   V3); until it is checked, the iterations setting matters mostly for broad PSFs.
+
+Tests: `block_checks.py` (T-WB, T-CUT, T-SHIFT, T-PSF, T-DECONV, T-LEVELS, T-CURVES, T-ORDER for all eleven blocks,
+T-TILE for the new ones — deconvolution at 100 iterations, dering on — and every block through `lunar_finish`).
+All nine suites pass; 94 tests.
 
 ### Changes made 2026-10-05 to `lunar_finish.py`
 

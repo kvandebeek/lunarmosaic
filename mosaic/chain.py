@@ -15,6 +15,7 @@ import numpy as np
 
 import blocks as B
 import filters as F
+import measurements as ms
 import mosaic_common as mc
 
 FORMAT, VERSION = 'lunarmosaic-chain', 1
@@ -160,9 +161,10 @@ class ArraySource:
 class Stats:
     """Everything chain.prepare measured: the proxy-grid maps, per-block statistics and readouts."""
 
-    def __init__(self, q, h, w, disk, limb, space):
+    def __init__(self, q, h, w, disk, filled, limb, space):
         self.q, self.h, self.w = q, h, w
-        self.disk, self.limb, self.space = disk, limb, space      # proxy grid; limb distance in canvas px
+        # proxy grid: eroded lit disk, hole-filled disk, limb distance (canvas px), space region
+        self.disk, self.filled, self.limb, self.space = disk, filled, limb, space
         self.blocks, self.readouts = {}, {}
 
     def at(self, m, y0, x0, h, w):
@@ -243,32 +245,6 @@ class Protection:
             lab[:, 1:] = self._c * self._ab + (1 - self._c) * lab[:, 1:]
             x[self.cidx] = np.clip(F.lab_to_rgb(lab), 0, 1)
         return self.apply(x)
-
-
-def _space_and_limb(proxy, q):
-    """The lit disk (largest component above L 5 %), its hole-filled version, distance to its edge in canvas px,
-    the eroded disk used for statistics, and the soft space region of D7 — all on the proxy grid."""
-    Ls = F.rgb_to_lab(proxy)[..., 0] / 100.0
-    raw = (Ls > 0.05).astype(np.uint8)
-    n, lab, st, _ = cv2.connectedComponentsWithStats(raw)
-    if n > 1:
-        raw = (lab == 1 + int(np.argmax(st[1:, cv2.CC_STAT_AREA]))).astype(np.uint8)
-    if not raw.any():
-        raise ValueError('No Moon found: nothing is brighter than the sky.')
-    # distance to the limb, not to crater shadows inside the disk: holes that do not touch the frame edge are filled
-    n2, lab2 = cv2.connectedComponents((1 - raw).astype(np.uint8), connectivity=4)
-    edge = np.unique(np.concatenate([lab2[0], lab2[-1], lab2[:, 0], lab2[:, -1]]))
-    filled = (~np.isin(lab2, edge[edge > 0])).astype(np.uint8) if n2 > 1 else raw
-    limb = (cv2.distanceTransform(filled, cv2.DIST_L2, 5) * q).astype(np.float32)
-    disk = cv2.erode(raw, np.ones((9, 9), np.uint8)) > 0
-    # space: the part of L* < 1 connected to the frame edge, widened 8 canvas px (2 proxy px) and feathered
-    dark = (Ls * 100 < 1).astype(np.uint8)
-    n3, lab3 = cv2.connectedComponents(dark, connectivity=4)
-    edge3 = np.unique(np.concatenate([lab3[0], lab3[-1], lab3[:, 0], lab3[:, -1]]))
-    space = np.isin(lab3, edge3[edge3 > 0]) & (dark > 0)
-    space = cv2.dilate(space.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
-    space = np.clip(cv2.GaussianBlur(space.astype(np.float32), (0, 0), 1.0) * 2, 0, 1).astype(np.float32)
-    return disk, limb, space
 
 
 def merge(lum, col, cov_l=None, cov_c=None, strength=1.0):
@@ -357,8 +333,8 @@ def prepare(source, doc, q=STATS_Q):
     if min(H, W) < 4 * q:
         raise ValueError(f'The image is too small ({W} × {H} px).')
     proxy = source.proxy(q)
-    disk, limb, space = _space_and_limb(proxy, q)
-    stats = Stats(q, H, W, disk, limb, space)
+    disk, filled, limb, space = ms.disk_and_space(proxy, q)
+    stats = Stats(q, H, W, disk, filled, limb, space)
     lum_e, col_e, fin_e = (enabled(doc, p) for p in PATHS)
     strength = doc['chains'].get('merge', {}).get('strength', 1.0)
     on = doc.get('protect_space', True)
@@ -390,8 +366,13 @@ def prepare(source, doc, q=STATS_Q):
         def readout(e, arr, dom, step):
             if e['id'] in before and step is None:
                 after = np.clip(F.lab_to_rgb(arr), 0, 1) if dom == 'lab' else arr
-                stats.readouts[e['id']] = {'fine_detail': B.fine_detail(before.pop(e['id']), after)}
+                stats.readouts.setdefault(e['id'], {})['fine_detail'] = ms.fine_detail(before.pop(e['id']), after)
         passes(source.region(y0, x0, 2 * R, 2 * R), ctx, collect('probe', ctx), False, snapshot=readout)
+    for path in PATHS:
+        for i, e in enumerate(enabled(doc, path)):
+            if e['type'] == 'deconvolution' and i:
+                stats.readouts.setdefault(e['id'], {})['warning'] = (
+                    'Deconvolution works best first in its chain, on data nothing has sharpened or stretched yet.')
     return stats
 
 
