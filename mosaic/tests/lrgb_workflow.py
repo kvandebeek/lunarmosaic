@@ -50,7 +50,7 @@ class Workflow(unittest.TestCase):
     def built(self):
         self.assertEqual(self.app.build(['L', 'RGB']), {'L':'built', 'RGB':'built'})
         p = self.app.project
-        p.data['match'] = manual_match([[30,30],[550,30],[30,550],[550,550]], [[30,30],[550,30],[30,550],[550,550]])
+        p.match = manual_match([[30,30],[550,30],[30,550],[550,550]], [[30,30],[550,30],[30,550],[550,550]])
         p.save()
         return self.app.get_scene()
 
@@ -59,55 +59,63 @@ class Workflow(unittest.TestCase):
         self.built()
         self.app.close()
         p = Project.open(self.root/'moon.lunarmosaic')
-        self.assertEqual(p.data['sets']['L']['state'], 'built')
-        self.assertEqual(p.data['sets']['RGB']['width'], 640)
-        self.assertIsNotNone(p.data['match'])
+        self.assertEqual(p.set('L')['state'], 'built')
+        self.assertEqual(p.set('RGB')['width'], 640)
+        self.assertIsNotNone(p.match)
         self.assertEqual(before, [hashlib.sha256(x.read_bytes()).digest() for x in (self.lp,self.cp)])
 
+    def legacy(self,version,edits):
+        """Rewrite the open project's file in its schema-1–3 shape (sets by key, a global match, flat edits)."""
+        p=self.app.project;self.app.close()
+        old=dict(version=version,id=p.data['id'],name=p.data['name'],created=p.data['created'],updated=p.data['updated'],
+                 revision=p.data['revision'],sets={s['id']:{k:v for k,v in s.items() if k not in ('id','stream','label')}
+                 for s in p.data['sets']},match=p.match,orientation=None,edits=edits)
+        (p.folder/'project.json').write_text(json.dumps(old),'utf-8')
+        return p.folder,old
+
     def test_version_one_migrates_without_changing_existing_edits(self):
-        self.built();p=self.app.project
+        self.built()
         old_keys=('saturation','smoothing','strength','highlights','contrast','rotation','coverage')
-        p.data['edits']={k:p.data['edits'][k] for k in old_keys}
-        p.data['edits']['saturation']=2.3;p.data['version']=1;p.save();self.app.close()
-        restored=Project.open(p.folder)
-        self.assertEqual(restored.data['version'],3)
-        self.assertEqual(restored.data['edits']['saturation'],2.3)
-        self.assertEqual(restored.data['edits']['wavelets'],[0,0,0,0])
-        self.assertFalse(restored.data['edits']['mirror'])
-        self.assertTrue(restored.data['edits']['l_visible'])
-        self.assertTrue(restored.data['edits']['rgb_visible'])
+        folder,_=self.legacy(1,dict({k:DEFAULT_EDITS[k] for k in old_keys},saturation=2.3))
+        restored=Project.open(folder)
+        self.assertEqual(restored.data['version'],4)
+        self.assertEqual(restored.edits['saturation'],2.3)
+        self.assertEqual(restored.edits['wavelets'],[0,0,0,0])
+        self.assertFalse(restored.edits['mirror'])
+        self.assertTrue(restored.edits['l_visible'])
+        self.assertTrue(restored.edits['rgb_visible'])
+        self.assertTrue((folder/'project.v1.json').is_file())
 
     def test_version_two_migrates_preserving_sharpening_and_match(self):
-        self.built();p=self.app.project
-        p.data['version']=2
-        p.data['edits'].pop('l_visible');p.data['edits'].pop('rgb_visible')
-        p.data['edits']['wavelets']=[.1,.2,.3,.4];p.save()
-        before=copy.deepcopy(p.data['match']);self.app.close();self.app.select(p.folder)
-        restored=self.app.project.data
-        self.assertEqual(restored['version'],3)
-        self.assertEqual(restored['edits']['wavelets'],[.1,.2,.3,.4])
-        self.assertEqual(restored['match'],before)
-        self.assertTrue(restored['edits']['l_visible'])
+        self.built()
+        edits={k:v for k,v in DEFAULT_EDITS.items() if k not in ('l_visible','rgb_visible')}
+        folder,old=self.legacy(2,dict(edits,wavelets=[.1,.2,.3,.4]))
+        self.app.select(folder)
+        restored=self.app.project
+        self.assertEqual(restored.data['version'],4)
+        self.assertEqual(restored.edits['wavelets'],[.1,.2,.3,.4])
+        self.assertEqual(restored.match,old['match'])
+        self.assertTrue(restored.edits['l_visible'])
 
     def test_visibility_reopens_and_combined_export_uses_visible_layer(self):
         scene=self.built();p=self.app.project
         matrix,size,_=scene.geometry(DEFAULT_EDITS)
         lonly=dict(DEFAULT_EDITS,rgb_visible=False)
-        combined,_=scene.render(matrix,size,lonly)
-        expected,_=scene.render(matrix,size,DEFAULT_EDITS,'luminance')
+        combined,_=scene.render_edits(matrix,size,lonly)
+        expected,_=scene.render_edits(matrix,size,DEFAULT_EDITS,'luminance')
         self.assertLess(np.max(np.abs(combined-expected)),1e-6)
         conly=dict(DEFAULT_EDITS,l_visible=False)
         output=self.root/'visible-colour.tif';scene.export(output,conly)
-        expected,_=scene.render(matrix,size,DEFAULT_EDITS,'colour')
+        expected,_=scene.render_edits(matrix,size,DEFAULT_EDITS,'colour')
         self.assertLess(np.max(np.abs(tifffile.imread(output).astype(np.float32)/65535-expected)),.00002)
         empty=dict(DEFAULT_EDITS,l_visible=False,rgb_visible=False)
-        preview,_=scene.render(matrix,size,empty)
+        preview,_=scene.render_edits(matrix,size,empty)
         self.assertEqual(float(preview.max()),0)
         with self.assertRaises(ValueError):self.app.export_options(empty,dict(layer='composite'))
         self.app.export_options(empty,dict(layer='luminance'))
-        p.data['edits']=conly;p.save();self.app.close();self.app.select(p.folder)
-        self.assertFalse(self.app.project.data['edits']['l_visible'])
-        self.assertTrue(self.app.project.data['edits']['rgb_visible'])
+        p.edits=conly;p.save();self.app.close();self.app.select(p.folder)
+        self.assertFalse(self.app.project.edits['l_visible'])
+        self.assertTrue(self.app.project.edits['rgb_visible'])
 
     def test_independent_checks_detect_local_error_and_unknown_regions(self):
         shifted=cv2.warpAffine(self.rgb,np.array([[1,0,3],[0,1,0]],np.float32),(640,640))
@@ -130,12 +138,12 @@ class Workflow(unittest.TestCase):
         edits=dict(DEFAULT_EDITS,wavelets=[1.5,.5,0,0],wavelet_kernel='b3',usm_amount=.4,
                    usm_radius=1.3,usm_threshold=.005,rotation=19,mirror=True,smoothing=3)
         m,size,_=scene.geometry(edits,factor=.5)
-        expected,_=scene.render(m,size,edits)
+        expected,_=scene.render_edits(m,size,edits)
         out=self.root/'sharpened.tif';scene.export(out,edits,factor=.5)
         actual=Image(out).pixels(Image(out).raw)
         self.assertLess(float(np.mean(np.abs(actual-expected))),.0003)
         self.assertLess(float(np.max(np.abs(actual-expected))),.007)
-        original,_=scene.render(m,size,dict(DEFAULT_EDITS,rotation=19,mirror=True))
+        original,_=scene.render_edits(m,size,dict(DEFAULT_EDITS,rotation=19,mirror=True))
         self.assertGreater(float(np.mean(np.abs(actual-original))),.001)
         self.assertTrue(scene.sharpening_stats(edits)['enabled'])
         self.assertIsNotNone(scene.sharpening_stats(edits)['fine_variation'])
@@ -157,10 +165,10 @@ class Workflow(unittest.TestCase):
             edits=dict(DEFAULT_EDITS,rotation=result['rotation'],mirror=result['mirror'])
             matrix,_,_=scene.geometry(edits)
             np.testing.assert_allclose(matrix[:2,:2],result['matrix'],atol=1e-12)
-        before=copy.deepcopy(self.app.project.data['edits'])
+        before=copy.deepcopy(self.app.project.edits)
         with patch.object(orient,'locate',side_effect=NoUsableLimb('no limb')):
             with self.assertRaises(ValueError):orient.solve(self.app.project,log=lambda s:None)
-        self.assertEqual(self.app.project.data['edits'],before)
+        self.assertEqual(self.app.project.edits,before)
 
     def test_native_tiff_byte_order_planar_and_white_zero(self):
         pixels=np.round(self.l*65535).astype(np.uint16)
@@ -194,19 +202,19 @@ class Workflow(unittest.TestCase):
     def test_smoothing_retains_luminance_detail(self):
         scene = self.built()
         m, size, _ = scene.geometry(DEFAULT_EDITS)
-        a,_ = scene.render(m,size,DEFAULT_EDITS)
+        a,_ = scene.render_edits(m,size,DEFAULT_EDITS)
         edits = dict(DEFAULT_EDITS,smoothing=8)
-        b,_ = scene.render(m,size,edits)
+        b,_ = scene.render_edits(m,size,edits)
         la = cv2.cvtColor(a,cv2.COLOR_RGB2LAB)[...,0]
         lb = cv2.cvtColor(b,cv2.COLOR_RGB2LAB)[...,0]
         self.assertLess(float(np.mean(np.abs(la-lb))),.15)
-        grey,_ = scene.render(m,size,dict(edits,strength=0))
+        grey,_ = scene.render_edits(m,size,dict(edits,strength=0))
         self.assertLess(float(np.max(np.ptp(grey,axis=2))),.002)
 
     def test_gaps_stay_grey_and_common_crop_avoids_holes(self):
         scene = self.built()
         scene.match[0,2] = 220
-        rgb, info = scene.render(np.eye(3),(640,640),DEFAULT_EDITS)
+        rgb, info = scene.render_edits(np.eye(3),(640,640),DEFAULT_EDITS)
         self.assertGreater(info['missing_colour'],30)
         self.assertLess(float(np.max(np.ptp(rgb[:,:200],axis=2))),.002)
         _,size,box = scene.geometry(dict(DEFAULT_EDITS,coverage='common'))
@@ -220,7 +228,7 @@ class Workflow(unittest.TestCase):
         scene = self.built()
         edits = dict(DEFAULT_EDITS,rotation=17,smoothing=4,saturation=1.7)
         matrix,size,_=scene.geometry(edits)
-        expected,_=scene.render(matrix,size,edits)
+        expected,_=scene.render_edits(matrix,size,edits)
         for ext in ('tif','png'):
             path=self.root/f'export.{ext}'
             scene.export(path,edits)
@@ -245,13 +253,13 @@ class Workflow(unittest.TestCase):
         self.lp.unlink()
         result=self.app.build(['L','RGB'])
         self.assertEqual(result,{'L':'failed','RGB':'built'})
-        self.assertIsNone(self.app.project.data['sets']['L']['mosaic'])
+        self.assertIsNone(self.app.project.set('L')['mosaic'])
         self.assertTrue(self.app.project.path('derived/RGB.tif').is_file())
 
     def test_partial_import_keeps_valid_panels_and_reports_bad_files(self):
         bad=self.root/'unreadable.tif';bad.write_bytes(b'not an image')
         self.app.inputs('RGB',[str(self.cp),str(self.lp),str(bad)],allow_partial=True)
-        s=self.app.project.data['sets']['RGB']
+        s=self.app.project.set('RGB')
         self.assertEqual(s['inputs'],[str(self.cp.resolve())])
         self.assertEqual({v['name'] for v in s['skipped']},{'L.tif','unreadable.tif'})
         before=copy.deepcopy(s)
@@ -263,7 +271,7 @@ class Workflow(unittest.TestCase):
         self.built();p=self.app.project
         history=RecentProjects(self.root/'history'/'recent.json')
         history.remember(p.folder);history.remember(p.folder)
-        p.data['sets']['L']['state']='building';p.save()
+        p.set('L')['state']='building';p.save()
         before=(p.folder/'project.json').read_bytes()
         self.assertEqual(len(history.read()),1)
         summary=history.summaries()[0]
@@ -286,13 +294,13 @@ class Workflow(unittest.TestCase):
             self.assertTrue(info['preview'].startswith('data:image/png;base64,'))
             # the JPEG ceiling the dialog pre-flights with is the one export() enforces
             self.assertEqual((info['jpeg_max_side'],info['jpeg_max_pixels']),(lrgb.JPEG_MAX_SIDE,lrgb.JPEG_MAX_PIXELS))
-            edits,layer,factor=self.app.export_options(p.data['edits'],dict(coverage='common',factor=.5,layer='luminance'))
+            edits,layer,factor=self.app.export_options(p.edits,dict(coverage='common',factor=.5,layer='luminance'))
             output=self.root/'preview-match.tif';scene.export(output,edits,factor,layer)
             a=tifffile.imread(output)
             self.assertEqual(a.shape[:2],(info['height'],info['width']))
             self.assertEqual(info['raw_bytes'],a.nbytes)
             self.assertEqual(p.data,before)
-            with self.assertRaises(ValueError):self.app.export_options(p.data['edits'],dict(factor=.1))
+            with self.assertRaises(ValueError):self.app.export_options(p.edits,dict(factor=.1))
         finally:
             srv.shutdown();srv.server_close();t.join()
 
@@ -317,7 +325,7 @@ class Workflow(unittest.TestCase):
         srv=start_server(0,app=self.app,token='upload-token')
         t=threading.Thread(target=srv.serve_forever,daemon=True);t.start()
         # Reset the references, so the upload is the complete L input set.
-        self.app.project.data['sets']['L']['inputs']=[]
+        self.app.project.set('L')['inputs']=[]
         self.app.project.save()
         pid=self.app.project.data['id']
         raw=self.lp.read_bytes()
@@ -329,7 +337,7 @@ class Workflow(unittest.TestCase):
             with self.assertRaises(urllib.error.HTTPError):upload('RGB','mono.tif',raw)
             self.assertFalse(list((self.app.project.folder/'sources'/'RGB').glob('*')))
             with upload('L','panel.tif',raw) as r: self.assertEqual(r.status,200)
-            relative=self.app.project.data['sets']['L']['inputs'][0]
+            relative=self.app.project.set('L')['inputs'][0]
             self.assertTrue(relative.startswith('sources/'))
             old=self.app.project.folder;self.app.close()
             new=self.root/'moved.lunarmosaic';old.rename(new)
@@ -343,21 +351,21 @@ class Workflow(unittest.TestCase):
         other=Application()
         with self.assertRaises(ValueError):other.select(self.app.project.folder)
         other.close()
-        self.app.project.data['sets']['L']['state']='building';self.app.project.save();self.app.close()
+        self.app.project.set('L')['state']='building';self.app.project.save();self.app.close()
         p=Project.open(self.root/'moon.lunarmosaic')
-        self.assertEqual(p.data['sets']['L']['state'],'interrupted')
+        self.assertEqual(p.set('L')['state'],'interrupted')
 
     def test_missing_colour_reopens_luminance_without_stale_common_crop(self):
         self.built();p=self.app.project
-        p.data['edits'].update(coverage='common',l_visible=False);p.save();self.app.close()
+        p.edits=dict(p.edits,coverage='common',l_visible=False);p.save();self.app.close()
         p.path('derived/RGB.tif').rename(p.path('derived/RGB.moved.tif'))
         self.app.select(p.folder)
         restored=self.app.project
-        self.assertEqual(restored.data['sets']['RGB']['state'],'missing')
-        self.assertIsNone(restored.data['match'])
-        self.assertEqual(restored.data['edits']['coverage'],'full')
-        self.assertTrue(restored.data['edits']['l_visible'])
-        pixels,info=self.app.get_scene().preview(restored.data['edits'])
+        self.assertEqual(restored.set('RGB')['state'],'missing')
+        self.assertIsNone(restored.match)
+        self.assertEqual(restored.edits['coverage'],'full')
+        self.assertTrue(restored.edits['l_visible'])
+        pixels,info=self.app.get_scene().preview(restored.edits)
         self.assertEqual((info['width'],info['height']),(640,640))
         self.assertLess(np.ptp(pixels,axis=2).max(),.001)
 

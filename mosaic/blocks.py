@@ -118,8 +118,9 @@ def _wavelets_apply(x, p, st, ctx):
     n = len(p['biases'])
     noise = st.get('noise') or [0.0] * n          # zip() would silently drop every layer if this were empty
     denoise = (list(p['denoise']) + [0.0] * n)[:n]
-    # as PixInsight on an RGB/K target: each channel on its own stored values
-    return np.dstack([F.wavelet_sharpen(x[..., c], p['biases'], noise, denoise, p['kernel']) for c in range(3)])
+    # as PixInsight on an RGB/K target: each channel on its own stored values (scale < 1: a zoomed-out view)
+    return np.dstack([F.wavelet_sharpen(x[..., c], p['biases'], noise, denoise, p['kernel'], scale=ctx.scale)
+                      for c in range(3)])
 
 
 register(Block('wavelets', PATHS, {
@@ -135,9 +136,9 @@ def _usm_apply(x, p, st, ctx):
     a, r, t = p['amount'] / 100, p['radius'], p['threshold']
     if p['mode'] == 'luminosity':
         out = x.copy()
-        out[..., 0] = F.unsharp(x[..., 0] / 100, a, r, t) * 100
+        out[..., 0] = F.unsharp(x[..., 0] / 100, a, r, t, ctx.scale) * 100
         return out
-    return F.unsharp(x, a, r, t)
+    return F.unsharp(x, a, r, t, ctx.scale)
 
 
 register(Block('unsharp_mask', PATHS, {
@@ -191,8 +192,10 @@ def _contrast_apply(lab, p, st, ctx):
     return out
 
 
+# negative strength flattens the midtones (the old application's contrast went both ways); the curve stays
+# monotonic for strength in (−1, 0.5)
 register(Block('contrast', ('luminance', 'final'), {
-    'strength': Param('float', 0.12, 0, 0.5, hi_open=True)},
+    'strength': Param('float', 0.12, -0.5, 0.5, lo_open=True, hi_open=True)},
     _contrast_apply, lambda p: 0, domain='lab', prepare=_contrast_prepare))
 
 
@@ -293,13 +296,14 @@ _LUTS = {}
 def curve_lut(points):
     """The curve on a 65 536-entry grid over 0–1, clamped to 0–1 (cached per set of points)."""
     key = tuple(map(tuple, points))
-    if key not in _LUTS:
+    lut = _LUTS.get(key)                   # tiles render on several threads: never read back what was stored
+    if lut is None:
         if len(_LUTS) > 64:
             _LUTS.clear()
         grid = np.linspace(0, 1, 65536)
         xs, ys = np.array(points).T
-        _LUTS[key] = (grid, np.clip(natural_spline(xs, ys)(grid * 255) / 255, 0, 1))
-    return _LUTS[key]
+        lut = _LUTS[key] = (grid, np.clip(natural_spline(xs, ys)(grid * 255) / 255, 0, 1))
+    return lut
 
 
 def _curves_prepare(kind, x, p, ctx):
@@ -493,6 +497,8 @@ def _deconv_prepare(kind, x, p, ctx):
 
 
 def _deconv_apply(x, p, st, ctx):
+    if ctx.scale != 1:              # a zoomed-out view: a PSF has no meaning on decimated pixels, so it is left out
+        return x
     out = np.dstack([deconv.wpl(x[..., c], st['psfs'][c], p['iterations']) for c in range(3)])
     if p['dering_strength'] > 0:
         m = (p['dering_strength'] * deconv.dering_mask(x.mean(axis=2), st['dering_threshold'], p['dering_radius']))[..., None]

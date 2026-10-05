@@ -171,7 +171,7 @@ unsharp mask and sometimes after.
 | Levels | black, white, gamma | all | Photoshop Levels on stored values |
 | Curves | spline control points; histogram taken at that point in the chain | all | Photoshop Curves |
 | Highlights | strength, knee percentile | luminance, final | current `--highlights` |
-| Contrast | strength 0 to <0.5 | luminance, final | current `--contrast` |
+| Contrast | strength −0.5 to <0.5; negative flattens the midtones (the old application's contrast went both ways) | luminance, final | current `--contrast` |
 | À-trous wavelets | bias per layer in PixInsight units, gain shown beside it | all | §5.1 |
 | Unsharp mask | amount %, radius px, threshold levels | all | §5.2 |
 | Gaussian blur | sigma px | all | on the colour path this is chroma denoise |
@@ -388,15 +388,15 @@ diverges:
 
 | Area | Implemented 3 October | Decided since |
 |---|---|---|
-| Editing model | Two layers with fixed adjustments in the application; `lunar_finish` runs chains since phase 2 | Three chains of reorderable blocks |
+| Editing model | The application renders chains since phase 4, but its interface still edits the fixed adjustments, translated into a chain on every change; `lunar_finish` runs chains since phase 2 | Three chains of reorderable blocks |
 | Colour placement | Colour built as its own mosaic, then sampled onto L by one global transform | Each colour panel registered directly onto the luminance mosaic |
-| Wavelet units | Amount 0–3 meaning gain 1 + amount, on CIE lightness | PixInsight biases (gain 1 + 10b) on stored values |
-| Unsharp mask | Amount 0–1, threshold 0–0.05 of full scale, hard cut-off, sigma = radius | Photoshop units, soft threshold, measured radius law |
+| Wavelet units | The interface's amount 0–3 (gain 1 + amount); since phase 4 it becomes bias = amount ÷ 10 (the same gain) on stored values | PixInsight biases (gain 1 + 10b) on stored values |
+| Unsharp mask | The interface's amount 0–1 and threshold 0–0.05 of full scale; since phase 4 translated into Photoshop units and applied with the soft threshold and measured radius law | Photoshop units, soft threshold, measured radius law |
 | Saturation | Chroma multiplier | Lunar-hue weighting |
-| Missing | In the application: all of these. As chain blocks (run by `lunar_finish --chain`) since phase 3: white balance, sub-pixel RGB shift, deconvolution, limb fade, levels, curves, Gaussian blur | White balance, sub-pixel RGB shift, deconvolution, limb fade, daylight sky model, named previews |
+| Missing | In the interface: all of these (the renderer can run them since phase 4; the interface cannot add them until phase 7). As chain blocks (run by `lunar_finish --chain`) since phase 3: white balance, sub-pixel RGB shift, deconvolution, limb fade, levels, curves, Gaussian blur | White balance, sub-pixel RGB shift, deconvolution, limb fade, daylight sky model, named previews |
 | Build recovery | Interrupted builds restart | Resume from completed stages |
 | Luminance sets | One set; pairs outside a 0.97–1.03 scale ratio are rejected | Several sets and scales per stream, selected in tiers by measured resolution |
-| Lab conversion | OpenCV's float conversion in the application (round trip off by 66 ADU rms); exact in `lunar_finish` since phase 1 | Exact float math with the same constants |
+| Lab conversion | Exact in `lunar_finish` since phase 1 and in the application since phase 4 (OpenCV's float conversion before: round trip off by 66 ADU rms) | Exact float math with the same constants |
 
 That table is the migration list for the chain editor.
 
@@ -525,6 +525,58 @@ Tests: `block_checks.py` (T-WB, T-CUT, T-SHIFT, T-PSF, T-DECONV, T-LEVELS, T-CUR
 T-TILE for the new ones — deconvolution at 100 iterations, dering on — and every block through `lunar_finish`).
 All nine suites pass; 94 tests.
 
+### Phase 4 — 2026-10-05
+
+The application stores and renders chains; the current interface keeps working through a compatibility layer.
+
+1. **Project schema 4.** Sets are a list (`L` feeds the luminance stream, `RGB` the colour stream); the old global
+   match is kept as `colour.legacy_match` until phase 6 places colour per panel; rotation, mirror and coverage are
+   `geometry`, the layer switches `view`; the chain document lives in the project. Schema 1–3 projects migrate on
+   opening, and the original file is kept as `project.v<N>.json`. Opening now saves only when it changed
+   something, so a second open leaves the revision alone. Build state stays in each set until phase 5 gives each
+   stream several sets.
+2. **Rendering (D1, D13).** Statistics are computed once per chain on the whole canvas; the chains run on the
+   luminance canvas; rotation and mirror come after, with Lanczos-4. The colour stream is the colour mosaic
+   sampled onto the canvas through the match, every pixel from one inverse, so tiles agree. Exact renders below
+   1:1 sample a finer grid and average it down; renders below 75 % zoom in the workspace run the chains on every
+   n-th canvas pixel, with kernels shrunk alike (deconvolution is left out there). Measured: a 700 × 500 preview
+   at 23.7° equals the same pixels of a full export exactly (0 ADU); a common-coverage export equals its region of
+   a full one exactly; a half-scale export is the averaged full export within 0.75 ADU.
+3. **Export scale changed its pixel grid.** Output pixel j at scale f now covers view pixels [j/f, (j+1)/f); the old
+   code sampled the view at j/f, a quarter of a pixel off at ½. Only this makes a reduced export equal the
+   averaged full one.
+4. **Compatibility layer, until phase 7.** `/api/state` serves the schema-3 shape the interface reads, with the
+   schema-4 data under `schema4`; `/api/edits` regenerates the chain from the sliders; `Scene.render_edits()` keeps
+   the old call. `/api/render` (plan §4.7) returns a region of the oriented view at full scale as a 16-bit PNG.
+   `sharpen.py` is gone.
+5. **Statistics worker.** One thread, not a job, so moving a slider during an export works: the newest chain wins,
+   an older computation stops at its next block, a render waits for the statistics it needs, and an export keeps
+   the statistics it started with. Checked with an export paused mid-way while the chain changed: the file equals
+   one made without the change.
+6. **Three departures from plan Appendix D**, because the interface keeps editing the sliders through this
+   translation until phase 7. Highlights and contrast join the luminance chain, where the old renderer applied
+   them, so the luminance view still shows them. Their strength follows the slider (0.49 × value; the old contrast
+   had a midtone slope of 1 + value/2, the block has 1 + strength) instead of being switched on at the block's
+   default. And the contrast block accepts negative strength, which keeps the old slider's lower half; the curve
+   stays monotonic down to −1. Block ids follow from their place, so the same sliders always give the same chain
+   and its statistics stay cached.
+7. **Speed, measured on the 4 October mosaic** (5918 × 6974 px view at 23.7°): a 1:1 viewport 0.73 s, the fit
+   preview 0.42 s, a full export 9.0 s, statistics 1.9 s once per chain. The first version took 2.7 s, 1.7 s,
+   33 s and 3.9 s. Four changes got there, all bit-identical: exact Lab on a thread pool (6× faster on 10 cores),
+   L* alone where the merge needs only lightness, space restored by a masked copy instead of indexing, and view
+   tiles rendered four at a time. The old renderer did the viewport in 0.11 s and the export in 3.3 s: it sharpened
+   one channel and used OpenCV's table-based Lab, where the chains sharpen each channel as PixInsight does, convert
+   Lab exactly and protect space. Evidence: `/Volumes/Astro/moontest_04102026/phase4/`.
+8. **Not done yet:** restarting the statistics from the first changed block (plan §4.5) is left for phase 7, where
+   single-block edits arrive. Until then a changed chain recomputes its statistics whole, and the source proxies,
+   the slowest part, are reused. The interface does not yet show the migration notes.
+
+Tests: `scene_checks.py` (T-MIGRATE, T-PREVIEW in process and through `/api/render`, T-COVER, T-STALE, T-WORKER,
+half-scale export, approximate view, newest statistics win). `lrgb_workflow.py` passes unchanged in what it checks:
+its 24 tests now reach the project through the schema-4 accessors, call `render_edits`, and write the version-1
+and version-2 files in their real shape (they relabelled a schema-3 file before); no tolerance changed. All ten
+suites pass; 102 tests.
+
 ### Changes made 2026-10-05 to `lunar_finish.py`
 
 1. **Wavelets match PixInsight.** `wavelet_gain()` applies the measured law; sharpening runs on each
@@ -553,6 +605,7 @@ setting) instead of the old, unintended gain 4. Divide any pre-2026-10-05 bias b
 | LuckyStackWorker PSF port and dump | `/Volumes/Astro/moontest_04102026/lsw_psf/` |
 | 4 October test build | `/Volumes/Astro/moontest_04102026/` |
 | Chain engine against the old code on real data (terminator patch, movie frames) | `/Volumes/Astro/moontest_04102026/phase2/` |
+| The application on chains: renders and timings against the old renderer | `/Volumes/Astro/moontest_04102026/phase4/` |
 | LunarAtlas reference checkout | `/Volumes/Astro/LunarAtlas` |
 
 Driving the applications headless: PixInsight with

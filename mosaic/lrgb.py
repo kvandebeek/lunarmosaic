@@ -1,25 +1,38 @@
-"""Scale-aware registration and bounded-memory, non-destructive Lab LRGB rendering.
+"""Scale-aware registration and bounded-memory, non-destructive LRGB rendering on chains.
 
-Coordinates are pixel centres in native mosaic pixels. Match maps RGB -> L;
-the view rotation applies to both. Previews never replace the native TIFFs.
+Coordinates are pixel centres in native mosaic pixels. The luminance mosaic's grid is the canvas: the chains run
+there (plan D13), and the view — rotation, mirror, coverage crop, export scale — is applied to their result. The
+match maps RGB -> L until phase 6 places colour per panel. Previews never replace the native TIFFs.
 """
+from collections import OrderedDict
 from pathlib import Path
+import hashlib
 import json
 import math
 import os
 import struct
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor
 import zlib
 import cv2
 import numpy as np
 import tifffile
-from filters import layer_noise
-import sharpen
+import blocks
+import chain
+from project import edits_to_chain
 
 # Single source of truth for the JPEG ceiling: the server enforces it in Scene.export(),
 # and /api/export-preview publishes it so the UI can warn before the click.
 JPEG_MAX_SIDE = 65000
 JPEG_MAX_PIXELS = 80_000_000
+VIEWS = ('composite', 'luminance', 'colour', 'overlay', 'coverage', 'errors')
+STAGE_OF = dict(composite='final', luminance='luminance', colour='colour', overlay='overlay', coverage='final',
+                errors='final')
+TILE = 768            # output px per side of a view tile at full scale: bounds the canvas region a tile renders
+TILE_WORKERS = max(1, min(4, os.cpu_count() or 1))     # tiles rendered at once: memory grows with each
+STATS_KEEP = 4        # statistics kept per scene (each holds proxy-sized maps)
+_TILES = ThreadPoolExecutor(TILE_WORKERS, thread_name_prefix='tile')
 
 
 class Image:
@@ -78,22 +91,52 @@ class Image:
         a = self.pixels(self.raw[::step, ::step])
         return a, np.diag([step, step, 1.0])
 
-    def warp(self, matrix, size, processor=None, margin=0):
+    def signature(self):
+        """What identifies these pixels for a cache: path, size and modification time."""
+        st = os.stat(self.path)
+        return [str(self.path), st.st_size, st.st_mtime_ns]
+
+    def proxy(self, q):
+        """The 1/q INTER_AREA proxy of whole q × q blocks (pixel i covers [q·i, q·(i+1))), read in strips so a
+        gigapixel mosaic is never held whole."""
+        H, W = self.h // q * q, self.w // q * q
+        out = np.empty((H // q, W // q, 3), np.float32)
+        band = max(q, (1 << 22) // max(1, W) * q)
+        for y in range(0, H, band):
+            a = self.pixels(self.raw[y:min(H, y + band), :W])
+            out[y // q:(y + len(a)) // q] = cv2.resize(a, (W // q, len(a) // q), interpolation=cv2.INTER_AREA)
+        return out
+
+    def sample(self, gx, gy, decimate=1):
+        """Bilinear samples at source coordinates gx, gy (float64 maps, source px) and their coverage (1 inside the
+        image, fading across its edge pixel), reading only the region the samples need, every `decimate`-th
+        pixel. Coordinates are quantised to OpenCV's 1/32 interpolation grid before the region's origin is
+        subtracted, so a sample never depends on which tile asked for it."""
+        d = decimate
+        qx, qy = np.rint(gx/d*32)/32, np.rint(gy/d*32)/32
+        x0, y0 = max(0, int(np.floor(qx.min()))-1), max(0, int(np.floor(qy.min()))-1)
+        x1, y1 = min(-(-self.w//d), int(np.floor(qx.max()))+2), min(-(-self.h//d), int(np.floor(qy.max()))+2)
+        if x1 <= x0 or y1 <= y0:
+            return np.zeros(gx.shape+(3,), np.float32), np.zeros(gx.shape, np.float32)
+        a = self.pixels(self.raw[y0*d:y1*d:d, x0*d:x1*d:d])
+        mx, my = (qx-x0).astype(np.float32), (qy-y0).astype(np.float32)
+        return (cv2.remap(a, mx, my, cv2.INTER_LINEAR),
+                cv2.remap(np.ones(a.shape[:2], np.float32), mx, my, cv2.INTER_LINEAR))
+
+    def warp(self, matrix, size):
         """Sample only the source region needed by this output strip."""
         w, h = size
         inv = np.linalg.inv(matrix)
         corners = np.array([[0, 0, 1], [w-1, 0, 1], [0, h-1, 1], [w-1, h-1, 1]]) @ inv.T
-        x0, y0 = np.floor(corners[:, :2].min(axis=0) - 3-margin).astype(int)
-        x1, y1 = np.ceil(corners[:, :2].max(axis=0) + 4+margin).astype(int)
+        x0, y0 = np.floor(corners[:, :2].min(axis=0) - 3).astype(int)
+        x1, y1 = np.ceil(corners[:, :2].max(axis=0) + 4).astype(int)
         x0, y0, x1, y1 = max(0, x0), max(0, y0), min(self.w, x1), min(self.h, y1)
         if x1 <= x0 or y1 <= y0:
             return np.zeros((h, w, 3), np.float32), np.zeros((h, w), np.float32)
-        step = 1 if processor else max(1, int(1/max(np.hypot(matrix[0, 0], matrix[1, 0]), 1e-9)))
+        step = max(1, int(1/max(np.hypot(matrix[0, 0], matrix[1, 0]), 1e-9)))
         # Every tile samples the same native grid; a tile-specific phase creates seams.
         x0, y0 = x0//step*step, y0//step*step
         a = self.pixels(self.raw[y0:y1:step, x0:x1:step])
-        if processor:
-            a = processor(a)
         # Explicit inverse maps avoid warpAffine's tile-origin-dependent fixed-point
         # rounding, which can change the last covered pixel at rotated boundaries.
         xx, yy = np.arange(w, dtype=np.float64)[None, :], np.arange(h, dtype=np.float64)[:, None]
@@ -209,29 +252,99 @@ def largest_rectangle(mask):
     return best
 
 
+
+
+class LuminanceSource:
+    """The luminance canvas as a chain source (chain.py's protocol): the L mosaic's own grid, its coverage from
+    the builder's labels."""
+
+    def __init__(self, scene):
+        self.scene, self.h, self.w = scene, scene.l.h, scene.l.w
+
+    def read(self, y0, x0, h, w, step=1):
+        im = self.scene.l
+        rgb = im.pixels(im.raw[y0:y0+(h-1)*step+1:step, x0:x0+(w-1)*step+1:step])
+        X, Y = np.meshgrid(x0+step*np.arange(w, dtype=np.float64), y0+step*np.arange(h, dtype=np.float64))
+        return rgb, self.scene.coverage('L', X, Y)
+
+    def proxy(self, q):
+        return self.scene.l.proxy(q)
+
+    def proxy_coverage(self, q):
+        c = (q-1)/2
+        X, Y = np.meshgrid(c+q*np.arange(self.w//q, dtype=np.float64), c+q*np.arange(self.h//q, dtype=np.float64))
+        return self.scene.coverage('L', X, Y)
+
+
+class MatchedColour:
+    """The colour mosaic on the luminance canvas through the legacy global match, until phase 6 places colour per
+    panel. Each canvas pixel's colour-mosaic coordinate comes from one inverse of the match, so tiles, strips and
+    the proxy all sample the colour mosaic alike."""
+
+    def __init__(self, scene):
+        self.scene, self.h, self.w = scene, scene.l.h, scene.l.w
+        self._proxy = (None, None)
+
+    def at(self, X, Y, step=1):
+        """Colour and coverage at canvas columns X and rows Y (1-D, canvas px)."""
+        sc = self.scene
+        inv = np.linalg.inv(sc.match)
+        X, Y = np.asarray(X, np.float64)[None, :], np.asarray(Y, np.float64)[:, None]
+        gx = inv[0, 0]*X+inv[0, 1]*Y+inv[0, 2]
+        gy = inv[1, 0]*X+inv[1, 1]*Y+inv[1, 2]
+        scale = float(np.hypot(sc.match[0, 0], sc.match[1, 0]))      # canvas px per colour px
+        rgb, cover = sc.rgb.sample(gx, gy, max(1, int(step/scale)))
+        label = sc.coverage('RGB', gx, gy)
+        return rgb, cover if label is None else cover*label
+
+    def read(self, y0, x0, h, w, step=1):
+        return self.at(x0+step*np.arange(w), y0+step*np.arange(h), step)
+
+    def proxies(self, q):
+        key = (q, self.scene.match.tobytes())
+        if self._proxy[0] != key:
+            c, rows = (q-1)/2, self.h//q
+            X = c+q*np.arange(self.w//q)
+            parts = [self.at(X, c+q*np.arange(y, min(rows, y+256)), q) for y in range(0, rows, 256)]
+            self._proxy = (key, (np.concatenate([a for a, _ in parts]), np.concatenate([b for _, b in parts])))
+        return self._proxy[1]
+
+    def proxy(self, q):
+        return self.proxies(q)[0]
+
+    def proxy_coverage(self, q):
+        return self.proxies(q)[1]
+
+
 class Scene:
+    """The project's mosaics, rendered through a chain document: statistics once per chain on the whole canvas
+    (D1), the chains on the canvas grid, the view applied afterwards (D13)."""
+
     def __init__(self, project, match=None):
         self.project = project
-        self.l = Image(project.path(project.data['sets']['L']['mosaic']))
-        s = project.data['sets']['RGB']
+        self.l = Image(project.path(project.set('L')['mosaic']))
+        s = project.set('RGB')
         self.rgb = Image(project.path(s['mosaic'])) if s.get('mosaic') else None
-        match = match if match is not None else project.data.get('match')
+        match = match if match is not None else project.match
         self.match_meta = match
         self.match = np.array(match['matrix'], float) if match and self.rgb else None
-        self.labels = {}
-        self.noise = {}
-        self.sample_light = None
-        self.sharp_stats = {}
+        self.labels, self.covered = {}, {}
         for key in ('L', 'RGB'):
-            mosaic = project.data['sets'][key].get('mosaic')
+            mosaic = project.set(key).get('mosaic')
             if mosaic:
                 label = project.path(str(Path(mosaic).with_suffix('')) + '_labels.png')
                 if label.exists():
                     self.labels[key] = cv2.imread(str(label), cv2.IMREAD_UNCHANGED)
+                    self.covered[key] = (self.labels[key] != 65535).astype(np.float32)
+        self.lum, self.col = LuminanceSource(self), MatchedColour(self)
+        self._cond = threading.Condition()
+        self._stats, self._running = OrderedDict(), set()
+        self._base, self._base_busy = (None, None), False
 
-    def layer(self, key, matrix, size, processor=None, margin=0):
+    def layer(self, key, matrix, size):
+        """One mosaic resampled through `matrix` with its coverage (alignment checks and the common crop)."""
         source = self.l if key == 'L' else self.rgb
-        rgb, mask = source.warp(matrix, size, processor, margin)
+        rgb, mask = source.warp(matrix, size)
         label = self.labels.get(key)
         if label is not None:
             # The builder crops the label grid with the output TIFF.
@@ -244,36 +357,93 @@ class Scene:
             mask *= covered
         return rgb, mask
 
-    def noise_levels(self, kernel):
-        if self.sample_light is None:
-            proxy, spacing = self.l.preview(512)
-            gray = cv2.cvtColor(proxy, cv2.COLOR_RGB2GRAY)
-            yy, xx = np.nonzero(gray > max(.02, float(np.percentile(gray, 30))))
-            cx = int(np.median(xx)*spacing[0, 0]) if len(xx) else self.l.w//2
-            cy = int(np.median(yy)*spacing[1, 1]) if len(yy) else self.l.h//2
-            x, y = max(0, min(self.l.w-512, cx-256)), max(0, min(self.l.h-512, cy-256))
-            crop = self.l.pixels(self.l.raw[y:y+512, x:x+512])
-            self.sample_light = sharpen.lightness(crop)
-        if kernel not in self.noise:
-            self.noise[kernel] = layer_noise(self.sample_light, 4, kernel)
-        return self.noise[kernel]
+    def coverage(self, key, gx, gy):
+        """The builder's label coverage of mosaic `key` at its pixel coordinates gx, gy (None without labels)."""
+        label = self.covered.get(key)
+        if label is None:
+            return None
+        image = self.l if key == 'L' else self.rgb
+        mx = (np.rint(gx*(label.shape[1]/image.w)*32)/32).astype(np.float32)
+        my = (np.rint(gy*(label.shape[0]/image.h)*32)/32).astype(np.float32)
+        return cv2.remap(label, mx, my, cv2.INTER_LINEAR)
+
+    def colour_source(self):
+        return self.col if self.match is not None else None
+
+    # ---------------------------------------------------------------- statistics (D1; plan §4.5)
+
+    def signature(self):
+        return [self.l.signature(), self.rgb.signature() if self.rgb else None,
+                None if self.match is None else self.match.tolist()]
+
+    def base(self):
+        """chain.Base for the current sources (the proxies), kept while the mosaics and the match stay the same."""
+        key = json.dumps(self.signature())
+        with self._cond:
+            while self._base_busy:
+                self._cond.wait()
+            if self._base[0] == key:
+                return self._base[1]
+            self._base_busy = True
+        base = None
+        try:
+            base = chain.Base(self.lum, self.colour_source())
+        finally:
+            with self._cond:
+                self._base_busy = False
+                if base is not None:
+                    self._base = (key, base)
+                self._cond.notify_all()
+        return base
+
+    def stats_key(self, doc):
+        return hashlib.sha1(json.dumps([self.signature(), doc['protect_space'], doc['chains']],
+                                       sort_keys=True).encode()).hexdigest()
+
+    def stats(self, doc, check=None):
+        """chain.prepare for this chain document, computed once: a caller asking while another computes the same
+        statistics waits for them. check() may raise chain.Stale to abandon the computation (the worker)."""
+        doc = chain.normalised(doc)
+        key = self.stats_key(doc)
+        with self._cond:
+            while key not in self._stats:
+                if key not in self._running:
+                    self._running.add(key)
+                    break
+                self._cond.wait()
+            else:
+                self._stats.move_to_end(key)
+                return self._stats[key]
+        result = None
+        try:
+            result = chain.prepare(self.lum, doc, colour=self.colour_source(), check=check, base=self.base())
+        finally:
+            with self._cond:
+                self._running.discard(key)
+                if result is not None:
+                    self._stats[key] = result
+                    while len(self._stats) > STATS_KEEP:
+                        self._stats.popitem(last=False)
+                self._cond.notify_all()
+        return result
 
     def sharpening_stats(self, edits):
-        if not sharpen.enabled(edits):
+        """The old interface's sharpening readout: how much the detail blocks raised the fine-detail amplitude on
+        the probe (the product of their readouts)."""
+        doc = chain.normalised(edits_to_chain(edits)[0])
+        detail = [e for path in ('luminance', 'final') for e in chain.enabled(doc, path) if blocks.BLOCKS[e['type']].detail]
+        if not detail:
             return dict(enabled=False, fine_variation=1.)
-        keys = ('wavelets', 'wavelet_kernel', 'wavelet_denoise', 'usm_amount', 'usm_radius', 'usm_threshold')
-        key = json.dumps({k: edits[k] for k in keys}, sort_keys=True)
-        if key not in self.sharp_stats:
-            noise = self.noise_levels(edits['wavelet_kernel'])
-            processed = sharpen.apply(self.sample_light, edits, noise)
-            ratio = sharpen.fine_variation(self.sample_light, processed, edits['wavelet_kernel'])
-            if len(self.sharp_stats) >= 8:
-                self.sharp_stats.clear()
-            self.sharp_stats[key] = dict(enabled=True, fine_variation=ratio,
-                                        sample_width=self.sample_light.shape[1], sample_height=self.sample_light.shape[0])
-        return self.sharp_stats[key]
+        st = self.stats(doc)
+        ratio = float(np.prod([st.readouts.get(e['id'], {}).get('fine_detail', 1.0) for e in detail]))
+        return dict(enabled=True, fine_variation=ratio, sample_width=st.probe[3], sample_height=st.probe[2])
+
+    # ---------------------------------------------------------------- the view (D13)
 
     def geometry(self, edits, factor=1):
+        """The view matrix (canvas px -> output px), the output size and the common-coverage box. Output pixel j at
+        export scale f covers view pixels [j/f, (j+1)/f): its centre is view pixel (j + 1/2)/f − 1/2, so an export
+        at 1/2 or 1/4 is exactly a reduced full-scale export."""
         w, h = self.l.w, self.l.h
         r = cv2.getRotationMatrix2D(((w-1)/2, (h-1)/2), edits['rotation'], 1)
         if edits['mirror']:
@@ -303,10 +473,111 @@ class Scene:
             bbox = tuple(int(math.ceil(v/scale)) if i < 2 else int(math.floor(v/scale)) for i, v in enumerate(box))
             m[:2, 2] -= bbox[:2]
             w, h = bbox[2]-bbox[0], bbox[3]-bbox[1]
-        m = np.diag([factor, factor, 1.]) @ m
+        m = np.array([[factor, 0, -(1-factor)/2], [0, factor, -(1-factor)/2], [0, 0, 1.]]) @ m
         return m, (max(1, round(w*factor)), max(1, round(h*factor))), bbox
 
-    def render(self, matrix, size, edits, view='composite', precise=True):
+    def render_view(self, matrix, size, doc, view='composite', precise=True, stats=None, origin=(0, 0)):
+        """Output pixels [ox, ox + w) × [oy, oy + h) of the output that `matrix` (canvas px -> output px) defines.
+
+        The chains run on the canvas grid and their result is resampled into the output with Lanczos-4. An exact
+        render (precise) below scale 1 samples an r-times finer grid, r = ⌈1/scale⌉, and reduces it with INTER_AREA;
+        an approximate one (the zoomed-out workspace) runs the chains on every step-th canvas pixel instead, at
+        scale 1/step. Every pixel is mapped by the one inverse of `matrix` and quantised to OpenCV's 1/32 grid in
+        canvas coordinates, so a render in tiles equals a whole one."""
+        if view not in VIEWS:
+            raise ValueError('Unknown view.')
+        stage = 'final' if view == 'overlay' and self.match is None else STAGE_OF[view]
+        if stage != 'overlay':
+            doc = chain.normalised(doc)
+            stats = stats or self.stats(doc)
+        w, h = size
+        s = float(np.hypot(matrix[0, 0], matrix[1, 0]))
+        r = max(1, math.ceil(1/s-1e-9)) if precise and s < 1 else 1
+        step = 1 if precise else max(1, int(1/s))
+        A = np.array([[r, 0, (r-1)/2], [0, r, (r-1)/2], [0, 0, 1.]])
+        inv = np.linalg.inv(A @ matrix)
+        ox, oy = origin
+        rgb, lm, cm = np.empty((h, w, 3), np.float32), np.empty((h, w), np.float32), np.empty((h, w), np.float32)
+        t = max(1, TILE//r)
+
+        def tile(ty, tx):
+            th, tw = min(t, h-ty), min(t, w-tx)
+            U = r*(ox+tx)+np.arange(r*tw, dtype=np.float64)
+            V = r*(oy+ty)+np.arange(r*th, dtype=np.float64)
+            parts = self._tile(inv, U, V, step, stage, stats, doc)
+            if r > 1:
+                parts = [cv2.resize(v, (tw, th), interpolation=cv2.INTER_AREA) for v in parts]
+            rgb[ty:ty+th, tx:tx+tw], lm[ty:ty+th, tx:tx+tw], cm[ty:ty+th, tx:tx+tw] = parts
+        jobs = [(ty, tx) for ty in range(0, h, t) for tx in range(0, w, t)]
+        # tiles are independent (T-TILE): render them side by side; a tile's own work is mostly single-threaded
+        if len(jobs) == 1 or threading.current_thread().name.startswith('tile'):
+            for job in jobs:
+                tile(*job)
+        else:
+            for f in [_TILES.submit(tile, *job) for job in jobs]:
+                f.result()
+        result = rgb
+        if view == 'coverage':
+            result = result*.35
+            result[(lm > .5) & (cm <= .5)] = (.9, .53, .28)
+            result[(lm > .5) & (cm > .5)] += (.05, .23, .19)
+        elif view == 'errors':
+            # Measured points only; all other areas stay dim/unknown.
+            result *= .3
+            to_output = np.array([[1, 0, -ox], [0, 1, -oy], [0, 0, 1.]]) @ matrix
+            if self.match_meta:
+                diagnostics = self.match_meta.get('diagnostics')
+                if diagnostics:
+                    points = [(s['x'], s['y'], s['residual']) for s in diagnostics['samples'] if s['state'] == 'measured']
+                    for sample in diagnostics['samples']:
+                        if sample['state'] == 'unknown':
+                            p = to_output @ [sample['x'], sample['y'], 1]
+                            cv2.circle(result, tuple(np.round(p[:2]).astype(int)), 5, (.5, .53, .58), 1)
+                else:
+                    points = self.match_meta['points']
+                for x, y, residual in points:
+                    p = to_output @ [x, y, 1]
+                    colour = (.22, .8, .65) if residual < 1 else (.96, .65, .26) if residual < 3 else (.94, .35, .33)
+                    cv2.circle(result, tuple(np.round(p[:2]).astype(int)), 5, colour, -1)
+        valid = lm > .5
+        missing = float(np.mean(cm[valid] <= .5))*100 if valid.any() else 100
+        return result, dict(missing_colour=missing, matched=self.match is not None)
+
+    def _tile(self, inv, U, V, step, stage, stats, doc):
+        """One tile of output grid U × V: its canvas region rendered and resampled; returns (rgb × L coverage, L
+        coverage, colour coverage) on that grid — multiplied before any reduction, so a reduced render is the mean
+        of the full one."""
+        X = inv[0, 0]*U[None, :]+inv[0, 1]*V[:, None]+inv[0, 2]
+        Y = inv[1, 0]*U[None, :]+inv[1, 1]*V[:, None]+inv[1, 2]
+        gx, gy = np.rint(X/step*32)/32, np.rint(Y/step*32)/32        # in units of the (decimated) canvas grid
+        rows, cols = -(-self.l.h//step), -(-self.l.w//step)
+        # Lanczos-4 reads floor(x) − 3 … floor(x) + 4
+        i0, i1 = max(0, int(np.floor(gy.min()))-3), min(rows, int(np.floor(gy.max()))+5)
+        j0, j1 = max(0, int(np.floor(gx.min()))-3), min(cols, int(np.floor(gx.max()))+5)
+        if i1 <= i0 or j1 <= j0:
+            return np.zeros(gx.shape+(3,), np.float32), np.zeros(gx.shape, np.float32), np.zeros(gx.shape, np.float32)
+        cover = {}
+        img = self._canvas(stage, stats, doc, i0*step, j0*step, i1-i0, j1-j0, step, cover)
+        mx, my = (gx-j0).astype(np.float32), (gy-i0).astype(np.float32)
+        # outside the canvas any value will do: the coverage below is zero there
+        rgb = np.clip(cv2.remap(img, mx, my, cv2.INTER_LANCZOS4, borderMode=cv2.BORDER_REPLICATE), 0, 1)
+        ones = np.ones(img.shape[:2], np.float32)
+        lm, cm = (cv2.remap(ones if cover[k] is None else cover[k], mx, my, cv2.INTER_LINEAR) for k in ('luminance', 'colour'))
+        return rgb*lm[..., None], lm, cm
+
+    def _canvas(self, stage, stats, doc, y0, x0, h, w, step, cover):
+        if stage == 'overlay':                     # the unprocessed layers: luminance in red, colour in green and blue
+            l, cl = self.lum.read(y0, x0, h, w, step)
+            c, cc = self.col.read(y0, x0, h, w, step)
+            cover.update(luminance=cl, colour=cc)
+            return np.dstack([l[..., 0], c[..., 1], c[..., 2]])
+        return chain.render(self.lum, stats, doc, y0, x0, h, w, colour=self.colour_source(), stage=stage, step=step,
+                            coverage=cover)
+
+    # ---------------------------------------------------------------- the schema-3 calls (phase 4 compatibility layer)
+
+    def visible(self, edits, view):
+        """The old layer switches: (view to render, whether the result is empty)."""
         empty = False
         if view == 'composite':
             if not edits['l_visible']:
@@ -314,82 +585,36 @@ class Scene:
                 view = 'colour'
             elif not edits['rgb_visible']:
                 view = 'luminance'
-        active = sharpen.enabled(edits) and view in ('composite', 'luminance')
-        noise = self.noise_levels(edits['wavelet_kernel']) if active else None
-        processor = (lambda rgb: sharpen.rgb_from_light(sharpen.apply(sharpen.lightness(rgb), edits, noise))) if active and precise else None
-        l, lm = self.layer('L', matrix, size, processor, sharpen.margin(edits) if processor else 0)
-        llab = cv2.cvtColor(l, cv2.COLOR_RGB2LAB)
-        light = llab[..., 0]/100
-        if active and not precise:
-            light = sharpen.apply(light, edits, noise, float(np.hypot(matrix[0, 0], matrix[1, 0])))
-        # A shoulder and an S curve, evaluated on L only.
-        k = edits['highlights']*2
-        if k:
-            light = np.where(light > .5, .5+(light-.5)/(1+k*(light-.5)), light)
-        light = np.clip(light + edits['contrast']*(light-.5)*light*(1-light)*2, 0, 1)
-        lab = np.zeros_like(llab)
-        lab[..., 0] = light*100
-        cm = np.zeros(size[::-1], np.float32)
-        if self.match is not None:
-            rgb, cm = self.layer('RGB', matrix @ self.match, size)
-            clab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB)
-            sigma = edits['smoothing']*float(np.hypot(matrix[0, 0], matrix[1, 0]))
-            chroma = clab[..., 1:]
-            if sigma > .05:
-                weight = cv2.GaussianBlur(cm, (0, 0), sigma)
-                chroma = cv2.GaussianBlur(chroma*cm[..., None], (0, 0), sigma)/np.maximum(weight[..., None], 1e-6)
-            lab[..., 1:] = chroma*(edits['strength']*edits['saturation'])*np.minimum(cm, lm)[..., None]
-            if view == 'colour':
-                lab[..., 0] = clab[..., 0]
-        if view == 'luminance':
-            lab[..., 1:] = 0
-        result = np.clip(cv2.cvtColor(lab, cv2.COLOR_LAB2RGB), 0, 1)
-        result *= lm[..., None]
+        return view, empty
+
+    def render_edits(self, matrix, size, edits, view='composite', precise=True, doc=None, stats=None, origin=(0, 0)):
+        """The schema-3 render: flat adjustments translated into their chain, with the old layer switches. Phase 7
+        removes it with the rest of the compatibility layer."""
+        view, empty = self.visible(edits, view)
+        rgb, info = self.render_view(matrix, size, doc or edits_to_chain(edits)[0], view, precise, stats, origin)
         if empty:
-            result[:] = 0
-        if view == 'overlay' and self.match is not None:
-            result = np.stack([l[..., 0], rgb[..., 1], rgb[..., 2]], axis=-1)
-        elif view == 'coverage':
-            result = result*.35
-            result[(lm > .5) & (cm <= .5)] = (.9, .53, .28)
-            result[(lm > .5) & (cm > .5)] += (.05, .23, .19)
-        elif view == 'errors':
-            # Measured points only; all other areas stay dim/unknown.
-            result *= .3
-            if self.match_meta:
-                diagnostics = self.match_meta.get('diagnostics')
-                if diagnostics:
-                    points = [(s['x'], s['y'], s['residual']) for s in diagnostics['samples'] if s['state'] == 'measured']
-                    for sample in diagnostics['samples']:
-                        if sample['state'] == 'unknown':
-                            p = matrix @ [sample['x'], sample['y'], 1]
-                            cv2.circle(result, tuple(np.round(p[:2]).astype(int)), 5, (.5, .53, .58), 1)
-                else:
-                    points = self.match_meta['points']
-                for x, y, residual in points:
-                    p = matrix @ [x, y, 1]
-                    colour = (.22, .8, .65) if residual < 1 else (.96, .65, .26) if residual < 3 else (.94, .35, .33)
-                    cv2.circle(result, tuple(np.round(p[:2]).astype(int)), 5, colour, -1)
-        valid = lm > .5
-        missing = float(np.mean(cm[valid] <= .5))*100 if valid.any() else 100
-        return result, dict(missing_colour=missing, matched=self.match is not None)
+            rgb[:] = 0
+        return rgb, info
 
     def preview(self, edits, view='composite'):
         matrix, size, _ = self.geometry(edits)
         scale = min(1, 1400/max(size))
         matrix = np.diag([scale, scale, 1]) @ matrix
         small = (max(1, round(size[0]*scale)), max(1, round(size[1]*scale)))
-        rgb, info = self.render(matrix, small, edits, view, precise=False)
+        rgb, info = self.render_edits(matrix, small, edits, view, precise=False)
         info.update(width=size[0], height=size[1], preview_scale=scale)
         info['sharpening'] = self.sharpening_stats(edits)
         return rgb, info
 
-    def export(self, output, edits, factor=1, layer='composite', progress=lambda x: None, cancelled=lambda: False):
+    def export(self, output, edits, factor=1, layer='composite', progress=lambda x: None, cancelled=lambda: False,
+               doc=None, stats=None):
+        """Write the view at export scale `factor` (1, 1/2, 1/4), tile by tile. The chain document and its
+        statistics are fixed when the export starts, so later edits never reach a running export (T-WORKER)."""
         output = Path(output).expanduser().resolve()
         if output.exists():
             raise ValueError('The export file already exists. Choose another name.')
         protected = {Path(p) for key in ('L', 'RGB') for p in self.project.input_paths(key)}
-        protected.update(self.project.path(s['mosaic']) for s in self.project.data['sets'].values() if s.get('mosaic'))
+        protected.update(self.project.path(s['mosaic']) for s in self.project.data['sets'] if s.get('mosaic'))
         if output in protected or output.is_relative_to(self.project.folder / 'derived'):
             raise ValueError('Choose an export outside the built mosaics and source files.')
         if factor not in (1, .5, .25):
@@ -400,6 +625,10 @@ class Scene:
             raise ValueError('Choose TIFF, PNG or JPEG.')
         if suffix in ('.jpg', '.jpeg') and (max(w, h) > JPEG_MAX_SIDE or w*h > JPEG_MAX_PIXELS):
             raise ValueError('This JPEG is too large. Choose a smaller scale or TIFF/PNG.')
+        view, empty = self.visible(edits, layer)
+        doc = chain.normalised(doc or edits_to_chain(edits)[0])
+        if STAGE_OF[view] != 'overlay' and stats is None:
+            stats = self.stats(doc)
         output.parent.mkdir(parents=True, exist_ok=True)
         fd, temp = tempfile.mkstemp(prefix='.'+output.stem+'-', suffix=suffix, dir=output.parent)
         os.close(fd)
@@ -416,29 +645,24 @@ class Scene:
                     png.write(struct.pack('>I', len(payload))+kind+payload+struct.pack('>I', zlib.crc32(kind+payload)))
                 chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 16, 2, 0, 0, 0))
                 compressor = zlib.compressobj(6)
-            halo = math.ceil(edits['smoothing']*factor*4)+3
-            # Keep working arrays bounded by output width rather than image height.
-            rows = max(1, min(256, int(256*factor), 2_000_000//w))
-            tile_width = max(32, min(1024, int(768*factor))) if sharpen.enabled(edits) else 1024
-            for y in range(0, h, rows):
+            # bands of square tiles: a rotated tile's canvas region stays small, memory stays bounded by the width
+            t = max(1, TILE//round(1/factor))
+            for y in range(0, h, t):
                 if cancelled():
                     raise InterruptedError('Export cancelled; no partial image published.')
-                y0, y1 = max(0, y-halo), min(h, y+rows+halo)
-                pixels = np.empty((min(rows, h-y), w, 3), np.uint16)
-                for x in range(0, w, tile_width):
-                    x0, x1 = max(0, x-halo), min(w, x+tile_width+halo)
-                    shift = np.array([[1, 0, -x0], [0, 1, -y0], [0, 0, 1]])
-                    rgb, _ = self.render(shift @ matrix, (x1-x0, y1-y0), edits, layer)
-                    tile = rgb[y-y0:min(rows, h-y)+y-y0, x-x0:min(tile_width, w-x)+x-x0]
-                    pixels[:, x:x+tile.shape[1]] = np.round(tile*65535).astype(np.uint16)
+                n = min(t, h-y)
+                pixels = np.zeros((n, w, 3), np.uint16)
+                if not empty:
+                    rgb, _ = self.render_view(matrix, (w, n), doc, view, True, stats, origin=(0, y))
+                    pixels[:] = np.round(rgb*65535).astype(np.uint16)
                 if suffix in ('.png',):
                     for row in pixels:
                         data = compressor.compress(b'\0'+row.astype('>u2').tobytes())
                         if data:
                             chunk(b'IDAT', data)
                 else:
-                    dest[y:y+len(pixels)] = pixels if dest.dtype == np.uint16 else np.round(pixels.astype(np.float32)/257).astype(np.uint8)
-                progress((y+len(pixels))/h)
+                    dest[y:y+n] = pixels if dest.dtype == np.uint16 else np.round(pixels.astype(np.float32)/257).astype(np.uint8)
+                progress((y+n)/h)
             if suffix == '.png':
                 chunk(b'IDAT', compressor.flush())
                 chunk(b'IEND', b'')

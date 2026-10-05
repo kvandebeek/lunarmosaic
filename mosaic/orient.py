@@ -17,7 +17,7 @@ from project import Project
 
 
 def solve(project, log=print):
-    s = project.data['sets']['L']
+    s = project.set('L')
     if not s.get('mosaic'):
         raise ValueError('Build luminance before finding lunar north.')
     source = Image(project.path(s['mosaic']))

@@ -21,6 +21,7 @@ import webbrowser
 import cv2
 import numpy as np
 import tifffile
+import chain
 from project import Project
 import lrgb
 from lrgb import Image, Scene, register, manual_match
@@ -36,9 +37,55 @@ from atlas_paths import file_lock
 UI = ROOT / 'mosaic' / 'ui'
 
 
+class StatisticsWorker:
+    """The statistics worker of plan §4.5 — a thread, not a job: Application.start() runs one job at a time and
+    refuses others, so a slider moved during an export would fail. The newest request wins; an older computation
+    stops at its next block boundary. Renders wait in Scene.stats() for the statistics they need; an export holds
+    the statistics it started with. The thread ends when there is nothing left to do."""
+
+    def __init__(self):
+        self.cond = threading.Condition()
+        self.generation, self.request, self.thread, self.error = 0, None, None, None
+
+    def submit(self, scene, doc):
+        with self.cond:
+            self.generation += 1
+            self.request = (self.generation, scene, copy.deepcopy(doc))
+            if self.thread is None:
+                self.thread = threading.Thread(target=self.run, daemon=True)
+                self.thread.start()
+
+    def cancel(self):
+        """Abandon pending and running work (closing the project)."""
+        with self.cond:
+            self.generation += 1
+            self.request = None
+
+    def stale(self, generation):
+        if generation != self.generation:
+            raise chain.Stale()
+
+    def run(self):
+        while True:
+            with self.cond:
+                if self.request is None:
+                    self.thread = None
+                    return
+                generation, scene, doc = self.request
+                self.request = None
+            try:
+                scene.stats(doc, check=lambda: self.stale(generation))
+                self.error = None
+            except chain.Stale:
+                pass
+            except Exception as e:      # a render needing these statistics computes them itself and reports this
+                self.error = str(e)
+
+
 class Application:
     def __init__(self, history_path=None):
         self.lock = threading.RLock()
+        self.worker = StatisticsWorker()
         self.project = None
         self.lease = None
         self.scene = None
@@ -50,6 +97,7 @@ class Application:
         self.history_error = None
 
     def close(self):
+        self.worker.cancel()
         self.cancel_job()
         if self.thread:
             self.thread.join(timeout=15)
@@ -86,9 +134,10 @@ class Application:
                 raise
             if self.lease:
                 self.lease.__exit__(None, None, None)
+            self.worker.cancel()
             self.project, self.lease, self.scene = p, lease, None
             for key in ('L', 'RGB'):
-                if p.data['sets'][key].get('mosaic'):
+                if p.set(key).get('mosaic'):
                     self.build_facts(p, key)
             self.cancel.clear()
             self.job = dict(state='idle')
@@ -108,7 +157,7 @@ class Application:
 
     @staticmethod
     def build_facts(project, key):
-        s = project.data['sets'][key]
+        s = project.set(key)
         layout = project.path(str(Path(s['mosaic']).with_suffix(''))+'_layout.json')
         facts = dict(placed=1, contributing=1, not_placed=[]) if len(s['inputs']) == 1 else None
         if layout.is_file():
@@ -172,7 +221,7 @@ class Application:
             raise ValueError('Choose one or more source folders or files.')
         if optics is not None and not isinstance(optics, dict):
             raise ValueError('Invalid optics values.')
-        s = self.project.data['sets'][key]
+        s = self.project.set(key)
         if s.get('mosaic'):
             raise ValueError('This set is already built. Create a new project to replace its panels.')
         paths = [str(self.project.path(x)) if not Path(x).is_absolute() and Path(x).parts[0] == 'sources' else x for x in paths]
@@ -218,7 +267,7 @@ class Application:
         for key in keys:
             if self.cancel.is_set():
                 break
-            s = p.data['sets'][key]
+            s = p.set(key)
             if s.get('mosaic'):
                 continue
             if not s['inputs']:
@@ -286,9 +335,9 @@ class Application:
                     s.update(state='built', mosaic=f'derived/{key}.tif', width=image.w, height=image.h,
                              duration=time.time()-s['started'])
                     self.build_facts(p, key)
-                    p.data['match'] = None
-                    p.data['edits']['coverage'] = 'full'
-                    p.data['edits']['l_visible'] = True
+                    p.match = None
+                    p.data['geometry']['coverage'] = 'full'
+                    p.data['view']['l_visible'] = True
                     self.scene = None
                     p.save()
                 result[key] = 'built'
@@ -307,11 +356,11 @@ class Application:
         p = self.project
         paths = []
         for key in ('L', 'RGB'):
-            s = p.data['sets'][key]
+            s = p.set(key)
             if not s.get('mosaic'):
                 raise ValueError('Build both mosaics before matching.')
             paths.append(p.path(s['mosaic']))
-        optics = [p.data['sets'][k]['optics'] for k in ('L', 'RGB')]
+        optics = [p.set(k)['optics'] for k in ('L', 'RGB')]
         prior = None
         if all(o.get('pixel_um') and o.get('focal_mm') for o in optics):
             sampling = [o['pixel_um']/(o['focal_mm']*o.get('barlow', 1)) for o in optics]
@@ -322,7 +371,7 @@ class Application:
         if self.cancel.is_set():
             raise InterruptedError('Match cancelled; the previous transform was kept.')
         with self.lock:
-            p.data['match'] = result
+            p.match = result
             self.scene = None
             p.save()
         return result
@@ -334,7 +383,7 @@ class Application:
     def check_alignment(self):
         with self.lock:
             p = self.project
-            result = copy.deepcopy(p.data['match'])
+            result = copy.deepcopy(p.match)
             if not result:
                 raise ValueError('Match the colour layer first.')
             scene = Scene(p, match=result)
@@ -342,16 +391,16 @@ class Application:
         if self.cancel.is_set():
             raise InterruptedError('Alignment check cancelled; previous measurements were kept.')
         with self.lock:
-            p.data['match'] = result
+            p.match = result
             self.scene = None
             p.save()
         return result['diagnostics']
 
     def north_up(self):
         p = self.project
-        if not p.data['sets']['L'].get('mosaic'):
+        if not p.set('L').get('mosaic'):
             raise ValueError('Build luminance before finding lunar north.')
-        baseline = (p.data['edits']['rotation'], p.data['edits']['mirror'])
+        baseline = (p.data['geometry']['rotation'], p.data['geometry']['mirror'])
         with tempfile.TemporaryDirectory(prefix='.north-job-', dir=p.folder/'derived') as folder:
             result_path = Path(folder)/'result.json'
             proc = subprocess.Popen([sys.executable, '-u', str(ROOT/'mosaic'/'orient.py'), str(p.folder),
@@ -378,17 +427,16 @@ class Application:
                                       'North-up failed. See the processing log; the previous view was kept.'))
             result = json.loads(result_path.read_text('utf-8'))
         with self.lock:
-            if baseline != (p.data['edits']['rotation'], p.data['edits']['mirror']):
+            if baseline != (p.data['geometry']['rotation'], p.data['geometry']['mirror']):
                 raise ValueError('Rotation changed during the search. Your newer orientation was kept; run north-up again to apply it.')
-            p.data['edits'].update(rotation=result['rotation'], mirror=result['mirror'])
-            Project.validate_edits(p.data['edits'])
+            p.edits = dict(p.edits, rotation=result['rotation'], mirror=result['mirror'])
             p.data['orientation'] = result
             p.save()
         return result
 
     def get_scene(self):
         if self.scene is None:
-            if not self.project or not self.project.data['sets']['L'].get('mosaic'):
+            if not self.project or not self.project.set('L').get('mosaic'):
                 raise ValueError('Build the luminance mosaic first.')
             self.scene = Scene(self.project)
         return self.scene
@@ -427,7 +475,7 @@ class Application:
                 with self.lock:
                     p = self.require(dict(id=query.get('id', [''])[0]))
                     options = {key:query[key][0] for key in ('coverage', 'layer', 'factor') if key in query}
-                    edits, layer, factor = self.export_options(p.data['edits'], options)
+                    edits, layer, factor = self.export_options(p.edits, options)
                     scene = self.get_scene()
                 rgb, info = scene.preview(edits, layer)
                 _, (w, height), _ = scene.geometry(edits, factor)
@@ -441,9 +489,9 @@ class Application:
                 with self.lock:
                     self.require(dict(id=query.get('id', [''])[0]))
                     scene = self.get_scene()
-                    edits = copy.deepcopy(self.project.data['edits'])
+                    edits = self.project.edits
                 view = query.get('view', ['composite'])[0]
-                if view not in ('composite', 'luminance', 'colour', 'overlay', 'coverage', 'errors'):
+                if view not in lrgb.VIEWS:
                     raise ValueError('Unknown view.')
                 rgb, info = scene.preview(edits, view)
                 ok, png = cv2.imencode('.png', np.round(rgb[..., ::-1]*255).astype(np.uint8))
@@ -451,24 +499,50 @@ class Application:
             elif path == '/api/geometry':
                 with self.lock:
                     self.require(dict(id=query.get('id', [''])[0]))
-                    _, info = self.get_scene().preview(copy.deepcopy(self.project.data['edits']))
+                    _, info = self.get_scene().preview(self.project.edits)
                     h.json(info)
             elif path == '/api/viewport':
                 with self.lock:
                     self.require(dict(id=query.get('id', [''])[0]))
                     scene = self.get_scene()
-                    edits = copy.deepcopy(self.project.data['edits'])
+                    edits = self.project.edits
                 x, y, scale = [float(query.get(k, ['0'])[0]) for k in ('x', 'y', 'scale')]
                 w, height = [int(query.get(k, ['0'])[0]) for k in ('w', 'h')]
                 if not all(np.isfinite(v) for v in (x, y, scale)) or not .001 <= scale <= 8 or not 1 <= w <= 4096 or not 1 <= height <= 4096 or w*height > 6_000_000:
                     raise ValueError('Invalid viewport.')
                 view = query.get('view', ['composite'])[0]
-                if view not in ('composite', 'luminance', 'colour', 'overlay', 'coverage', 'errors'):
+                if view not in lrgb.VIEWS:
                     raise ValueError('Unknown view.')
                 matrix, _, _ = scene.geometry(edits)
                 transform = np.array([[scale, 0, -x], [0, scale, -y], [0, 0, 1]]) @ matrix
-                rgb, _ = scene.render(transform, (w, height), edits, view, precise=scale >= .75)
+                rgb, _ = scene.render_edits(transform, (w, height), edits, view, precise=scale >= .75)
                 _, png = cv2.imencode('.png', np.round(rgb[..., ::-1]*255).astype(np.uint8))
+                h.reply(png.tobytes(), 'image/png')
+            elif path == '/api/render':
+                # plan §4.7: a region of the oriented full view (view px, before the coverage crop) at full
+                # scale, exact — what a preview rectangle shows; 16-bit PNG by default
+                with self.lock:
+                    p = self.require(dict(id=query.get('id', [''])[0]))
+                    scene = self.get_scene()
+                    edits, doc = p.edits, p.chain_doc()
+                stage = query.get('stage', ['final'])[0]
+                depth = query.get('depth', ['16'])[0]
+                if stage not in chain.STAGES or depth not in ('8', '16'):
+                    raise ValueError('Choose stage final, luminance or colour, and depth 8 or 16.')
+                if 'preview' in query:
+                    box = next((v for v in doc['previews'] if v['id'] == query['preview'][0]), None)
+                    if box is None:
+                        raise ValueError('Unknown preview.')
+                    x, y, w, height = (int(box[k]) for k in ('x', 'y', 'w', 'h'))
+                else:
+                    x, y, w, height = (int(query.get(k, ['0'])[0]) for k in ('x', 'y', 'w', 'h'))
+                if not 1 <= w <= 4096 or not 1 <= height <= 4096 or w*height > 8_000_000:
+                    raise ValueError('Invalid render region.')
+                matrix, _, _ = scene.geometry(dict(edits, coverage='full'))
+                rgb, _ = scene.render_view(matrix, (w, height), doc, dict(final='composite').get(stage, stage),
+                                           origin=(x, y))
+                top = 65535 if depth == '16' else 255
+                _, png = cv2.imencode('.png', np.round(rgb[..., ::-1]*top).astype(np.uint16 if depth == '16' else np.uint8))
                 h.reply(png.tobytes(), 'image/png')
             elif path in ('/api/native-preview', '/api/layer-thumbnail'):
                 with self.lock:
@@ -476,7 +550,7 @@ class Application:
                     key = query.get('set', [''])[0]
                     if key not in ('L', 'RGB'):
                         raise ValueError('Unknown panel set.')
-                    source = self.project.data['sets'][key].get('mosaic')
+                    source = self.project.set(key).get('mosaic')
                     if not source:
                         raise ValueError('Build this layer first.')
                     image = Image(self.project.path(source))
@@ -501,7 +575,7 @@ class Application:
                     p = self.require(dict(id=q.get('id', [''])[0]))
                     self.idle()
                     key = q.get('set', [''])[0]
-                    if key not in ('L', 'RGB') or p.data['sets'][key].get('mosaic'):
+                    if key not in ('L', 'RGB') or p.set(key).get('mosaic'):
                         raise ValueError('Choose an unbuilt panel set.')
                     name = Path(q.get('name', ['panel'])[0]).name
                     if Path(name).suffix.lower().lstrip('.') not in mc.DEFAULT_EXTS:
@@ -521,7 +595,7 @@ class Application:
                                     raise ValueError('Upload interrupted.')
                                 f.write(data)
                                 left -= len(data)
-                        self.inputs(key, p.data['sets'][key]['inputs']+[str(target)])
+                        self.inputs(key, p.set(key)['inputs']+[str(target)])
                     except BaseException:
                         target.unlink(missing_ok=True)
                         raise
@@ -541,6 +615,7 @@ class Application:
                     self.require(o)
                     self.idle()
                     self.lease.__exit__(None, None, None)
+                    self.worker.cancel()
                     self.project = self.lease = self.scene = None
                     self.job = dict(state='idle')
                 elif path in ('/api/new', '/api/open'):
@@ -563,9 +638,9 @@ class Application:
                     elif path == '/api/manual':
                         self.idle()
                         for key in ('L', 'RGB'):
-                            if not p.data['sets'][key].get('mosaic'):
+                            if not p.set(key).get('mosaic'):
                                 raise ValueError('Build both mosaics first.')
-                        p.data['match'] = manual_match(o['rgb_points'], o['l_points'])
+                        p.match = manual_match(o['rgb_points'], o['l_points'])
                         self.scene = None
                         p.save()
                         self.start('Check manual match', self.check_alignment)
@@ -574,13 +649,16 @@ class Application:
                             h.json(dict(error='The project changed. Refresh and try again.', conflict=True), 409)
                             return True
                         Project.validate_edits(o['edits'])
-                        self.get_scene().geometry(o['edits'])
-                        p.data['edits'] = o['edits']
+                        scene = self.get_scene()
+                        scene.geometry(o['edits'])
+                        p.edits = o['edits']
                         p.save()
+                        # statistics for the new chain start now, before the preview asks for them
+                        self.worker.submit(scene, p.chain_doc())
                     elif path == '/api/cancel':
                         self.cancel_job()
                     elif path == '/api/export':
-                        scene, edits = self.get_scene(), copy.deepcopy(p.data['edits'])
+                        scene, edits = self.get_scene(), p.edits
                         edits, layer, factor = self.export_options(edits, o)
                         self.start('Export image', lambda: scene.export(o['output'], edits, factor, layer,
                             progress=lambda f: self.update_job(progress=f, title=f'Writing image · {f:.0%}'),

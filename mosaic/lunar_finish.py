@@ -441,7 +441,7 @@ def movie(args, pv, small_st, facts, groups, stats, doc, source, info):
             closeup_last = False
         elif t == "contrast":
             steps.append(("A touch of contrast", "a gentle S-curve on brightness", tone(small_st[prev]), tone(small_st[last]),
-                          [("contrast", f"+{p['strength'] * 100:.0f} % at midtones"), ("pivot", f"L {sb['m'] * 100:.0f}"),
+                          [("contrast", f"{p['strength'] * 100:+.0f} % at midtones"), ("pivot", f"L {sb['m'] * 100:.0f}"),
                            ("black · white", "kept"), ("spread", f"{facts[prev]['std']:.2f} → {facts[last]['std']:.2f}")]))
             closeup_last = False
         else:

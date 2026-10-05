@@ -4,6 +4,11 @@ A chain document holds three ordered block lists — luminance, colour, final �
 rectangles. `prepare()` computes every global statistic once, on a 1/4 proxy of the whole image and on a
 full-resolution probe crop (D1); `render()` then processes any region with a halo and gives the same pixels
 whether the image is done whole, in strips or in tiles.
+
+Sources are on the canvas grid: `read(y0, x0, h, w, step)` gives a region's float32 RGB and its coverage (None
+when it is complete), `proxy(q)` the 1/q INTER_AREA proxy, and optionally `proxy_coverage(q)`. The luminance and
+colour streams each have a source; lunar_finish feeds one image to both (SAME, D9), and with no colour source the
+result is grey.
 """
 import copy
 import json
@@ -21,6 +26,12 @@ import mosaic_common as mc
 FORMAT, VERSION = 'lunarmosaic-chain', 1
 STATS_Q = 4           # as lunar_finish: changing it moved the highlights/contrast tone 120–324 ADU rms (plan D1)
 PATHS = B.PATHS
+STAGES = ('final', 'luminance', 'colour')
+SAME = 'same'         # the colour stream reads the luminance source: one image feeds both streams (D9)
+
+
+class Stale(Exception):
+    """Raised by a statistics pass's check() when a newer request has replaced it (plan §4.5)."""
 
 
 # ---------------------------------------------------------------- the document
@@ -148,14 +159,37 @@ class ArraySource:
         self.img, self.h, self.w = img, img.shape[0], img.shape[1]
         self.scale = 65535.0 if img.dtype == np.uint16 else 255.0
 
+    def read(self, y0, x0, h, w, step=1):
+        return self.img[y0:y0 + h * step:step, x0:x0 + w * step:step].astype(np.float32) / self.scale, None
+
     def region(self, y0, x0, h, w):
-        return self.img[y0:y0 + h, x0:x0 + w].astype(np.float32) / self.scale
+        return self.read(y0, x0, h, w)[0]
 
     def proxy(self, q):
         src = mc.proxy_crop(self.img, q)
         if src.dtype == np.uint8:                 # 8-bit: average in float, not in 1/255 steps
             src = src.astype(np.float32)
         return cv2.resize(src, (self.w // q, self.h // q), interpolation=cv2.INTER_AREA).astype(np.float32) / self.scale
+
+
+class Base:
+    """What the statistics take from the sources alone, whatever the chain: both proxies, their coverage, and the
+    proxy-grid maps of D7 from the luminance proxy. A caller that keeps its sources keeps this too: reading a
+    gigapixel canvas for its proxy is the slowest part of a statistics pass."""
+
+    def __init__(self, source, colour=SAME, q=STATS_Q):
+        if min(source.h, source.w) < 4 * q:
+            raise ValueError(f'The image is too small ({source.w} × {source.h} px).')
+        self.q, self.same = q, colour is SAME
+        cov = lambda src: src.proxy_coverage(q) if hasattr(src, 'proxy_coverage') else None
+        self.lum, self.cov_l = source.proxy(q), cov(source)
+        if self.same:
+            self.col, self.cov_c = self.lum, self.cov_l
+        elif colour is None:
+            self.col = self.cov_c = None
+        else:
+            self.col, self.cov_c = colour.proxy(q), cov(colour)
+        self.disk, self.filled, self.limb, self.space = ms.disk_and_space(self.lum, q)
 
 
 class Stats:
@@ -166,22 +200,25 @@ class Stats:
         # proxy grid: eroded lit disk, hole-filled disk, limb distance (canvas px), space region
         self.disk, self.filled, self.limb, self.space = disk, filled, limb, space
         self.blocks, self.readouts = {}, {}
+        self.probe = None                    # (y0, x0, h, w) of the full-resolution probe, when there was one
 
-    def at(self, m, y0, x0, h, w):
-        """A proxy-grid map sampled for a canvas region (pixel-centre mapping of whole q × q blocks)."""
+    def at(self, m, y0, x0, h, w, step=1):
+        """A proxy-grid map sampled for a canvas region whose pixels are `step` canvas px apart (pixel-centre
+        mapping of whole q × q blocks)."""
         q = self.q
-        X, Y = np.meshgrid(np.arange(x0, x0 + w, dtype=np.float32), np.arange(y0, y0 + h, dtype=np.float32))
+        X, Y = np.meshgrid(np.arange(w, dtype=np.float32) * step + x0, np.arange(h, dtype=np.float32) * step + y0)
         mx, my = (X - (q - 1) / 2) / q, (Y - (q - 1) / 2) / q
         return cv2.remap(m, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
 
 
 class Ctx:
-    """Where a block is working: a canvas region at scale 1, or the whole proxy grid (scale 1/q)."""
+    """Where a block is working: a canvas region at scale 1, a decimated one (every step-th canvas px: scale
+    1/step, a zoomed-out view), or the whole proxy grid (scale 1/q). Pixel parameters are multiplied by scale."""
 
-    def __init__(self, stats, y0=0, x0=0, h=0, w=0, proxy=False):
-        self.stats, self.y0, self.x0, self.h, self.w, self.proxy = stats, y0, x0, h, w, proxy
+    def __init__(self, stats, y0=0, x0=0, h=0, w=0, proxy=False, step=1):
+        self.stats, self.y0, self.x0, self.h, self.w, self.proxy, self.step = stats, y0, x0, h, w, proxy, step
         self.q = stats.q
-        self.scale = 1.0 / stats.q if proxy else 1.0
+        self.scale = 1.0 / stats.q if proxy else 1.0 / step
         self._cache = {}
 
     def at(self, m):
@@ -189,7 +226,7 @@ class Ctx:
             return m
         key = id(m)
         if key not in self._cache:
-            self._cache[key] = self.stats.at(m, self.y0, self.x0, self.h, self.w)
+            self._cache[key] = self.stats.at(m, self.y0, self.x0, self.h, self.w, self.step)
         return self._cache[key]
 
 
@@ -215,44 +252,59 @@ class Protection:
         if not on:
             return
         s = ctx.at(ctx.stats.space)
-        # only dark pixels can be protected (L* 2 is a stored value near 0.03): measure L* there only
+        # only dark pixels can be protected (L* 2 is a stored value near 0.03): L* matters there only
         cand = (s > 0) | (inp.max(axis=-1) < 0.05)
-        if not cand.any():
+        n = int(np.count_nonzero(cand))
+        if not n:
             return
-        L = np.full(s.shape, 100.0, np.float32)
-        L[cand] = F.lstar(inp[cand])
+        if n > cand.size // 4:              # mostly sky: one pass over the region beats gathering the candidates
+            L = np.where(cand, F.lstar(inp), np.float32(100))
+        else:
+            L = np.full(s.shape, 100.0, np.float32)
+            L[cand] = F.lstar(inp[cand])
         p = s * (1 - np.clip((L - 0.5) / 1.0, 0, 1))
         idx = p > 0
         if idx.any():
             self.idx, self.p = idx, p.astype(np.float32)
-            self._w, self._sel = self.p[idx][:, None], inp[idx]
+            # most of space is restored whole (p = 1): a masked copy; only its soft edge needs the blend
+            self._full = (self.p >= 1)[..., None]
+            self._soft = np.flatnonzero(idx & (self.p < 1))
+            self._w, self._sel = self.p.ravel()[self._soft][:, None], inp.reshape(-1, 3)[self._soft]
         c = shadow_gate(L)
-        cidx = (c > 0) & (p < 1)
-        if cidx.any():
-            self.cidx, self._c = cidx, c[cidx][:, None]
-            self._ab = F.rgb_to_lab(inp[cidx])[:, 1:]
+        cidx = np.flatnonzero((c > 0) & (p < 1))
+        if len(cidx):
+            self.cidx, self._c = cidx, c.ravel()[cidx][:, None]
+            self._ab = F.rgb_to_lab(inp.reshape(-1, 3)[cidx])[:, 1:]
+
+    @staticmethod
+    def _flat(x):
+        if not x.flags.c_contiguous:        # a reshape would copy, and the writes below would be lost
+            raise ValueError('Protection works on contiguous arrays.')
+        return x.reshape(-1, 3)
 
     def apply(self, x):
         """After every block: space goes back to the input."""
         if self.idx is not None:
-            x[self.idx] = self._w * self._sel + (1 - self._w) * x[self.idx]
+            np.copyto(x, self.inp, where=self._full)
+            xf = self._flat(x)
+            xf[self._soft] = self._w * self._sel + (1 - self._w) * xf[self._soft]
         return x
 
     def finish(self, x):
         """At the chain's end: near-black pixels keep their input's colour, whatever their lightness; then space."""
         if self.cidx is not None:
-            lab = F.rgb_to_lab(x[self.cidx])
+            xf = self._flat(x)
+            lab = F.rgb_to_lab(xf[self.cidx])
             lab[:, 1:] = self._c * self._ab + (1 - self._c) * lab[:, 1:]
-            x[self.cidx] = np.clip(F.lab_to_rgb(lab), 0, 1)
+            xf[self.cidx] = np.clip(F.lab_to_rgb(lab), 0, 1)
         return self.apply(x)
 
 
 def merge(lum, col, cov_l=None, cov_c=None, strength=1.0):
     """D11: CIE Lab lightness from the luminance result, a*b* from the colour result × strength × coverage. With no
     colour the luminance result comes out grey."""
-    ll = F.rgb_to_lab(lum)
-    out = np.empty_like(ll)
-    out[..., 0] = ll[..., 0]
+    out = np.empty(lum.shape, np.float32)
+    out[..., 0] = F.lstar(lum)                       # identical to rgb_to_lab's L*, at a third of the cost
     if col is None:
         out[..., 1:] = 0
     else:
@@ -326,48 +378,68 @@ def run_chain(entries, x, ctx, *, protect=None, snapshot=None, hook=None, skip_d
     return x
 
 
-def prepare(source, doc, q=STATS_Q):
+def _streams(lum_e, col_e, xl, xc, cl, cc, ctx, on, strength, same, **kw):
+    """D11: each stream through its own chain, then lightness from the luminance and colour from the colour stream.
+    With one source and no stream blocks (lunar_finish's default chain) there is nothing to merge."""
+    if same and not (lum_e or col_e):
+        return xl
+    # an empty chain returns its input untouched: no protection to measure
+    lum = run_chain(lum_e, xl, ctx, protect=Protection(xl, ctx, on and bool(lum_e)), **kw)
+    col = None if xc is None else run_chain(col_e, xc, ctx, protect=Protection(xc, ctx, on and bool(col_e)), **kw)
+    return merge(lum, col, cl, cc, strength)
+
+
+def _colour(source, colour, xl, cl, *region):
+    """The colour stream's pixels and coverage for a region the luminance source gave as (xl, cl)."""
+    if colour is SAME:
+        return xl, cl
+    return (None, None) if colour is None else colour.read(*region)
+
+
+def prepare(source, doc, q=STATS_Q, colour=SAME, check=None, base=None):
     """D1: every global statistic, once — on the proxy with the detail blocks skipped, then on the probe (a
-    full-resolution crop at the disk's centre of mass) for the detail blocks' own statistics and the readouts."""
+    full-resolution crop at the disk's centre of mass) for the detail blocks' own statistics and the readouts.
+    check() is called before every block; it raises Stale to abandon the pass. `base` (Base) may be reused."""
     H, W = source.h, source.w
-    if min(H, W) < 4 * q:
-        raise ValueError(f'The image is too small ({W} × {H} px).')
-    proxy = source.proxy(q)
-    disk, filled, limb, space = ms.disk_and_space(proxy, q)
-    stats = Stats(q, H, W, disk, filled, limb, space)
+    base = base or Base(source, colour, q)
+    stats = Stats(q, H, W, base.disk, base.filled, base.limb, base.space)
+    disk = base.disk
     lum_e, col_e, fin_e = (enabled(doc, p) for p in PATHS)
     strength = doc['chains'].get('merge', {}).get('strength', 1.0)
     on = doc.get('protect_space', True)
 
-    def passes(x, ctx, hook, skip_detail, snapshot=None):
-        if lum_e or col_e:
-            lum = run_chain(lum_e, x, ctx, protect=Protection(x, ctx, on), hook=hook, skip_detail=skip_detail, snapshot=snapshot)
-            col = run_chain(col_e, x, ctx, protect=Protection(x, ctx, on), hook=hook, skip_detail=skip_detail, snapshot=snapshot)
-            x = merge(lum, col, strength=strength)
-        return run_chain(fin_e, x, ctx, protect=Protection(x, ctx, on), hook=hook, skip_detail=skip_detail, snapshot=snapshot)
+    def passes(xl, xc, cl, cc, ctx, hook, skip_detail, snapshot=None):
+        kw = dict(hook=hook, skip_detail=skip_detail, snapshot=snapshot)
+        x = _streams(lum_e, col_e, xl, xc, cl, cc, ctx, on, strength, base.same, **kw)
+        return run_chain(fin_e, x, ctx, protect=Protection(x, ctx, on and bool(fin_e)), **kw)
 
     before = {}                                       # detail blocks' probe input, for their readouts
 
     def collect(kind, ctx):
         def hook(e, blk, x, dom):
+            if check:
+                check()
             stats.blocks.setdefault(e['id'], {}).update(blk.prepare(kind, x, e['params'], ctx))
             if kind == 'probe' and blk.detail:
                 before[e['id']] = np.clip(F.lab_to_rgb(x), 0, 1) if dom == 'lab' else x.copy()
         return hook
 
     ctxp = Ctx(stats, proxy=True)
-    passes(proxy, ctxp, collect('proxy', ctxp), True)
+    passes(base.lum, base.col, base.cov_l, base.cov_c, ctxp, collect('proxy', ctxp), True)
     if any(B.BLOCKS[e['type']].detail for e in lum_e + col_e + fin_e):
         ys, xs = np.nonzero(disk)
         cy, cx, R = int(ys.mean() * q), int(xs.mean() * q), min(1024, H // 2, W // 2)
         y0, x0 = int(np.clip(cy - R, 0, H - 2 * R)), int(np.clip(cx - R, 0, W - 2 * R))
         ctx = Ctx(stats, y0, x0, 2 * R, 2 * R)
+        stats.probe = (y0, x0, 2 * R, 2 * R)
 
         def readout(e, arr, dom, step):
             if e['id'] in before and step is None:
                 after = np.clip(F.lab_to_rgb(arr), 0, 1) if dom == 'lab' else arr
                 stats.readouts.setdefault(e['id'], {})['fine_detail'] = ms.fine_detail(before.pop(e['id']), after)
-        passes(source.region(y0, x0, 2 * R, 2 * R), ctx, collect('probe', ctx), False, snapshot=readout)
+        xl, cl = source.read(y0, x0, 2 * R, 2 * R)
+        xc, cc = _colour(source, colour, xl, cl, y0, x0, 2 * R, 2 * R)
+        passes(xl, xc, cl, cc, ctx, collect('probe', ctx), False, snapshot=readout)
     for path in PATHS:
         for i, e in enumerate(enabled(doc, path)):
             if e['type'] == 'deconvolution' and i:
@@ -376,22 +448,40 @@ def prepare(source, doc, q=STATS_Q):
     return stats
 
 
-def render(source, stats, doc, y0, x0, h, w, snapshot=None):
-    """The finished pixels of a canvas region, computed with a halo. snapshot(label, entry, array, domain,
-    protection, step) receives the region's core: 'input' first, then every final-chain block's output."""
+def render(source, stats, doc, y0, x0, h, w, snapshot=None, colour=SAME, stage='final', step=1, coverage=None):
+    """The finished pixels of a canvas region, computed with a halo: rows y0, y0 + step, … (h of them), columns
+    likewise, so step > 1 is a decimated, approximate render with every block at scale 1/step. `stage` stops after
+    the luminance chain (shown grey) or the colour chain. `coverage`, a dict, receives the core's luminance and
+    colour coverage. snapshot(label, entry, array, domain, protection, step) receives the region's core: 'input'
+    first, then every final-chain block's output."""
+    if stage not in STAGES:
+        raise ValueError(f'Unknown stage {stage!r}.')
     m = margin(doc)
-    ya, yb = max(0, y0 - m), min(source.h, y0 + h + m)
-    xa, xb = max(0, x0 - m), min(source.w, x0 + w + m)
-    x = source.region(ya, xa, yb - ya, xb - xa)
-    ctx = Ctx(stats, ya, xa, yb - ya, xb - xa)
+    if step > 1:
+        m = -(-m // step) + 3                         # the kernels shrink with the image (plan §4.5)
+    H, W = source.h, source.w
+    top, left = min(m, y0 // step), min(m, x0 // step)
+    bottom, right = min(m, (H - 1 - y0) // step - h + 1), min(m, (W - 1 - x0) // step - w + 1)
+    ya, xa, hh, ww = y0 - top * step, x0 - left * step, h + top + bottom, w + left + right
+    core = (slice(top, top + h), slice(left, left + w))
+    xl, cl = source.read(ya, xa, hh, ww, step)
+    xc, cc = _colour(source, colour, xl, cl, ya, xa, hh, ww, step)
+    if coverage is not None:
+        coverage['luminance'] = None if cl is None else cl[core]
+        coverage['colour'] = (np.zeros((h, w), np.float32) if xc is None else
+                              None if cc is None else cc[core])
+    ctx = Ctx(stats, ya, xa, hh, ww, step=step)
     on = doc.get('protect_space', True)
     lum_e, col_e, fin_e = (enabled(doc, p) for p in PATHS)
-    if lum_e or col_e:
-        lum = run_chain(lum_e, x, ctx, protect=Protection(x, ctx, on))
-        col = run_chain(col_e, x, ctx, protect=Protection(x, ctx, on))
-        x = merge(lum, col, strength=doc['chains'].get('merge', {}).get('strength', 1.0))
-    prot = Protection(x, ctx, on)
-    core = (slice(y0 - ya, y0 - ya + h), slice(x0 - xa, x0 - xa + w))
+    if stage == 'colour' and xc is None:
+        stage = 'luminance'                           # nothing to show but the grey luminance
+    if stage == 'luminance':
+        return merge(run_chain(lum_e, xl, ctx, protect=Protection(xl, ctx, on and bool(lum_e))), None)[core]
+    if stage == 'colour':
+        return run_chain(col_e, xc, ctx, protect=Protection(xc, ctx, on and bool(col_e)))[core]
+    x = _streams(lum_e, col_e, xl, xc, cl, cc, ctx, on, doc['chains'].get('merge', {}).get('strength', 1.0),
+                 colour is SAME)
+    prot = Protection(x, ctx, on and bool(fin_e or snapshot))
     snap = None
     if snapshot:
         pc = None if prot.p is None else prot.p[core]

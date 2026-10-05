@@ -158,7 +158,7 @@ Dependency direction (no cycles): `filters` ← `deconv`, `measurements` ← `bl
 | colour-canvas px | `derived/colour_canvas.tif`; `canvas = K · colour canvas` (D8). Colour-canvas pixel *i* covers canvas pixels [k·i, k·(i+1)); its centre is at canvas k·i + (k−1)/2 — the convention of `mc.proxy_to_full`. Build it by warping each colour panel with K⁻¹·T (T: panel → canvas), never by resizing a canvas-scale image under another convention: at k = 6 a mismatch is 2.5 px |
 | stats px | canvas px reduced by `stats_q` = 4 (D1) |
 | view px | the canvas after rotation and mirror (the "oriented full view"); **previews live here** |
-| output px | view px after the coverage crop and the export scale |
+| output px | view px after the coverage crop and the export scale. Output pixel *j* at scale *f* covers view pixels [j/f, (j+1)/f) (centre (j + ½)/f − ½): only then is a ½ or ¼ export the averaged full export (phase 4 changed this; the old code sampled the view at j/f) |
 
 Rendering a preview: map its corners to canvas px, take the bounding box plus the chain halo plus 4 px for
 Lanczos, run the chains there, then rotate the result into the preview rectangle. When rotation or mirror
@@ -249,7 +249,9 @@ cutoff, the deconvolution dering threshold) see everything upstream.
 Rules: `apply()` is a pure function of (pixels, params, stats, scale). The cache key is a SHA-1 of: source
 mosaics (path, size, mtime), colour-placement revision, and the chain prefix up to that block — never
 rotation, coverage or export scale. Per block, keep the stats **and** the proxy/probe pixels after that block,
-so a parameter change restarts from that block; drop the oldest prefixes beyond a 2 GB budget.
+so a parameter change restarts from that block; drop the oldest prefixes beyond a 2 GB budget. *(As built in
+phase 4: whole-chain statistics are cached — four per scene — and the source proxies, the slowest part, are
+reused across chains; the restart from the first changed block is phase 7, item 9.)*
 
 **The statistics worker** is not a job: `Application.start()` allows one job at a time and refuses others, so a
 slider move during an export would fail. Use one background thread with a generation counter; the newest
@@ -257,7 +259,8 @@ request wins and stale computations stop at the next block boundary. Renders wai
 an export captures the generation it started with and finishes on it.
 
 Viewport renders below 75 % zoom are approximate, as today: the canvas is decimated first and every block runs
-with `scale` = the zoom (detail blocks with scaled kernels, as `sharpen.apply` does now). At 75 % and above, and
+with `scale` = the zoom (detail blocks with scaled kernels, as `sharpen.apply` did; deconvolution is left out,
+a PSF having no meaning on decimated pixels). At 75 % and above, and
 for every preview and export, rendering is exact. The fit view says "approximate — open a preview at 1:1 to
 judge detail".
 
@@ -287,7 +290,11 @@ judge detail".
 }
 ```
 
-Migration 1/2/3 → 4 is in Appendix D. `Project.open` migrates in memory and saves once, as today.
+Migration 1/2/3 → 4 is in Appendix D. `Project.open` migrates in memory and saves once; since phase 4 it saves
+only when opening changed something, so a second open is a no-op. *(As built in phase 4: until phase 5 the
+build state — `state`, `mosaic`, `error`, … — stays in each set, as in schema 3, and the stream objects
+`luminance` and `colour` hold only what exists: `colour.legacy_match`. The flat schema-3 adjustments the
+interface still edits are kept as `legacy_edits` until phase 7.)*
 
 ### 4.7 HTTP API (additions and replacements)
 
@@ -540,6 +547,17 @@ compatibility layer.
   (the inverse of BUGS.md bug 11).
 - T-WORKER: moving a slider during an export neither fails nor changes the export.
 
+**As built (2026-10-05).** All five checks are in `scene_checks.py`, with three more (half-scale export =
+averaged full export within 0.75 ADU; approximate view; newest statistics win). `lrgb_workflow.py` changed only
+in how it reaches the project — `p.set(key)` for `p.data['sets'][key]`, `p.match`, `p.edits`,
+`scene.render_edits` for `scene.render` — and its two migration tests now write real version-1 and version-2
+files (they relabelled a schema-3 file before); no tolerance changed. Departures, recorded in DESIGN.md §9:
+Appendix D's highlights and contrast (luminance chain, proportional strength), the contrast block's negative
+range, build state kept per set until phase 5, the prefix restart deferred to phase 7 (item 9), and the
+export-scale pixel grid of §4.2. Rendering costs, as measured on the 4 October mosaic: 0.73 s for a 1:1
+viewport, 9 s for a full export (the old renderer: 0.11 s and 3.3 s, sharpening one channel with table-based
+Lab).
+
 ### Phase 5 — Mixed-scale luminance
 
 **Goal.** Several luminance sets at different scales build into one mosaic on the finest grid, the best-resolving
@@ -688,8 +706,12 @@ carry.
 6. **Save.** Debounced autosave with revision checks; on any failure the pending edit is **kept** and re-sent,
    and the user is told (BUGS.md bug 11 is the anti-pattern).
 7. **Export** as today (TIFF/PNG 16-bit, JPEG bounded, layers separately), plus chain export/import.
-8. Remove the compatibility layer, `/api/edits` and `Scene.render_edits`; update `lrgb_workflow.py` to the new
-   API.
+8. Remove the compatibility layer, `/api/edits`, `Scene.render_edits` and `legacy_edits`; update
+   `lrgb_workflow.py` to the new API. Show the migration `notes` once.
+9. Restart statistics from the first changed block (§4.5): per block, keep the proxy and probe pixels after it,
+   keyed by the chain prefix, within the 2 GB budget. Phase 4 recomputes a changed chain's statistics whole
+   (1.9 s on the 4 October mosaic with sharpening; far longer with a 100-iteration deconvolution, which the
+   single-block edits of this interface make common).
 
 **Accept.** A browser journey on synthetic sets: import two luminance sets at different scales and one colour
 set → build → placement chip shows measured numbers → add wavelets, white balance and curves → draw a preview →
@@ -756,7 +778,7 @@ are identity in the statistics pass (D1).
 | `levels` | `black` levels 0–254 (0), `white` 1–255 (255, > black), `gamma` 0.10–9.99 (1.00), `out_black` 0–255 (0), `out_white` 0–255 (255) | L C F | `ob + (ow−ob)·clip((x−b)/(w−b), 0, 1)^(1/γ)`, all levels ÷ 255, same on each channel | 0 | — | — |
 | `curves` | `points` [[in, out]…] in levels, 2–16 points, `in` strictly increasing | L C F | natural cubic spline through the points, flat beyond the end points, clamped 0–255, applied by a 65 536-entry LUT on each channel | 0 | histogram (256 bins, channel mean) of the block input on the proxy, for display | — |
 | `highlights` | `strength` 0–0.49 (0.30), `knee_percentile` 0.1–99.8 (90) | L F | `lunar_finish`, on L*/100: `base = A·L + B`, `L1 = shoulder(base, knee, top, h) + (L − base)` | 0 | A, B on the proxy (`guided_self`, radius `max(4, 64 // 4)` = 16 proxy px = 64 canvas px, eps 0.03²); knee and top = the knee-percentile and 99.99th percentile of base on the disk | share of disk above the knee |
-| `contrast` | `strength` 0–0.49 (0.12) | L F | `lunar_finish` `s_curve(L, m, c)` on L*/100 | 0 | m = median L*/100 of the disk | brightness spread before → after |
+| `contrast` | `strength` −0.49–0.49 (0.12); negative flattens the midtones (phase 4: the old application's contrast went both ways; monotonic for strength > −1) | L F | `lunar_finish` `s_curve(L, m, c)` on L*/100 | 0 | m = median L*/100 of the disk | brightness spread before → after |
 | `wavelets` (detail) | `biases` 1–8 values, −1…15 (all 0), `kernel` linear or b3 (linear), `denoise` k per layer ≥ 0 (0) | L C F | per channel on stored values: `filters.wavelet_sharpen` with gain `1 + 10b` (b ≥ 0) and `1/(1 + 10·abs(b))` (b < 0) | `wavelet_margin(n)` | layer noise from the full-resolution probe (channel mean) | gains; suggested layer (cutoff); fine-detail amplitude |
 | `unsharp_mask` (detail) | `amount` % 0–500 (0), `radius` px 0.1–250 (1.0), `threshold` levels 0–255 (0), `mode` rgb or luminosity (rgb) | L C F | `I + (A/100)·sign(d)·max(abs(d) − T/255, 0)`, `d = I − G_σ*I`, `σ = r·max(1, 1.080 − 0.0339 ln r)` (measured at r = 1, 2, 4; extrapolated elsewhere); rgb = each channel, luminosity = on L*/100 | `ceil(4σ) + 1` | — | fine-detail amplitude |
 | `gaussian_blur` (detail) | `sigma` px 0–50 (1.0) | L C F | `cv2.GaussianBlur`, BORDER_REFLECT_101; on the colour path it acts as chroma denoise | `ceil(4σ) + 1` | — | — |
@@ -876,14 +898,14 @@ settle before γ and τ are trusted.
 
 | Schema 3 | Schema 4 |
 |---|---|
-| `sets.L` | set `{id: "L", stream: "luminance"}`; its `mosaic` → `luminance.mosaic` |
+| `sets.L` | set `{id: "L", stream: "luminance"}`; its `mosaic` → `luminance.mosaic` (phase 5; until then it stays in the set) |
 | `sets.RGB` | set `{id: "RGB", stream: "colour"}`; until phase 6 the old global `match` is kept as `colour.legacy_match` and used by the renderer |
 | `edits.rotation`, `mirror`, `coverage` | `geometry` |
 | `edits.l_visible`, `rgb_visible` | `view` |
 | `wavelets` [a1…a4] (gain 1 + a, on CIE L*) | luminance-chain `wavelets` with biases `a/10` — same gains; the domain changes from L* to stored values (note) |
 | `wavelet_kernel`, `wavelet_denoise` | same block: `kernel`, `denoise` = [value]×4 |
 | `usm_amount` 0–1, `usm_radius`, `usm_threshold` (fraction, hard cut-off) | luminance-chain `unsharp_mask`, amount × 100 %, radius unchanged, threshold × 255 levels, `mode: luminosity` — threshold becomes soft and σ follows the measured law (note) |
-| `highlights`, `contrast` (the app's own curves) | final-chain `highlights` / `contrast` at their defaults, enabled iff the old value was non-zero (note: different curves) |
+| `highlights`, `contrast` (the app's own curves) | luminance-chain `highlights` / `contrast`, present iff the old value is non-zero, strength 0.49 × value (note: different curves). *As built in phase 4, replacing "final chain at the block defaults": the interface keeps editing these sliders through this translation until phase 7, so a slider must keep moving the result, and the old renderer applied both before the merge. The old contrast's midtone slope was 1 + value/2 and the block's is 1 + strength; negative contrast maps to the block's negative strength (Appendix A)* |
 | `smoothing` σ px | colour-chain `gaussian_blur` with that σ, if > 0 (note: it blurred only a*b* before, weighted by coverage; now it blurs the colour image, whose lightness the merge discards) |
 | `saturation`, `strength` | colour-chain `saturation` `{factor: saturation, passes: 1, lunar_hue: false}` (the old one was uniform) if ≠ 1; `merge.strength = strength` |
 

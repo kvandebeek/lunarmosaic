@@ -42,6 +42,9 @@ class RecentProjects:
                 folder = Path(entry['folder'])
                 p = json.loads((folder/'project.json').read_text('utf-8'))
                 sets = p['sets']
+                if isinstance(sets, list):                 # schema 4: a list of sets; the match moved to colour
+                    sets = {s['id']: s for s in sets}
+                    p['match'] = (p.get('colour') or {}).get('legacy_match')
                 item.update(name=str(p['name']), available=True,
                             panels={k:len(sets[k]['inputs']) for k in ('L', 'RGB')})
                 built = {}

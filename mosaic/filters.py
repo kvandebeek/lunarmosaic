@@ -4,6 +4,10 @@ Moved verbatim from lunar_finish.py in phase 1 of mosaic/docs/IMPLEMENTATION_PLA
 PixInsight's measured bias law, Photoshop's measured Unsharp Mask, the guided filter, the highlight shoulder,
 the S-curve and the lunar hue weighting. Pure functions on float32 arrays; no I/O, no settings.
 """
+import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
 import cv2
 import numpy as np
 
@@ -42,15 +46,34 @@ KERNELS = {"linear": np.array([1, 2, 1], np.float32) / 4,          # PixInsight 
            "b3": np.array([1, 4, 6, 4, 1], np.float32) / 16}     # PixInsight "B3 Spline (5)"
 
 
-def atrous(L, n, kernel="linear"):
+def _spread_kernel(k0, spacing):
+    """k0's taps `spacing` px apart, a fractional spacing splitting each tap linearly between its two neighbours:
+    the à-trous kernel of a decimated image (plan §4.5, approximate zoomed-out views)."""
+    positions = (np.arange(len(k0)) - (len(k0) - 1) / 2) * spacing
+    radius = max(1, int(np.ceil(np.abs(positions).max())))
+    ker = np.zeros(2 * radius + 1, np.float32)
+    for pos, weight in zip(positions, k0):
+        lo = int(np.floor(pos))
+        frac = pos - lo
+        ker[lo + radius] += weight * (1 - frac)
+        if frac:
+            ker[lo + radius + 1] += weight * frac
+    return ker
+
+
+def atrous(L, n, kernel="linear", scale=1.0):
     """À-trous wavelet layers (finest first, dyadic scales 1, 2, 4, … px) and the smooth residual;
-    L = sum(layers) + residual."""
+    L = sum(layers) + residual. At scale ≠ 1 (an image decimated by 1/scale) the kernels shrink alike, so a layer
+    keeps its size in the original pixels — an approximation, as the finest layers fall below one pixel."""
     k0 = KERNELS[kernel]
     layers, c = [], L.astype(np.float32)
     for k in range(n):
         s = 2 ** k
-        ker = np.zeros((len(k0) - 1) * s + 1, np.float32)
-        ker[::s] = k0
+        if scale == 1:
+            ker = np.zeros((len(k0) - 1) * s + 1, np.float32)
+            ker[::s] = k0
+        else:
+            ker = _spread_kernel(k0, s * scale)
         c2 = cv2.sepFilter2D(c, -1, ker, ker, borderType=cv2.BORDER_REFLECT)
         layers.append(c - c2)
         c = c2
@@ -67,12 +90,12 @@ def wavelet_gain(bias):
     return 1 + 10 * bias if bias >= 0 else 1 / (1 + 10 * -bias)
 
 
-def wavelet_sharpen(L, biases, noise, denoise, kernel="linear", gains=None):
+def wavelet_sharpen(L, biases, noise, denoise, kernel="linear", gains=None, scale=1.0):
     """Layer k is multiplied by wavelet_gain(biases[k]), or by gains[k] when the gains are given directly. With
     denoise[k] > 0 the part of each coefficient within denoise[k] × noise[k] keeps weight 1, so the grain is not
     amplified."""
     gains = [wavelet_gain(b) for b in biases] if gains is None else gains
-    layers, out = atrous(L, len(gains), kernel)
+    layers, out = atrous(L, len(gains), kernel, scale)
     for w, g, sd, d in zip(layers, gains, noise, denoise):
         t = d * sd
         core = np.sign(w) * np.maximum(np.abs(w) - t, 0) if t > 0 else w
@@ -86,10 +109,10 @@ def usm_sigma(radius):
     return radius * max(1.0, 1.080 - 0.0339 * np.log(radius))
 
 
-def unsharp(x, amount, radius, threshold):
+def unsharp(x, amount, radius, threshold, scale=1.0):
     """Photoshop's Unsharp Mask on one channel (amount as a fraction, threshold in 0–255 levels): the threshold is
-    subtracted from the difference, not used as a cut-off."""
-    d = x - cv2.GaussianBlur(x.astype(np.float32), (0, 0), usm_sigma(radius))
+    subtracted from the difference, not used as a cut-off. `scale` < 1 shrinks the Gaussian for a decimated image."""
+    d = x - cv2.GaussianBlur(x.astype(np.float32), (0, 0), max(usm_sigma(radius) * scale, 1e-3))
     return x + amount * np.sign(d) * np.maximum(np.abs(d) - threshold / 255.0, 0)
 
 
@@ -127,7 +150,28 @@ _RGB2XYZ = np.array([[0.412453, 0.357580, 0.180423],
 _WHITE = np.array([0.950456, 1.0, 1.088754])
 _TO_T = _RGB2XYZ / _WHITE[:, None]                     # linear RGB -> (X/Xn, Y, Z/Zn)
 _FROM_T = np.linalg.inv(_TO_T)
-_CHUNK = 1 << 20                                         # pixels per float64 pass: ~150 MB peak at most
+_CHUNK = 1 << 16                                         # pixels per float64 pass, one thread each
+_POOL, _POOL_LOCK = None, threading.Lock()
+
+
+def _chunks(fn, flat, out):
+    """out[i] = fn(flat[i] as float64), chunk by chunk, on a shared thread pool (numpy releases the GIL in its
+    loops: 6× faster on 10 cores). Every element sees the same operations whatever the chunking, so the result is
+    bit-identical to one pass."""
+    global _POOL
+    starts = range(0, len(flat), _CHUNK)
+
+    def one(i):
+        out[i:i + _CHUNK] = fn(flat[i:i + _CHUNK].astype(np.float64))
+    if len(starts) < 2:
+        for i in starts:
+            one(i)
+        return out
+    with _POOL_LOCK:
+        if _POOL is None:
+            _POOL = ThreadPoolExecutor(max(1, min(16, os.cpu_count() or 1)), thread_name_prefix='lab')
+    list(_POOL.map(one, starts))
+    return out
 
 
 def _per_chunk(fn, a):
@@ -136,10 +180,7 @@ def _per_chunk(fn, a):
     being the float32 Lab stored in between (greys, lunar colours, near-black: under 0.004 ADU)."""
     a = np.asarray(a)
     flat = a.reshape(-1, 3)
-    out = np.empty(flat.shape, np.float32)
-    for i in range(0, len(flat), _CHUNK):
-        out[i:i + _CHUNK] = fn(flat[i:i + _CHUNK].astype(np.float64))
-    return out.reshape(a.shape)
+    return _chunks(fn, flat, np.empty(flat.shape, np.float32)).reshape(a.shape)
 
 
 def _to_lab(v):
@@ -166,10 +207,7 @@ def lstar(rgb):
     """CIE L* alone, identical to rgb_to_lab's, for (..., 3) stored RGB: cheaper when a* and b* are not needed."""
     a = np.asarray(rgb)
     flat = a.reshape(-1, 3)
-    out = np.empty(len(flat), np.float32)
-    for i in range(0, len(flat), _CHUNK):
-        out[i:i + _CHUNK] = _lstar(flat[i:i + _CHUNK].astype(np.float64))
-    return out.reshape(a.shape[:-1])
+    return _chunks(_lstar, flat, np.empty(len(flat), np.float32)).reshape(a.shape[:-1])
 
 
 def rgb_to_lab(rgb):
