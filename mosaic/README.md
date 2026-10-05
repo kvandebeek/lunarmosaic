@@ -12,6 +12,7 @@ every step. Developed and measured on the 2026-09-25 full Moon (101 panels, Appl
 | [`docs/DESIGN.md`](docs/DESIGN.md) | **the design record**: what the application is meant to be, the measured behaviour each filter must match (PixInsight, Photoshop, LuckyStackWorker), open questions and implementation status |
 | [`docs/interface-proposal.html`](docs/interface-proposal.html) | the screen mockups that illustrate `DESIGN.md`; open it from disk in a browser |
 | [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md) | the phased plan for building `DESIGN.md`: target architecture, schema, API, block specifications and the acceptance tests for each phase |
+| [`docs/LRGB.md`](docs/LRGB.md) | the LRGB application (`lunarmosaic.py`): workflow, project format, commands, limits |
 | [`docs/COMMANDS.md`](docs/COMMANDS.md) | **every command with all options and defaults** (generated from `--help`; refresh with `python3 tools/update_docs.py`) |
 
 Every command also explains itself: `python3 <command> --help`.
@@ -38,11 +39,17 @@ Every command also explains itself: `python3 <command> --help`.
   mosaic_common.py           shared I/O, masks, metrics, feature matching [module]
   preview_style.py           the "Observatory" look of window and movies  [module]
   lunar_finish.py            phase 2: optional wavelets, highlights, lunar colour, contrast, optional unsharp mask, north up
+                             (or any chain file, --chain)
+  colour_place.py            colour panels placed one by one onto a luminance mosaic
+  app.py, lrgb.py, project.py, ui/   the LRGB application (run as <LunarMosaic>/lunarmosaic.py)  [modules]
+  chain.py, blocks.py, filters.py, measurements.py, deconv.py   the chain engine and its blocks  [modules]
+  block_catalog.py, alignment.py, orient.py, recent.py          application support  [modules]
   tools/compare_crops.py     same-terrain 100 % crops, blind tests
   tools/edge_falloff.py      detail vs distance from the frame edge (optics/tilt check)
   tools/update_docs.py       regenerates docs/COMMANDS.md
   design_mockups/            the chosen design (Observatory) and its renderer
-  docs/                      DESIGN.md, IMPLEMENTATION_PLAN.md, interface-proposal.html, COMMANDS.md, DESIGN_DECISIONS.md, IMPLEMENTATION_STATUS.md, LRGB.md
+  docs/                      DESIGN.md, IMPLEMENTATION_PLAN.md, interface-proposal.html, COMMANDS.md, LRGB.md;
+                             DESIGN_DECISIONS.md and IMPLEMENTATION_STATUS.md (historical: the 3 October version)
 ```
 
 ## Workflow
@@ -147,6 +154,12 @@ Works in CIE Lab, so brightness and colour are adjusted independently:
    one Lanczos resample (fine detail kept 99.4–99.9 %), cropped to the Moon. In the movie the disk turns about its own
    centre, the short way round; a mirrored image flips over.
 
+**Chains.** Steps 0–4 run as a chain of blocks, the LRGB application's engine. `--write-chain FILE.json` writes the
+chain the flags make; `--chain FILE.json` runs another one instead, such as a chain saved from the application
+(`lunarmosaic.py chain export`), which may hold blocks the flags lack: levels, curves, white balance, sub-pixel RGB
+shift, deconvolution, a limb fade on any block. North-up, the display TIFF and the movie apply to a chain as to the
+flags.
+
 Outputs: `mosaic_finished.tif` (the finished result, same brightness scale as the master) and
 `mosaic_finished_display.tif` (the finished result with **exactly the finishing movie's tone mapping**: white point from
 the master's brightest 0.01 %, gamma 1.1; about 0.03 % of the Moon at full white). `--no-display-tif` skips the latter.
@@ -209,4 +222,6 @@ python3 $S/tools/edge_falloff.py panels/panel_manifest.json --by side           
 
 ## Maintaining the documentation
 
-After changing any option: `python3 tools/update_docs.py` (rewrites `docs/COMMANDS.md`).
+After changing any option: `python3 tools/update_docs.py` (rewrites `docs/COMMANDS.md`, with the built-in defaults
+whatever `.env` says; `--check` only compares, as `tests/cli_checks.py` does). After changing a setting:
+`python3 <LunarMosaic>/tool_settings.py --example` (rewrites `.env.example`).

@@ -2,7 +2,7 @@
 
 The single record of what LunarMosaic is meant to be, what its filters must do, and where the code
 stands. Written 2026-10-05. Supersedes anything older it contradicts; [DESIGN_DECISIONS.md] and
-[IMPLEMENTATION_STATUS.md] describe the 3 October implementation and remain accurate about that.
+[IMPLEMENTATION_STATUS.md] are historical: they describe the 3 October implementation, which phases 0–8 replaced.
 
 Three kinds of statement appear, and they carry different weight:
 
@@ -361,7 +361,9 @@ averaged limb profile measures topography as much as the point-spread function.
    shift-like). Matching channel blur did not change it (0.21 → 0.22), and AutoStakkert's RGB align was
    on, so it is neither blur nor residual misalignment. Leaning: test a per-channel tone match, and a
    chromatic PSF (§5.4).
-3. **Two consequences of mixing scales, both needing a guard rather than a decision.**
+3. **Two consequences of mixing scales, both needing a guard rather than a decision.** *(Both guarded in phase 5:
+   the pair gate expects each pair's declared ratio, and the import page states the canvas, asks above 400 Mpx and
+   offers a smaller one. Kept for the reasoning.)*
    *Code:* `verify_pair` in `mosaic_common.py` rejects any pair whose scale ratio falls outside
    **0.97–1.03**, so mixed-scale panels cannot pair at all today — they would split into disconnected
    groups and fail like the "panels could not be joined" case. The gate has to become a tolerance around
@@ -383,22 +385,19 @@ averaged limb profile measures topography as much as the point-spread function.
 
 A two-layer LRGB application was committed on 3 October 2026 (`0151e68`), built from the first version
 of this design: `lunarmosaic.py`, `mosaic/app.py`, `lrgb.py`, `project.py` (schema 3), `sharpen.py`,
-`mosaic/ui/`, with 24 workflow checks and 13 regressions passing. It predates most of §4–§7 and
-diverges:
+`mosaic/ui/`, with 24 workflow checks and 13 regressions passing. It predated most of §4–§7. Phases 0–8
+(below, 5 October 2026) brought it to this design: chains of blocks, colour placed panel by panel, luminance sets
+of several scales, the measured filter laws and exact Lab, in the engine, the interface and the commands. What
+still differs is left for later (IMPLEMENTATION_PLAN.md, phase 9):
 
-| Area | Implemented 3 October | Decided since |
+| Area | Implemented | Decided |
 |---|---|---|
-| Editing model | Three chains of reorderable blocks, edited in the interface since phase 7; `lunar_finish` runs chains since phase 2 | Three chains of reorderable blocks |
-| Colour placement | Each colour panel registered directly onto the luminance mosaic since phase 6; a project from before keeps its global transform until colour is placed again | Each colour panel registered directly onto the luminance mosaic |
-| Wavelet units | PixInsight biases on stored values since phase 4, edited as biases with the gain beside each since phase 7; an old project's amount becomes bias = amount ÷ 10 (the same gain) | PixInsight biases (gain 1 + 10b) on stored values |
-| Unsharp mask | Photoshop units with the soft threshold and measured radius law since phase 4, edited in those units since phase 7 | Photoshop units, soft threshold, measured radius law |
-| Saturation | The saturation block, lunar-hue weighting on by default, since phase 3; an old project's slider becomes the block without the weighting, so it looks as before | Lunar-hue weighting |
-| Missing | The daylight sky model (§8, open). In the interface since phase 7: white balance, sub-pixel RGB shift, deconvolution, a limb fade on every block, levels, curves, Gaussian blur, named previews | White balance, sub-pixel RGB shift, deconvolution, limb fade, daylight sky model, named previews |
-| Build recovery | Interrupted builds restart | Resume from completed stages |
-| Luminance sets | Several sets at different scales build into one mosaic since phase 5, imported and shown in the interface since phase 7 | Several sets and scales per stream, selected in tiers by measured resolution |
-| Lab conversion | Exact in `lunar_finish` since phase 1 and in the application since phase 4 (OpenCV's float conversion before: round trip off by 66 ADU rms) | Exact float math with the same constants |
+| Daylight sky | The builder subtracts one constant per channel | A smooth sky model per panel with a limb-distance term (§8, still open) |
+| Build recovery | An interrupted build restarts from its first step; completed mosaics are kept | Resume from completed stages |
 
-That table is the migration list for the chain editor.
+Projects from before keep their meaning when opened: schema 1–3 adjustments become an equivalent chain
+(IMPLEMENTATION_PLAN.md, Appendix D), and a project with the old global colour match keeps it until colour is
+placed again.
 
 ### Phase 0 — 2026-10-05
 
@@ -743,6 +742,54 @@ below 150 features (luminance) or four tiles (colour) and were left out, as they
 10 scenarios, including refusals. `scene_checks.py` covers the routes and `chain_checks.py` the prefix cache.
 `run_all.py` now prints each suite's test count. All thirteen suites pass: 111 unittest tests, and the 14
 regressions of `review_regressions.py`.
+
+### Phase 8 — 2026-10-05
+
+The commands catch up with the interface, and the documentation with the code.
+
+1. **`lunarmosaic.py`.** These commands now do what the interface does:
+   - `new` takes repeated `--luminance PATH…` groups and one `--colour PATH…` group. The `--optics
+     PIXEL,FOCAL[,BARLOW[,APERTURE]]` and `--label NAME` after a group belong to it (a custom argparse action).
+     `--colour-both` makes the colour set feed both streams.
+   - `scales` measures the scale of sets without optics, and `scales --confirm` accepts it.
+   - `build` builds the luminance and places the colour. It takes the canvas options the import page confirms, and
+     shows the build as it runs.
+   - `chain export|import PROJECT FILE` saves or loads the chain.
+   - `export` works as before, now on the chain API. It had been broken since phase 7 removed the old adjustments,
+     and no test ran it.
+   - A bare project path opens the interface.
+2. **Documentation.**
+   - `lunar_finish.py --help` describes chains, and its settings groups say they make lunar_finish's default
+     chain.
+   - `.env.example` and COMMANDS.md are regenerated. COMMANDS.md now lists `lunarmosaic.py`, with each
+     subcommand, and `colour_place.py`.
+   - `tools/update_docs.py` documents the built-in defaults (a `LUNAR_TOOLS_DEFAULTS=1` switch in
+     `tool_settings.py`), so the reference no longer shows one machine's `.env`: it had shown `--wavelets
+     pixinsight` as the default. Its `--check` only compares.
+   - README.md, mosaic/README.md and LRGB.md describe the application as it now is.
+   - DESIGN_DECISIONS.md and IMPLEMENTATION_STATUS.md are marked historical, and the table at the top of this
+     section keeps only what remains open.
+3. **Two faults the acceptance run found.**
+   - lunar_finish's north-up never ended on a mosaic whose panel names carry no capture time, when run from the
+     session folder. moon_atlas's `capture_time` looks such a panel up in the working folder's layout, which is
+     the mosaic's own, again and again. lunar_finish now gives such a mosaic no capture time, so the close-up
+     search is skipped with a message. The fault itself is in moon_atlas, left for its owner.
+   - `design_mockups/render_mockups.py` assumed the 101-panel night: 62 panels in its placement frame, and a
+     residual for every panel.
+
+   `compare_crops.py` also needs `--size` on panels this small; that option is documented, so it is not a fault.
+4. **Acceptance: `cli_checks.py`** runs every command in COMMANDS.md on a synthetic session:
+   - the classifier;
+   - the builder: layout only, full, and with both movies;
+   - colour placement;
+   - lunar_finish: with flags, with a movie, and with a chain file;
+   - every `lunarmosaic.py` command, including the interface over HTTP;
+   - the diagnostic tools and the mockup renderer;
+   - `update_docs.py --check`.
+
+   It fails if a documented command was not run or printed a traceback, and takes about 5 minutes.
+
+All fourteen suites pass: 125 unittest tests, and the 14 regressions of `review_regressions.py`.
 
 ### Changes made 2026-10-05 to `lunar_finish.py`
 

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Regenerate docs/COMMANDS.md: every command with its complete --help output (options and defaults).
 
-    python3 tools/update_docs.py
+    python3 tools/update_docs.py            rewrite docs/COMMANDS.md
+    python3 tools/update_docs.py --check    exit 1 if docs/COMMANDS.md differs from what the commands say now
 
 Run this after changing any command-line option, so the reference never drifts from the code.
 """
@@ -11,50 +12,96 @@ import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+TARGET = os.path.join(ROOT, "docs", "COMMANDS.md")
+# (name, path from mosaic/, purpose, examples, the subcommands whose --help is shown too)
 COMMANDS = [
-    ("panel_classifier.py", "Score panel quality; `--relative` ranks overlapping panels on shared terrain.",
-     ["python3 panel_classifier.py panels -o panels/panel_manifest.json --relative"]),
-    ("mosaic_builder.py", "Build the mosaic (nine steps), with live preview, movies and a contribution map.",
+    ("lunarmosaic.py", "../lunarmosaic.py", "The LRGB application: the interface, and every project step as a command "
+     "(in `<LunarMosaic>/`, not `mosaic/`).",
+     ["python3 lunarmosaic.py moon.lunarmosaic                  # open the interface on a project",
+      "python3 lunarmosaic.py new moon.lunarmosaic --luminance panels_ir --optics 2.9,2000 \\",
+      "    --luminance wide_ir --optics 2.9,1000 --colour panels_rgb --optics 3.76,1000",
+      "python3 lunarmosaic.py build moon.lunarmosaic             # the luminance mosaic, then the colour placed onto it",
+      "python3 lunarmosaic.py chain export moon.lunarmosaic moon.chain.json",
+      "python3 lunarmosaic.py export moon.lunarmosaic -o Moon-LRGB.tif"],
+     [["app"], ["new"], ["scales"], ["build"], ["chain", "export"], ["chain", "import"], ["export"]]),
+    ("panel_classifier.py", "panel_classifier.py", "Score panel quality; `--relative` ranks overlapping panels on shared terrain.",
+     ["python3 panel_classifier.py panels -o panels/panel_manifest.json --relative"], []),
+    ("mosaic_builder.py", "mosaic_builder.py", "Build the mosaic (nine steps), with live preview, movies and a contribution map.",
      ["python3 mosaic_builder.py panels -o mosaic.tif",
       "python3 mosaic_builder.py panels -o mosaic.tif --no-preview --record build.mp4 --record-vertical build_9x16.mp4",
-      "python3 mosaic_builder.py panels -o mosaic.tif --stop-after 3        # layout only (fast check)"]),
-    ("lunar_finish.py", "Phase 2 on the finished mosaic: highlights, lunar colour, gentle contrast; before/after movie.",
+      "python3 mosaic_builder.py panels -o mosaic.tif --stop-after 3        # layout only (fast check)"], []),
+    ("colour_place.py", "colour_place.py", "Place colour panels one by one onto a luminance mosaic (what `lunarmosaic.py build` "
+     "runs for the colour set).",
+     ["python3 colour_place.py panels_rgb --canvas mosaic.tif -o colour_canvas.tif --scale-ratio 2"], []),
+    ("lunar_finish.py", "lunar_finish.py", "Finish a mosaic: highlights, lunar colour, gentle contrast, or any chain made in "
+     "the application; before/after movie.",
      ["python3 lunar_finish.py mosaic.tif -o mosaic_finished.tif",
-      "python3 lunar_finish.py mosaic.tif -o mosaic_finished.tif --saturation 3 --record finish.mp4"]),
-    ("tools/compare_crops.py", "Same-terrain 100 % crops of two panels, or a blind test with a sealed key.",
+      "python3 lunar_finish.py mosaic.tif -o mosaic_finished.tif --saturation 3 --record finish.mp4",
+      "python3 lunar_finish.py mosaic.tif -o mosaic_finished.tif --chain moon.chain.json"], []),
+    ("tools/compare_crops.py", "tools/compare_crops.py", "Same-terrain 100 % crops of two panels, or a blind test with a sealed key.",
      ["python3 tools/compare_crops.py panels/panel_manifest.json --pair 2103_9,2109_2 -o compare.png",
-      "python3 tools/compare_crops.py panels/panel_manifest.json --blind 6 -o blind/"]),
-    ("tools/edge_falloff.py", "Detail versus distance from the frame edge (optics / tilt diagnostic).",
-     ["python3 tools/edge_falloff.py panels/panel_manifest.json --by side"]),
-    ("design_mockups/render_mockups.py", "Render the preview-window design options from a real layout.",
-     ["python3 design_mockups/render_mockups.py --layout mosaic_layout.json --view natural"]),
-    ("tools/update_docs.py", "Regenerate this command reference.", ["python3 tools/update_docs.py"]),
+      "python3 tools/compare_crops.py panels/panel_manifest.json --blind 6 -o blind/"], []),
+    ("tools/edge_falloff.py", "tools/edge_falloff.py", "Detail versus distance from the frame edge (optics / tilt diagnostic).",
+     ["python3 tools/edge_falloff.py panels/panel_manifest.json --by side"], []),
+    ("design_mockups/render_mockups.py", "design_mockups/render_mockups.py", "Render the preview-window design options from a "
+     "real layout.", ["python3 design_mockups/render_mockups.py --layout mosaic_layout.json --view natural"], []),
+    ("tools/update_docs.py", "tools/update_docs.py", "Regenerate this command reference.",
+     ["python3 tools/update_docs.py", "python3 tools/update_docs.py --check"], []),
 ]
 
 
-def main():
-    argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter).parse_args()
+def anchor(name):
+    return name.replace('/', '').replace('.', '').lower()
+
+
+def helptext(path, args=()):
+    if not args and os.path.abspath(path) == os.path.abspath(__file__):
+        return __doc__.strip()                          # never run itself (that would recurse)
+    res = subprocess.run([sys.executable, path, *args, "--help"], capture_output=True, text=True, cwd=ROOT, timeout=60,
+                         env=dict(os.environ, COLUMNS="80", NO_COLOR="1", PYTHON_COLORS="0", LUNAR_TOOLS_DEFAULTS="1"))
+    return (res.stdout or res.stderr).rstrip()
+
+
+def document():
     out = ["# Command reference", "",
            "Generated by `tools/update_docs.py` from each command's own `--help`. Every command also prints this with `--help`.",
            "Paths in the examples are relative to the session folder (for example `<drive>/<date>/moon`); the scripts live in",
-           "`<LunarMosaic>/mosaic/`, so in practice run them as `python3 <LunarMosaic>/mosaic/<command> …`.", "",
+           "`<LunarMosaic>/mosaic/`, so in practice run them as `python3 <LunarMosaic>/mosaic/<command> …`. The application,",
+           "`lunarmosaic.py`, is in `<LunarMosaic>/` itself.", "",
            "| Command | Purpose |", "|---|---|"]
-    out += [f"| [`{c}`](#{c.replace('/', '').replace('.', '').replace('_', '_').lower()}) | {p} |" for c, p, _ in COMMANDS]
+    out += [f"| [`{name}`](#{anchor(name)}) | {purpose} |" for name, _, purpose, _, _ in COMMANDS]
     out.append("")
-    for cmd, purpose, examples in COMMANDS:
-        path = os.path.join(ROOT, cmd)
-        if os.path.abspath(path) == os.path.abspath(__file__):
-            helptext = __doc__.strip()                      # never run itself (that would recurse)
-        else:
-            res = subprocess.run([sys.executable, path, "--help"], capture_output=True, text=True, cwd=ROOT, timeout=60)
-            helptext = (res.stdout or res.stderr).rstrip()
-        out += [f"## {cmd}", "", purpose, "", "Examples:", "", "```sh"] + examples + ["```", "", "Full help:", "", "```text", helptext, "```", ""]
-    target = os.path.join(ROOT, "docs", "COMMANDS.md")
-    os.makedirs(os.path.dirname(target), exist_ok=True)
-    with open(target, "w", encoding="utf-8") as fh:
-        fh.write("\n".join(out) + "\n")
-    print(f"wrote {target} ({len(COMMANDS)} commands)")
+    for name, rel, purpose, examples, subcommands in COMMANDS:
+        path = os.path.join(ROOT, rel)
+        out += [f"## {name}", "", purpose, "", "Examples:", "", "```sh"] + examples + ["```", "", "Full help:", "", "```text",
+                                                                                   helptext(path), "```", ""]
+        for args in subcommands:
+            out += [f"### {name} {' '.join(args)}", "", "```text", helptext(path, args), "```", ""]
+    return "\n".join(out) + "\n"
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--check", action="store_true", help="only compare: exit 1 when docs/COMMANDS.md is out of date")
+    args = ap.parse_args()
+    text = document()
+    if args.check:
+        try:
+            with open(TARGET, encoding="utf-8") as fh:
+                current = fh.read()
+        except OSError:
+            current = None
+        if current != text:
+            print(f"{TARGET} is out of date: run python3 tools/update_docs.py", file=sys.stderr)
+            return 1
+        print(f"{TARGET} is up to date ({len(COMMANDS)} commands)")
+        return 0
+    os.makedirs(os.path.dirname(TARGET), exist_ok=True)
+    with open(TARGET, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    print(f"wrote {TARGET} ({len(COMMANDS)} commands)")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

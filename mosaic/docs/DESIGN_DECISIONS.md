@@ -1,8 +1,8 @@
 # Two-layer implementation decisions
 
-> These are the choices behind the 3 October 2026 implementation and remain accurate about it.
-> Decisions taken since, and the measured filter behaviour the blocks must match, are in
-> [DESIGN.md](DESIGN.md), which supersedes this file where the two differ.
+> **Historical.** These are the choices behind the 3 October 2026 implementation, kept as they were. Phases 0–8
+> (5 October 2026) replaced that implementation with the one [DESIGN.md](DESIGN.md) describes; DESIGN.md is the
+> design record, and the application's guide is [LRGB.md](LRGB.md).
 
 These are the initial implementation choices, made with the project owner's authorization.
 They can be revised after trying real mono and colour capture sets.

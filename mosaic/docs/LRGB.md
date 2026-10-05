@@ -1,166 +1,145 @@
 # Luminance + colour projects
 
-Launch with `python3 lunarmosaic.py app`. The interface runs on localhost and uses the unchanged
-theme, viewer panel styles and IBM Plex Sans fonts bundled from LunarAtlas. No sibling repository
-is needed, and no photos are sent to an online service.
+`lunarmosaic.py` builds one lunar image from panel sets of different cameras and scales: the detail from the
+luminance sets, the colour from an RGB set, edited as chains of blocks and checked in previews at 1:1. Launch the
+interface with `python3 lunarmosaic.py` (or `python3 lunarmosaic.py Moon.lunarmosaic` to open a project). It runs on
+localhost with LunarAtlas's bundled theme and fonts; no sibling repository is needed, and no photos are sent to an
+online service. [DESIGN.md](DESIGN.md) is the design record behind this guide.
 
 ## Workflow
 
-1. Create a new project folder (for example `Moon.lunarmosaic`) or open an existing one.
-2. Select a folder of L panels and optionally an RGB folder. A direct local path references the
-   originals without copying them. The browser folder picker copies selected images into the
-   project's `sources/` directory. TIFF, PNG and JPEG are supported; FITS is not currently supported.
-   Direct folder imports keep readable, suitable files and list rejected files with their reasons.
-   Pixel dimensions and detected data types are shown after header inspection; 8-bit panels remain
-   valid inputs. Optional optics show the estimated RGB/L sampling ratio.
-3. Build each mosaic at its native resolution. Sets run sequentially to limit peak RAM. A successful
-   mosaic stays on disk if the other set fails. Logs and nine build stages report real progress.
-   Build cards also show elapsed time and the layout report's placed/contributing counts.
-   Disconnected panels that the builder omits are listed with their actual reasons.
-4. Match RGB onto L with a similarity transform (scale, rotation, translation). This supports different
-   sensors and Barlow factors. SIFT features are matched mutually and fitted with RANSAC. Fits with
-   too few points, too many outliers, or inadequate spatial spread are rejected. The reported median,
-   p95 and worst fit residuals are **fitted feature residuals in native L pixels**. After fitting,
-   separate local phase-correlation/ECC checks measure overlapping patches without changing the
-   transform. The status chip reports those checks, including unknown regions in its details.
-   Filled residual dots show measured locations; hollow grey rings mark unknown patches. These
-   checks use a reduced image and report distances in native L pixels.
-5. Inspect the red/cyan overlay at 1:1. Zoom and pan load actual native-resolution samples, rather than
-   enlarging only a preview. If automatic matching fails, choose at least three corresponding points
-   in the two mosaics. Independent patch checks also run after a manual fit. Areas outside
-   successful checks remain unknown; a good global fit does not establish perfect alignment.
-6. Adjust the layers: colour strength, saturation and chroma smoothing on RGB; highlights and contrast
-   on L. Advanced L-only wavelets and unsharp masking are off by default. The four wavelet
-   bands reuse the finishing CLI kernels, with grain protection. Inspect sharpening at 1:1;
-   smaller previews approximate the filters. The sampled fine-scale variation indicator includes
-   both detail and grain, so it is not a pure noise measurement. Select the full L canvas with grey colour gaps, or the largest conservative rectangular area
-   with coverage in both layers. Internal holes participate in that crop calculation. Coverage uses
-   the builder's label maps where available; one-panel images use their rectangular bounds.
-7. Rotate or mirror both layers together if needed. “Find lunar north” runs the bundled
-   LunarAtlas solver on L and applies one shared reversible transform. It uses the lunar limb
-   or close-up terrain with capture time from panel filenames; optional project optics provide
-   a prior. Reference maps may download on first use. Failure or cancellation preserves the view. Export 16-bit uncompressed TIFF, streaming 16-bit PNG, or JPEG (8-bit,
-   quality 92). Native, half and quarter size are available. Individual layer exports share the same
-   canvas and transform. Exports contain no observing-site or source metadata.
+1. **Create or open a project**: a folder such as `Moon.lunarmosaic`. Projects from earlier versions are converted
+   once on opening; the original file is kept as `project.v<N>.json`, and what changed is listed once in the
+   workspace.
+2. **Import the panel sets.** The luminance stream takes any number of sets — one per camera and optical setup —
+   and the colour stream one RGB set. Per set: a name, the optics (pixel size, focal length, Barlow, aperture) and
+   its panels. A local folder path references the originals without copying them; the browser's folder picker
+   copies the images into the project's `sources/`. TIFF, PNG and JPEG are read (8- or 16-bit, mono or RGB); FITS
+   is not. Unreadable or unsuitable files are listed with the reason.
+   - Sets of different pixel scales need their scale: from the optics, or **Measure the scale** (matched panels
+     against another set) and then **Confirm**. A mixed build never runs on an unconfirmed guess.
+   - The page states the colour/luminance sampling in words ("The colour panels sample 2.0× coarser than the
+     luminance") and a lower bound for the canvas: the Moon at perigee at the finest set's scale. Above 400 Mpx the
+     build waits for a confirmed size or a smaller canvas; when the finest set's pixels are much smaller than the
+     detail it resolves, a smaller canvas that keeps all of it is offered.
+   - A colour set that is all the data can feed both streams ("build them as the luminance too").
+3. **Build.** The luminance sets build into one mosaic on the finest set's pixel grid, in the builder's nine steps.
+   Where sets overlap, tiers ordered by measured resolution decide: the best-resolving set wins wherever it has
+   data. The build card lists any panel left out, with the reason. Colour is then placed **panel by panel** onto
+   the luminance: each panel is found (globally, then on tiles), given the simplest pose its held-out tiles
+   justify (similarity, affine or a cubic warp), corrected for a sub-pixel red/blue shift when two estimators
+   agree, matched in brightness, and blended into a colour canvas at the colour data's own sampling.
+4. **Check the match.** The status chip reads, for example, "Match 0.28 px · worst 0.80 px · checked 0.07 px": held-out
+   tile residuals in canvas pixels, then an independent check of overlapping patches. Its popover lists every
+   colour panel: placed or the reason not, pose model, tiles, held-out residual, and the red/blue decision. The
+   `errors` view marks the measured places; the red/cyan `overlay` view is for inspection at 1:1. **Place colour
+   again** re-runs the placement; a single-image colour set can instead be placed from three or more control
+   points.
+5. **Edit the chains.** The luminance and colour chains run before the merge, the final chain after it; the merge
+   takes lightness from the luminance and colour from the colour chain, at the colour strength set there. **+ Add a
+   block** offers levels, curves, highlights, contrast, à-trous wavelets, unsharp mask, Gaussian blur,
+   deconvolution, white balance, sub-pixel RGB shift and saturation; a block a chain cannot take is greyed with the
+   reason. Parameters are in the units of the program each block reproduces: PixInsight biases with the gain
+   beside each, Photoshop percent, pixels and levels, Curves over the histogram arriving at the block. Blocks are
+   reordered by dragging the grip or with Alt+↑/↓, switched off, duplicated and deleted; every block can fade
+   towards the limb. Readouts below each block come from the image itself: the wavelet layer the detail reaches,
+   white-balance gains, every RGB-shift estimate, the deconvolution's first dark ring. White-balance references
+   can be drawn on the mosaic. **Keep space black** restores the sky after every block.
+6. **Preview at 1:1.** Press **P** (or ▭ Preview) and drag a rectangle: it is named, saved with the project, and
+   rendered at 1:1 with the whole chain. Every change renders the previews again; they follow a turn of the view.
+   Below 75 % zoom the canvas itself is approximate (each block at reduced scale) and says so; judge detail in a
+   preview.
+7. **Canvas and orientation.** Coverage is the full luminance canvas (colour gaps stay grey) or the largest
+   rectangle covered by both layers. Rotation and mirroring turn both layers together; **Find lunar north** solves
+   the orientation from the limb or, for a close-up, from terrain and the panels' capture time, with LunarAtlas's
+   bundled reference maps. The `resolution` view tints each region by the luminance set that supplied it, with a
+   legend of tiers, scales and shares of the disk.
+8. **Export** a 16-bit TIFF or PNG, or an 8-bit JPEG (quality 92), at native, half or quarter size; the combined
+   image or one layer on the same canvas. Every block runs at full resolution. The chain can be saved as a file —
+   for another project, or for `lunar_finish.py --chain` — and loaded into a project, which keeps its own
+   previews.
+
+Edits save themselves 300 ms after the last change, each with the project revision it was made on. If another
+window changed the project meanwhile, or the connection drops, the edit stays on screen and is sent again, and the
+header says so. A chain the server refuses (an impossible combination of values) stays on screen with the reason
+until the next edit.
 
 ## Project contract
 
-`project.json` schema version 3 stores a project identifier, revisions, panel paths, optional camera
-sampling inputs, per-set build states, native TIFF paths, the RGB-to-L matrix, measured points and
-layer adjustments and the north-up solution. Version 1 and 2 projects migrate automatically, retaining existing adjustments and enabling
-both visibility switches. Version 1 also gains disabled sharpening defaults. Atomic replacement and a process lease protect saves. A stale browser revision
-cannot overwrite newer edits. No credentials are stored in a project.
+`project.json` (schema 4) holds the sets (`L`, `RGB`, then `s2`, `s3`… for further luminance sets, each with its
+stream, name, inputs, optics and any measured scale), the build state of each stream, the colour placement, the
+geometry (rotation, mirror, coverage) and view (layer visibility), the chain (`protect_space`, the chains, the
+preview rectangles) and the migration notes. Saves are atomic and a process lease keeps a second process out; a
+stale browser revision cannot overwrite newer edits. No credentials are stored.
 
-`derived/L.tif` and `derived/RGB.tif` retain the native builds. The existing builder also writes layout,
-label and contribution files beside them. Single-panel sets are retained as native-size 16-bit RGB
-TIFFs. Original files are never written. Direct source paths must still exist to restart a build;
-finished mosaics can be edited and exported after the source panels have moved.
+`derived/L.tif` is the luminance mosaic, with the builder's layout, label, contribution and set reports beside it.
+`derived/colour_canvas.tif` is the placed colour (16-bit RGBA, alpha = coverage) and `derived/colour_place.json`
+its report. Original files are never written. Direct source paths must still exist to rebuild; finished mosaics
+can be edited and exported after the panels have moved. Completed builds are reused on reopening; an interrupted
+build restarts from its first step (there is no resume from intermediate stages yet).
 
-Completed builds are reused on reopening. There is **no intermediate-stage resume**: an interrupted
-build is marked interrupted and restarts from the beginning. Native mosaics are independent of edit
-sliders. A mono-only project works, and RGB can be added later without rebuilding L.
-
-## CLI using the same project
+## Commands on the same project
 
 ```sh
-python3 lunarmosaic.py new Moon.lunarmosaic --name 'My Moon' --luminance /data/L --rgb /data/RGB
-python3 lunarmosaic.py build Moon.lunarmosaic
-python3 lunarmosaic.py match Moon.lunarmosaic
+python3 lunarmosaic.py new Moon.lunarmosaic --name 'My Moon' \
+    --luminance /data/ir --optics 2.9,2000 --label 'C14 + IR' \
+    --luminance /data/wide --optics 2.9,1000 \
+    --colour /data/rgb --optics 3.76,1000
+python3 lunarmosaic.py scales Moon.lunarmosaic             # sets without optics: measure, then --confirm
+python3 lunarmosaic.py build Moon.lunarmosaic              # luminance, then the colour placed onto it
 python3 lunarmosaic.py check-match Moon.lunarmosaic
 python3 lunarmosaic.py north-up Moon.lunarmosaic
-python3 lunarmosaic.py app Moon.lunarmosaic
+python3 lunarmosaic.py chain export Moon.lunarmosaic moon.chain.json
+python3 lunarmosaic.py chain import Moon.lunarmosaic moon.chain.json
 python3 lunarmosaic.py export Moon.lunarmosaic -o Moon-LRGB.tif
 python3 lunarmosaic.py export Moon.lunarmosaic -o Moon-colour.tif --layer colour --scale 0.5
 python3 lunarmosaic.py status Moon.lunarmosaic
 ```
 
-Click the application name to open/create another project or close the current project. Close it
-before writing to it from another process. The export dialog previews the selected layer and coverage, displays dimensions and approximate
-uncompressed TIFF size, and warns when JPEG is too large. Coverage selected there applies to that
-export only. The CLI's `--coverage full|common` does the same. Existing export files are
-never overwritten; choose a new name. Cancelled exports do not publish a partial image.
+Each `--optics` (pixel µm, focal mm, then optionally Barlow and aperture mm; `"2,9;2000"` also works) and `--label`
+belongs to the `--luminance` or `--colour` group before it. `build` accepts `--max-canvas-mpx` and `--canvas-scale`
+as confirmed on the import page. Results print as JSON; a build shows its steps as it runs. Every option is in
+[COMMANDS.md](COMMANDS.md). Close a project in the interface before changing it from another process.
 
 ## Rendering and limits
 
-L supplies perceptual lightness (CIE Lab L*), RGB supplies a*/b*. Colour strength scales chroma toward
-neutral, with mask-normalized Gaussian chroma smoothing. Saturation is a plain chroma multiplier.
-Colour strength, saturation and smoothing are separate LRGB controls, rather than aliases for
-the finishing CLI's selective saturation. Advanced wavelets reuse its kernels and sharpening; USM
-also operates only on L. Exports sharpen native L before resampling onto the shared canvas. RGB colours outside the output gamut are clipped, so extreme saturation can change apparent
-lightness. Layer source pixels remain intact. This is not a promise of Photoshop blend-mode parity.
+Colour is merged in CIE Lab, converted exactly: L* from the luminance chain, a*/b* from the colour chain, scaled by
+the colour strength and the colour coverage. The chains run on the luminance canvas; rotation and mirroring follow
+with Lanczos-4. Statistics a block needs (histograms, noise, white-balance references) are measured once per chain,
+on a quarter-scale proxy and a full-resolution crop of the disk, and a change recomputes them only from the
+changed block on. A preview equals the same pixels of a full export, and a half-size export is the averaged full
+one.
 
-Native uncompressed interleaved TIFFs are memory mapped. Export renders tiles with blur halos and
-writes TIFF/PNG incrementally. Compressed/non-mappable inputs may require full decoding. JPEG is
-limited to 80 million pixels and 65,000 pixels per dimension; TIFF/PNG are preferable for large work.
-Processing retains the existing mosaic builder's RAM requirements. Automatic cross-layer local mesh
-warping, FITS import, intermediate stage caches and native packaging remain
-follow-up work. A global fit cannot correct differential
-seeing or lens distortion. No perfect alignment is asserted for different cameras.
+Native uncompressed TIFFs are memory-mapped and exports are written in tiles; an existing file is never
+overwritten, and a cancelled export publishes nothing. JPEG is limited to 80 million pixels and 65,000 pixels a
+side. The colour canvas is built in memory: about 6.7 GB at 200 Mpx when colour and luminance share a scale.
+Not yet: FITS input, resuming a build from intermediate stages, the daylight sky model (DESIGN.md §8).
 
 ## Verification
 
 ```sh
-python3 mosaic/tests/lrgb_workflow.py
-python3 mosaic/tests/review_regressions.py
+python3 mosaic/tests/run_all.py
 ```
 
-Workflow checks cover a known 2.29× mixed-scale transform with rotation/translation, grey gaps and
-internal-hole cropping, L-detail retention with chroma smoothing, 16-bit export and shared rotation,
-cancelled/duplicate outputs, per-set failures, source preservation, reopening, process leases,
-stale-edit rejection, HTTP origin/auth checks and native-resolution viewport rendering. Real
-independent camera capture sets are needed for imaging acceptance beyond these checks.
-
-The current macOS verification passed 24 LRGB workflow checks and all 13 existing mosaic review
-regressions. A browser journey built four luminance panels and two half-scale colour panels derived
-from one real lunar frame, fitted a 2.000× transform (1,667 inliers; median 0.17 L px), edited colour,
-exported a 16-bit TIFF, reopened the saved adjustments, and selected a common rectangle with no
-missing colour in the preview. A 16-bit PNG export through the CLI also completed. This derived
-fixture exercises the application; it is not independent-camera imaging acceptance. Linux and
-Windows UI journeys have not been run.
-
-Additional checks cover version 1 migration, independent detection of a locally shifted region,
-shared mirroring and sharpening across rotated export tile boundaries. Browser verification applied
-advanced sharpening, inspected native detail and exported a TIFF. North-up completed on a real
-lunar frame with 310 terrain matches and a reported 1.23 native-pixel residual; its rotated PNG
-export was visually inspected. These results still do not establish independent-camera acceptance.
-
-See [design decisions](DESIGN_DECISIONS.md) for the implementation choices and their rationale.
+Among the suites: `ui_journey.py` drives the interface in headless Chrome through the whole workflow on synthetic
+sets (two luminance sets at different scales and a colour set: import, build, chip and per-panel table, blocks,
+previews, rotation, reload, chain file, export, reopen; no console errors). `cli_checks.py` runs every command in
+COMMANDS.md on synthetic data. `colour_checks.py` measures placement against the truth, `mixed_checks.py`
+mixed-scale builds, and `scene_checks.py` the renderer's geometry and the routes. Real measurements are in
+DESIGN.md §9.
 
 ## Reopening and local history
 
-Completed projects open directly in the editor. Interrupted, failed or missing sets open on the build
-page, where the recovery card names saved mosaics and the last recorded stage. Restart begins from
-stage 1; the interface does not imply intermediate stage caching. If colour is missing, a saved common
-crop is reset to full coverage so retained luminance remains viewable.
+Completed projects open in the workspace; interrupted, failed or missing builds open on the build page, which names
+the saved mosaics and the last recorded step. The recent-project list keeps up to 12 folder paths and the time
+each was last opened, in `~/.lunarmosaic/recent-projects.json`, and reads current names and states from the projects
+without opening them for writing. No photos, credentials or observing-site fields are copied into it. **Clear
+history** removes only these references; `--no-history` disables it and `--history-file PATH` moves it. The
+processing commands keep no history.
 
-The application's recent-project list stores up to 12 folder paths and last-opened timestamps in
-`~/.lunarmosaic/recent-projects.json`. It reads current names/status and built TIFF sizes from those
-projects without opening them for writing. No photos, credentials or observing-site fields are copied
-into history. Clear history removes only these references. Use `app --no-history` to disable it or
-`app --history-file /path/to/recent.json` to choose its location. CLI processing commands do not retain
-history. Unavailable projects stay listed rather than being silently removed.
+## Layers
 
-Additional macOS browser verification covered interrupted recovery, reopening from recent projects,
-contribution counts, a changing export preview, and an export-only full-canvas override. The exported
-half-size TIFF was 592 × 324 pixels, uint16; the project retained its common-coverage adjustment.
-
-## Layer visibility and match explanation
-
-Both rows have real native-mosaic thumbnails and saved visibility switches. The rows stay visible
-while adjustments scroll beneath them. RGB off gives L-only lightness; L off uses the matched RGB
-mosaic's own lightness and chroma on the same canvas. Colour strength, saturation and smoothing
-remain available. L-only sharpening/brightness controls do not affect the RGB-only result. Both off
-gives an empty combined preview; enable a layer before exporting a combined image. Explicit
-individual layer exports ignore the switches so either retained layer can still be exported.
-
-The inspection rail overrides visibility for its selected diagnostic view; it does not change the
-saved switches. The export preview names the actual composition used by a combined export.
-
-Click the match chip to open the canvas popover: measured/unknown patch counts, offsets, raw scale,
-rotation, translation and point counts. Escape or its close button dismisses it; Show local checks
-opens the error map. The explanation distinguishes independently checked patches from fitted points
-and leaves other locations unmeasured.
-
-The latest browser journey verified thumbnails, hiding RGB, retained visibility after reload, the
-match explanation, hiding L and a colour-only combined export. Its 1140 × 605 uint16 TIFF matched
-a full-canvas colour rendering with maximum normalized difference 0.00000769 (16-bit rounding).
+Both layer rows have thumbnails and saved visibility switches. Colour off gives the luminance alone; luminance off
+uses the colour's own lightness. Both off leaves the combined image empty; enable a layer before exporting it.
+Exporting a single layer ignores the switches. The view rail (composite, luminance, colour, overlay, coverage,
+errors, resolution) changes what the canvas shows, not the switches.

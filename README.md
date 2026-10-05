@@ -35,27 +35,28 @@ python3 -m venv .venv
 About 1.2 GB of disk per 16-bit output TIFF;
 peak RAM around 9 GB for a 200 Mpx mosaic.
 
-## Two-layer LRGB interface
+## The LRGB application
 
 ```sh
-.venv/bin/python lunarmosaic.py app
+.venv/bin/python lunarmosaic.py
 ```
 
-Create a project, import separate luminance and colour panel folders, and build both mosaics at their
-native scales. Match colour to luminance, inspect the red/cyan overlay at 1:1, then adjust the two
-layers separately, with thumbnails and saved visibility switches. Different camera pixel sizes and Barlow factors are supported by a fitted scale,
-rotation and translation. Matching includes independent local checks, with unmeasured areas marked unknown.
+Create a project and import the panel sets: any number of luminance sets, from different cameras, Barlows and
+pixel scales, and an RGB colour set. The luminance sets build into one mosaic on the finest set's pixel grid,
+each region taken from the set that resolves it best. The colour panels are then placed one by one onto that
+mosaic, each with its own pose, checked on tiles it was not fitted on. Edit the result as chains of blocks that
+reproduce PixInsight (à-trous wavelets, ColorCalibration), Photoshop (Unsharp Mask, Levels, Curves) and
+LuckyStackWorker (deconvolution), and judge them in named previews at 1:1. Export the combined image or each layer
+as 16-bit TIFF/PNG or 8-bit JPEG, and the chain itself, which `lunar_finish.py --chain` also runs.
 
-The interface uses LunarAtlas's bundled navy/amber theme, fonts and floating panels. It runs locally
-in your browser and requires no separate LunarAtlas installation. Project adjustments autosave;
-original panels and native mosaics stay untouched. Recent projects and interruption recovery help
-you continue saved work. Export a combined image or each layer on the same
-canvas as 16-bit TIFF/PNG or 8-bit JPEG. Shared north-up/rotation and optional luminance-only
-wavelets and unsharp masking preserve the two-layer relationship.
+Everything runs locally in your browser, on LunarAtlas's bundled theme and fonts; no separate LunarAtlas
+installation is needed. Edits save themselves; original panels and built mosaics stay untouched. Every step is also
+a command: `lunarmosaic.py new`, `build`, `chain export`, `export` and the rest.
 
-See [the LRGB workflow](mosaic/docs/LRGB.md) for the project format, CLI commands, verification and
-current limits. This is an initial implementation; independent mono/colour capture sets still need
-real-world validation, especially when seeing or optical distortion differs.
+See [the LRGB guide](mosaic/docs/LRGB.md) for the workflow, the project format, the commands and current limits,
+and [DESIGN.md](mosaic/docs/DESIGN.md) for the design and its measurements. Colour placement is measured on
+synthetic sets and on one night's real colour panels (0.58 px held-out rms). Independent mono and colour capture
+sets still need real-world validation, especially when seeing or optical distortion differs between them.
 
 On Windows, use `.venv\Scripts\python` instead of `.venv/bin/python`.
 
@@ -74,7 +75,7 @@ be copied into that directory for offline use.
 ## Settings
 
 Defaults live in this repository's `.env`; copy `.env.example` to `.env` to customize them. Command-line
-options always override them, and `--help` shows the value in effect. Check the active settings with
+options always override them, and `--help` shows the value in effect (COMMANDS.md shows the built-in defaults). Check the active settings with
 `python3 tool_settings.py --check`. LunarAtlas's observing site and equipment now live in its Settings
 page or `equipment.json`, as described in `moon_atlas/README.md`.
 

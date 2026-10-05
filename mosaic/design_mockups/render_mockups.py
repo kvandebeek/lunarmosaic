@@ -176,12 +176,19 @@ Pa, pma = proxy(S2[0]); Pb, pmb = proxy(S2[1])
 fa = mc.detect_features(machine(S2[0]), pma); fb = mc.detect_features(machine(S2[1]), pmb)
 res2, _ = mc.verify_pair(fa, fb, pma, pmb)
 order = placement_order()
-K3 = 62                                  # placement frame: 62 of 101 panels placed
+K3 = min(62, len(order))                 # placement frame: 62 of 101 panels placed (fewer for a smaller layout)
 rms = {n: panels[n]["rms_px"] for n in ids}
 
 
+def res(n):
+    """A panel's layout residual as text; the reference panel has none."""
+    return f"{rms[n]:.2f}" if rms.get(n) is not None else "—"
+
+
 def heat(e):
-    """Residual colour: teal (good) → amber → coral (worse), BGR."""
+    """Residual colour: teal (good) → amber → coral (worse), BGR; grey for a panel without one (the reference)."""
+    if e is None:
+        return (150, 150, 150)
     t = float(np.clip(e, 0, 1.2))
     stops = [(0.0, (190, 210, 30)), (0.35, (190, 210, 30)), (0.6, (40, 200, 255)), (0.9, (40, 170, 255)), (1.2, (90, 90, 250))]
     for (t0, c0), (t1, c1) in zip(stops, stops[1:]):
@@ -290,7 +297,7 @@ def style_a(stage):
         cv2.polylines(v, [quad(cur, PSCALE)], True, A_ACC, 3, cv2.LINE_AA)
         v, _ = fit(v, vw, vh)
         paste(img, v, vx + (vw - v.shape[1]) // 2, vy)
-        a_header(img, "Placing panels", f"Global similarity solve  ·  {K3} of 101 placed  ·  newest {cur} (residual {rms[cur]:.2f} px)")
+        a_header(img, "Placing panels", f"Global similarity solve  ·  {K3} of 101 placed  ·  newest {cur} (residual {res(cur)} px)")
         mini_c, _ = composite(PARTS, ids, PSIZE)
         a_sidebar(img, 3, K3 / 101, [("Placed", f"{K3} / 101"), ("Layout RMS", "0.62 px"), ("Pairs used", "622"), ("Dropped", "59")],
                   spark=("Layout RMS per solve iteration", [0.73, 0.64, 0.62, 0.62, 0.62]))
@@ -457,7 +464,7 @@ def style_c(stage):
         ox, oy = area[0] + (aw - v.shape[1]) // 2, area[1] + (ah - v.shape[0]) // 2
         paste(img, v, ox, oy)
         brackets(img, ox - 8, oy - 8, ox + v.shape[1] + 8, oy + v.shape[0] + 8, C_CYAN)
-        c_hud(img, 3, "Global alignment", [("PLACED", f"{K3}/101"), ("NEWEST", cur), ("RESIDUAL", f"{rms[cur]:.2f} px"),
+        c_hud(img, 3, "Global alignment", [("PLACED", f"{K3}/101"), ("NEWEST", cur), ("RESIDUAL", f"{res(cur)} px"),
                                            ("LAYOUT_RMS", "0.62 px"), ("PAIRS", "622"), ("DROPPED", "59"), ("MODEL", "similarity 4dof")], K3 / 101)
         # convergence graph
         gx, gy, gw, gh = W - 380, 470, 340, 120

@@ -1,7 +1,7 @@
 # Implementation status — 2026-10-03
 
-> Status of the 3 October 2026 implementation. For how it diverges from the decisions taken since,
-> see [DESIGN.md](DESIGN.md) section 9.
+> **Historical.** The status of the 3 October 2026 implementation, kept as it was. The current status, phase by
+> phase with its measurements, is [DESIGN.md](DESIGN.md) section 9.
 
 ## Implemented
 

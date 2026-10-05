@@ -115,6 +115,7 @@ class Application:
         self.cancel = threading.Event()
         self.history = RecentProjects(history_path) if history_path else None
         self.history_error = None
+        self.echo = None                      # called with each log line (lunarmosaic.py prints them)
 
     def close(self):
         self.worker.cancel()
@@ -206,6 +207,14 @@ class Application:
     def update_job(self, **values):
         with self.lock:
             self.job.update(values)
+
+    def log_line(self, line):
+        """A line of a child process's output into the job log (the last 80), and to echo, when set: the command
+        line shows a build as it runs."""
+        with self.lock:
+            self.job['log'] = (self.job.get('log', [])+[line])[-80:]
+        if self.echo:
+            self.echo(line)
 
     def start(self, action, work):
         with self.lock:
@@ -358,8 +367,7 @@ class Application:
                     failure = None
                     for line in proc.stdout:
                         line = line.strip()
-                        with self.lock:
-                            self.job['log'] = (self.job.get('log', [])+[line])[-80:]
+                        self.log_line(line)
                         if line.startswith('FAIL:'):
                             failure = line[5:].strip()
                         m = re.match(r'\[(\d+)/8\]\s+(.+)', line)
@@ -477,6 +485,8 @@ class Application:
             key = p.add_set(data.get('stream', 'luminance'), data.get('label'))
             if data.get('optics'):
                 p.set(key)['optics'] = clean_optics(data['optics'])
+            p.save()
+            return key
         else:
             try:
                 s = p.set(data.get('id'))
@@ -603,8 +613,7 @@ class Application:
         try:
             for line in proc.stdout:
                 line = line.strip()
-                with self.lock:
-                    self.job['log'] = (self.job.get('log', [])+[line])[-80:]
+                self.log_line(line)
                 if line.startswith('FAIL:'):
                     failure = line[5:].strip()
                 on_line(line)
@@ -744,8 +753,7 @@ class Application:
             try:
                 for line in proc.stdout:
                     line = line.strip()
-                    with self.lock:
-                        self.job['log'] = (self.job.get('log', [])+[line])[-80:]
+                    self.log_line(line)
                     self.update_job(title=line[:120])
                 proc.stdout.close()
                 code = proc.wait()
@@ -815,6 +823,16 @@ class Application:
         clean = dict(id=v['id'], name=name, x=x, y=y, w=w, h=h)
         p.data['chain']['previews'] = [clean if x_['id'] == clean['id'] else x_ for x_ in previews] if op == 'update' \
             else previews + [clean]
+
+    def import_chain(self, doc):
+        """A chain file into the open project, not saved yet: its blocks get fresh ids (the file may come from this
+        very project), and the project keeps its own preview rectangles."""
+        if isinstance(doc, dict) and isinstance(doc.get('chains'), dict):
+            for name in chain.PATHS:
+                for e in doc['chains'].get(name) or []:
+                    if isinstance(e, dict):
+                        e['id'] = secrets.token_hex(4)
+        self.project.set_chain(doc)
 
     def analysis(self):
         """/api/analysis: every enabled block's readouts (Appendix A) and the probe they came from."""
@@ -1101,13 +1119,7 @@ class Application:
                         if path == '/api/chain':
                             p.set_chain(o['chain'])
                         elif path == '/api/chain-file':
-                            doc = o['chain']                  # an imported chain: fresh ids, this project's previews
-                            if isinstance(doc, dict) and isinstance(doc.get('chains'), dict):
-                                for name in chain.PATHS:
-                                    for e in doc['chains'].get(name) or []:
-                                        if isinstance(e, dict):
-                                            e['id'] = secrets.token_hex(4)
-                            p.set_chain(doc)
+                            self.import_chain(o['chain'])
                         elif path == '/api/geometry':
                             old = dict(p.data['geometry'])
                             if 'geometry' in o:
