@@ -26,7 +26,8 @@ import measurements as ms
 from project import Project, STREAMS, CANVAS_CAP_MPX, clean_optics, luminance_scales
 import project as projects
 import lrgb
-from lrgb import Image, Scene, register, manual_match
+from lrgb import Image, Scene, manual_match
+from colour_place import K_matrix
 from alignment import measure
 from recent import RecentProjects
 import mosaic_common as mc
@@ -229,6 +230,8 @@ class Application:
         stream = self.project.stream_of(key)
         if stream.get('mosaic'):
             raise ValueError('This set is already built. Create a new project to replace its panels.')
+        if s['stream'] == 'luminance' and self.project.set('RGB')['stream'] == 'both':
+            raise ValueError('The colour set feeds both streams, so there are no luminance panels. Let it feed colour only first.')
         paths = [str(self.project.path(x)) if not Path(x).is_absolute() and Path(x).parts[0] == 'sources' else x for x in paths]
         files = mc.find_images(paths, recursive=True)
         if not files:
@@ -238,7 +241,7 @@ class Application:
         for file in files:
             try:
                 w, h, channels, dtype = header_size(file)
-                if channels < 3 and s['stream'] == 'colour':
+                if channels < 3 and s['stream'] in ('colour', 'both'):
                     raise ValueError('Mono panel; use the luminance set.')
                 valid.append(file); sizes.append((w, h)); depths.append(str(dtype))
             except (ValueError, OSError, cv2.error) as e:
@@ -259,6 +262,8 @@ class Application:
                               depths=sorted(set(depths))))
         s.pop('scale_estimate', None)                 # other panels: an estimate made on the old ones no longer holds
         stream.update(state='ready', error=None)
+        if s['stream'] == 'both':
+            self.project.stream('luminance').update(state='ready', error=None)
         self.project.save()
 
     def build(self, keys, canvas=None):
@@ -266,7 +271,10 @@ class Application:
         colour set. Results are keyed L and RGB, as the interface reads them."""
         p = self.project
         result = {}
-        wanted = {p.set(k)['stream'] for k in keys}
+        wanted = set()
+        for k in keys:                    # a set feeding both streams builds both: its mosaic is also the colour
+            stream = p.set(k)['stream']
+            wanted |= set(STREAMS) if stream == 'both' else {stream}
         for name in [n for n in STREAMS if n in wanted]:
             if self.cancel.is_set():
                 break
@@ -274,7 +282,21 @@ class Application:
             key = 'L' if name == 'luminance' else 'RGB'
             if s.get('mosaic'):
                 continue
-            paths = [x for st in p.sets_of(name) for x in p.input_paths(st['id'])]
+            if name == 'colour':
+                # phase 6: no colour mosaic — the panels are placed one by one onto the luminance mosaic
+                if p.input_paths('RGB'):
+                    if not p.stream('luminance').get('mosaic'):
+                        with self.lock:
+                            s.update(state='failed', error='Build the luminance mosaic first: colour is placed onto it.')
+                            p.save()
+                    else:
+                        try:
+                            self.place_colour()
+                        except Exception:
+                            pass                           # recorded in the stream's state and error
+                    result[key] = p.stream('colour')['state']
+                continue
+            paths = [x for st in p.feeding(name) for x in p.input_paths(st['id'])]
             if not paths:
                 continue
             with self.lock:
@@ -378,7 +400,7 @@ class Application:
         scales = luminance_scales(p.data['sets'])               # refuses unknown or unconfirmed scales
         canvas_set = min(scales, key=lambda k: (scales[k]['rel'], k))
         doc = dict(canvas_set=canvas_set, panels=[], sets={})
-        for st in p.sets_of('luminance'):
+        for st in p.feeding('luminance'):
             if st['id'] not in scales:
                 continue
             doc['panels'] += [dict(path=x, set=st['id'], scale_rel=scales[st['id']]['rel']) for x in p.input_paths(st['id'])]
@@ -445,6 +467,16 @@ class Application:
             if op == 'update':
                 if 'label' in data:
                     s['label'] = str(data['label'])[:120]
+                if 'stream' in data and data['stream'] != s['stream']:
+                    # D9: the colour set may feed both streams — one colour mosaic, nothing else
+                    if s['id'] != 'RGB' or data['stream'] not in ('colour', 'both'):
+                        raise ValueError('Only the colour set can feed both streams.')
+                    if any(p.stream(n).get('mosaic') for n in STREAMS):
+                        raise ValueError('Change what the colour set feeds before building.')
+                    if data['stream'] == 'both' and any(x['inputs'] for x in p.sets_of('luminance')):
+                        raise ValueError('A colour set feeds both streams only when there are no luminance panels.')
+                    s['stream'] = data['stream']
+                    p.refresh_state('luminance')
                 if 'optics' in data:
                     if p.stream_of(s['id']).get('mosaic'):
                         raise ValueError('This set is already built. Create a new project to change its optics.')
@@ -473,7 +505,7 @@ class Application:
         set), measured on matched panels; stored unconfirmed, for the user to check before a mixed build."""
         p = self.project
         with self.lock:
-            sets = [s for s in p.sets_of('luminance') if s['inputs']]
+            sets = [s for s in p.feeding('luminance') if s['inputs']]
             paths = {s['id']: p.input_paths(s['id']) for s in sets}
         if len(sets) < 2:
             raise ValueError('Estimating scales needs two luminance sets with panels.')
@@ -538,27 +570,124 @@ class Application:
         return out
 
     def match(self):
-        p = self.project
-        paths = []
-        for name in STREAMS:
-            s = p.stream(name)
-            if not s.get('mosaic'):
-                raise ValueError('Build both mosaics before matching.')
-            paths.append(p.path(s['mosaic']))
-        # the expected colour/luminance scale: the luminance canvas is the finest luminance set's grid
-        lum = p.stream('luminance').get('canvas_arcsec_px') or projects.arcsec_px(p.set('L')['optics'])
-        rgb = projects.arcsec_px(p.set('RGB')['optics'])
-        prior = rgb/lum if lum and rgb else None
-        self.update_job(title='Finding corresponding lunar detail')
-        result = register(*paths, scale_prior=prior)
-        result['diagnostics'] = self.measure_scene(Scene(p, match=result))
-        if self.cancel.is_set():
-            raise InterruptedError('Match cancelled; the previous transform was kept.')
+        """/api/match since phase 6: place the colour panels again (there is no global match any more)."""
+        return self.place_colour()
+
+    def run_process(self, command, on_line=lambda line: None):
+        """A child process, its output in the job log; cancelling stops it. Returns (exit code, its FAIL: line)."""
+        proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=ROOT,
+                                encoding='utf-8', errors='replace')
         with self.lock:
-            p.match = result
-            self.scene = None
+            self.process = proc
+            if self.cancel.is_set():
+                self.cancel_job()
+        failure = None
+        try:
+            for line in proc.stdout:
+                line = line.strip()
+                with self.lock:
+                    self.job['log'] = (self.job.get('log', [])+[line])[-80:]
+                if line.startswith('FAIL:'):
+                    failure = line[5:].strip()
+                on_line(line)
+        finally:
+            proc.stdout.close()
+            code = proc.wait()
+            with self.lock:
+                self.process = None
+        return code, failure
+
+    @staticmethod
+    def placement_summary(doc):
+        """The placement as the interface reads a match until phase 7: matrix K (colour canvas -> canvas), held-out
+        tile residuals as the statistics and the sample points of the errors view."""
+        placed = [v for v in doc['panels'].values() if v['state'] == 'placed']
+        held = np.array([e for v in placed for _, _, e in v.get('samples', [])])
+        return dict(matrix=K_matrix(doc['k']).tolist(), method='placement', scale=doc['k'],
+                    rotation=float(np.median([v['rotation_deg'] for v in placed])) if placed else 0.0,
+                    inliers=len(placed), candidates=len(doc['panels']),
+                    median=float(np.median(held)) if len(held) else 0.0,
+                    p95=float(np.percentile(held, 95)) if len(held) else 0.0,
+                    worst=float(held.max()) if len(held) else 0.0,
+                    points=[[x, y, e] for v in placed for x, y, e in v.get('samples', [])],
+                    scale_prior=doc['scale_ratio'] if doc['scale_source'] == 'given' else None,
+                    warning=f'Colour placed panel by panel: {len(placed)} of {len(doc["panels"])} panels. Residuals are '
+                            'held-out tiles; unmeasured areas may differ, so inspect the overlay.')
+
+    def place_colour(self, initial=None):
+        """Phase 6: the colour set's panels placed one by one onto the luminance mosaic (colour_place.py), giving the
+        colour canvas and its report, then checked independently (alignment.measure). A set feeding both streams
+        needs no placement: its own mosaic is the colour. `initial` ({panel name: 3×3}) starts from given poses
+        (manual control points of a single-image colour set)."""
+        p = self.project
+        with self.lock:
+            lum, s = p.stream('luminance'), p.stream('colour')
+            if not lum.get('mosaic'):
+                raise ValueError('Build the luminance mosaic first: colour is placed onto it.')
+            paths = p.input_paths('RGB')
+            if not paths:
+                raise ValueError('Add colour panels first.')
+            both = p.set('RGB')['stream'] == 'both'
+            s.update(state='building', error=None, started=time.time())
             p.save()
-        return result
+        derived = p.folder/'derived'
+        partial, partial_report = derived/'.colour_canvas.partial.tif', derived/'.colour_place.partial.json'
+        try:
+            if both:
+                doc, mosaic, report = None, lum['mosaic'], None
+                placement = dict(matrix=np.eye(3).tolist(), method='both', scale=1.0, rotation=0.0, inliers=1, candidates=1,
+                                 median=0.0, p95=0.0, worst=0.0, points=[], scale_prior=None,
+                                 warning='One colour set feeds both streams: its own mosaic is the colour; nothing is placed.')
+            else:
+                command = [sys.executable, '-u', str(ROOT/'mosaic'/'colour_place.py'), *paths, '--canvas', str(p.path(lum['mosaic'])),
+                           '-o', str(partial), '--report', str(partial_report)]
+                lum_scale = lum.get('canvas_arcsec_px') or projects.arcsec_px(p.set('L')['optics'])
+                rgb_scale = projects.arcsec_px(p.set('RGB')['optics'])
+                if lum_scale and rgb_scale:
+                    command += ['--scale-ratio', repr(rgb_scale/lum_scale)]
+                if initial:
+                    (derived/'.colour_initial.json').write_text(json.dumps(initial), 'utf-8')
+                    command += ['--initial', str(derived/'.colour_initial.json')]
+
+                def progress(line):
+                    m = re.match(r'\[(\d+)/(\d+)\]\s+(\S+)', line)
+                    if m:
+                        self.update_job(progress=int(m[1])/max(1, int(m[2])), title=f'Placing colour · {m[3]}')
+                self.update_job(title='Placing colour panels', progress=0)
+                code, failure = self.run_process(command, progress)
+                if self.cancel.is_set():
+                    raise InterruptedError('Colour placement cancelled; the previous colour was kept.')
+                if code != 0 or not partial.is_file():
+                    raise ValueError((failure[0].upper()+failure[1:]+'.') if failure else 'Colour placement failed. See the log below.')
+                os.replace(partial, derived/'colour_canvas.tif')
+                os.replace(partial_report, derived/'colour_place.json')
+                doc = json.loads((derived/'colour_place.json').read_text('utf-8'))
+                mosaic, report, placement = 'derived/colour_canvas.tif', 'derived/colour_place.json', self.placement_summary(doc)
+            size = doc['colour_canvas_size'] if doc else [lum.get('width'), lum.get('height')]
+            with self.lock:
+                s.update(state='built', mosaic=mosaic, report=report, k=doc['k'] if doc else 1.0, width=size[0], height=size[1],
+                         revision=s.get('revision', 0)+1, summary=doc['summary'] if doc else None, placement=placement,
+                         legacy_match=None, duration=time.time()-s['started'])
+                p.data['geometry']['coverage'] = 'full'            # the colour coverage changed
+                self.scene = None
+                p.save()
+        except Exception as e:
+            for f in (partial, partial_report):
+                f.unlink(missing_ok=True)
+            with self.lock:
+                s.update(state='interrupted' if self.cancel.is_set() else 'failed', error=str(e),
+                         duration=time.time()-s['started'])
+                p.save()
+            raise
+        try:                                                       # the independent check, on the placed result
+            diagnostics = self.measure_scene(Scene(p))
+            with self.lock:
+                p.match = dict(p.match, diagnostics=diagnostics)
+                self.scene = None
+                p.save()
+        except (ValueError, cv2.error) as e:
+            self.update_job(title=f'Colour placed; the independent check could not run ({e})')
+        return p.match
 
     def measure_scene(self, scene):
         self.update_job(title='Checking independent overlapping areas', progress=0)
@@ -706,7 +835,7 @@ class Application:
             elif path == '/api/canvas-estimate':
                 with self.lock:
                     p = self.require(dict(id=query.get('id', [''])[0]))
-                    sets = copy.deepcopy(p.sets_of('luminance'))
+                    sets = copy.deepcopy(p.feeding('luminance'))
                     paths = {x['id']: p.input_paths(x['id']) for x in sets if x['inputs']}
                     stream = copy.deepcopy(p.stream('luminance'))
                 h.json(self.canvas_estimate(sets, paths, stream))
@@ -743,9 +872,13 @@ class Application:
                     if key not in ('L', 'RGB'):
                         raise ValueError('Unknown panel set.')
                     source = self.project.stream_of(key).get('mosaic')
-                    if not source:
+                    single = self.project.input_paths('RGB') if key == 'RGB' else []
+                    if len(single) == 1 and path == '/api/native-preview':
+                        image = Image(single[0])     # control points are clicked on the colour image itself
+                    elif not source:
                         raise ValueError('Build this layer first.')
-                    image = Image(self.project.path(source))
+                    else:
+                        image = Image(self.project.path(source))
                 rgb, _ = image.preview(96 if path == '/api/layer-thumbnail' else 1200)
                 if key == 'L' and path == '/api/layer-thumbnail':
                     rgb = cv2.cvtColor(cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY), cv2.COLOR_GRAY2RGB)
@@ -832,13 +965,14 @@ class Application:
                         self.start('Find lunar north', self.north_up)
                     elif path == '/api/manual':
                         self.idle()
-                        for name in STREAMS:
-                            if not p.stream(name).get('mosaic'):
-                                raise ValueError('Build both mosaics first.')
-                        p.match = manual_match(o['rgb_points'], o['l_points'])
-                        self.scene = None
-                        p.save()
-                        self.start('Check manual match', self.check_alignment)
+                        if not p.stream('luminance').get('mosaic'):
+                            raise ValueError('Build the luminance mosaic first.')
+                        colour = p.input_paths('RGB')
+                        if len(colour) != 1:
+                            raise ValueError('Control points place a single-image colour set; this set has several panels.')
+                        T = manual_match(o['rgb_points'], o['l_points'])['matrix']
+                        initial = {Path(colour[0]).stem: T}
+                        self.start('Place colour from control points', lambda: self.place_colour(initial))
                     elif path == '/api/edits':
                         if o.get('revision') != p.data['revision']:
                             h.json(dict(error='The project changed. Refresh and try again.', conflict=True), 409)

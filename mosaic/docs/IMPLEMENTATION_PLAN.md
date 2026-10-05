@@ -689,6 +689,18 @@ only (multi-panel manual rescue is out of scope).
 - T-COARSE: colour 6× coarser than the canvas still places (T-PLACE tolerances scaled by k).
 - `lrgb_workflow.py` green after replacing match-specific assertions.
 
+**As built (2026-10-05).** As above, with these refinements (DESIGN.md §9, phase 6). The intermediate level runs
+only when the global level was reduced more than 2×. Fine tiles overlap by half, need only their centre on the
+disk (limb tiles correlate best), and are chosen most-textured first. The canvas tile is blurred to the panel's
+sampling, σ = ½·√(k² − 1). Similarity needs 3 fitted tiles, affine 6 and poly3 12, and the chosen model is refitted
+on all tiles. A reduced colour pixel scale comes from optics or a wide-gate estimate. Colour-panel photometry
+leaves the colour at the reference panel's level: placement makes panels agree; absolute colour is white
+balance's job. In the application the placement summary — matrix K, held-out statistics, sample points — is what
+`Project.match` returns until phase 7, and a project from before keeps its global match until colour is placed
+again. A set feeding both streams is the colour set marked `both`, allowed only with no luminance panels.
+Known limits: tiles stay wholly inside a panel, so cubic distortion near the corners is extrapolated, up to 0.9 px
+for 1.5 px at the corners; and the colour canvas is accumulated whole, 6.7 GB for a 200 Mpx canvas at k = 1.
+
 ### Phase 7 — The interface
 
 **Goal.** The screens of `interface-proposal.html` on the new backend. Vanilla JS ES modules, no framework,

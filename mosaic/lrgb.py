@@ -2,7 +2,8 @@
 
 Coordinates are pixel centres in native mosaic pixels. The luminance mosaic's grid is the canvas: the chains run
 there (plan D13), and the view — rotation, mirror, coverage crop, export scale — is applied to their result. The
-match maps RGB -> L until phase 6 places colour per panel. Previews never replace the native TIFFs.
+colour image maps onto it through the placement's K (plan phase 6, the colour canvas) or, for a project from
+before, the old global match. Previews never replace the native TIFFs.
 """
 from collections import OrderedDict
 from pathlib import Path
@@ -51,7 +52,7 @@ class Image:
                 self.raw = tifffile.memmap(self.path, mode='r')
                 self.mapped = True
                 self.invert = photo == 0
-                if self.raw.ndim == 3 and self.raw.shape[0] == 3 and self.raw.shape[-1] not in (1, 3):
+                if self.raw.ndim == 3 and self.raw.shape[0] in (3, 4) and self.raw.shape[-1] not in (1, 3, 4):
                     self.raw = np.moveaxis(self.raw, 0, -1)
             except (ValueError, OSError):
                 self.raw = None
@@ -62,8 +63,10 @@ class Image:
             if raw is None:
                 raise ValueError(f'Cannot read {self.path.name}. Use TIFF, PNG or JPEG.')
             self.raw = raw if raw.ndim == 2 else raw[..., :3][..., ::-1]
-        if self.raw.ndim not in (2, 3) or (self.raw.ndim == 3 and self.raw.shape[2] not in (1, 3)):
+        if self.raw.ndim not in (2, 3) or (self.raw.ndim == 3 and self.raw.shape[2] not in (1, 3, 4)):
             raise ValueError('Use a mono image or an interleaved RGB image.')
+        # a fourth channel is coverage (the colour canvas, plan phase 6): pixels() leave it out, sample() uses it
+        self.alpha = self.raw.ndim == 3 and self.raw.shape[2] == 4 and self.mapped
         self.h, self.w = self.raw.shape[:2]
         if min(self.h, self.w) < 8:
             raise ValueError('Image is too small.')
@@ -72,6 +75,8 @@ class Image:
             raise ValueError('Use unsigned 8/16-bit images or floats scaled to 0–1.')
 
     def pixels(self, raw):
+        if raw.ndim == 3 and raw.shape[2] == 4:
+            raw = raw[..., :3]
         a = raw.astype(np.float32)
         if raw.dtype.kind == 'u' and raw.dtype.itemsize == 1:
             a /= 255
@@ -120,10 +125,12 @@ class Image:
         x1, y1 = min(-(-self.w//d), int(np.floor(qx.max()))+2), min(-(-self.h//d), int(np.floor(qy.max()))+2)
         if x1 <= x0 or y1 <= y0:
             return np.zeros(gx.shape+(3,), np.float32), np.zeros(gx.shape, np.float32)
-        a = self.pixels(self.raw[y0*d:y1*d:d, x0*d:x1*d:d])
+        raw = self.raw[y0*d:y1*d:d, x0*d:x1*d:d]
+        a = self.pixels(raw)
         mx, my = (qx-x0).astype(np.float32), (qy-y0).astype(np.float32)
-        return (cv2.remap(a, mx, my, cv2.INTER_LINEAR),
-                cv2.remap(np.ones(a.shape[:2], np.float32), mx, my, cv2.INTER_LINEAR))
+        cover = (raw[..., 3].astype(np.float32)/(65535 if raw.dtype == np.uint16 else 255) if self.alpha
+                 else np.ones(a.shape[:2], np.float32))
+        return cv2.remap(a, mx, my, cv2.INTER_LINEAR), cv2.remap(cover, mx, my, cv2.INTER_LINEAR)
 
     def warp(self, matrix, size):
         """Sample only the source region needed by this output strip."""
@@ -138,7 +145,8 @@ class Image:
         step = max(1, int(1/max(np.hypot(matrix[0, 0], matrix[1, 0]), 1e-9)))
         # Every tile samples the same native grid; a tile-specific phase creates seams.
         x0, y0 = x0//step*step, y0//step*step
-        a = self.pixels(self.raw[y0:y1:step, x0:x1:step])
+        raw = self.raw[y0:y1:step, x0:x1:step]
+        a = self.pixels(raw)
         # Explicit inverse maps avoid warpAffine's tile-origin-dependent fixed-point
         # rounding, which can change the last covered pixel at rotated boundaries.
         xx, yy = np.arange(w, dtype=np.float64)[None, :], np.arange(h, dtype=np.float64)[:, None]
@@ -149,64 +157,10 @@ class Image:
         mx = (gx-x0/step).astype(np.float32)
         my = (gy-y0/step).astype(np.float32)
         rgb = cv2.remap(a, mx, my, cv2.INTER_LINEAR)
-        mask = cv2.remap(np.ones(a.shape[:2], np.float32), mx, my, cv2.INTER_LINEAR)
+        cover = (raw[..., 3].astype(np.float32)/(65535 if raw.dtype == np.uint16 else 255) if self.alpha
+                 else np.ones(a.shape[:2], np.float32))
+        mask = cv2.remap(cover, mx, my, cv2.INTER_LINEAR)
         return rgb, mask
-
-
-def gray8(rgb):
-    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
-    good = gray[gray > .01]
-    if not good.size:
-        raise ValueError('The mosaic contains no usable signal.')
-    lo, hi = np.percentile(good, [1, 99.5])
-    return np.uint8(np.clip((gray-lo) / max(hi-lo, .02), 0, 1) * 255)
-
-
-def similarity(src, dst, threshold):
-    m, inliers = cv2.estimateAffinePartial2D(np.float32(src), np.float32(dst),
-                                          method=cv2.RANSAC, ransacReprojThreshold=threshold,
-                                          maxIters=10000, confidence=.999, refineIters=30)
-    if m is None:
-        raise ValueError('No reliable scale/rotation match. Try manual control points.')
-    return np.vstack([m, [0, 0, 1]]), inliers.ravel().astype(bool)
-
-
-def register(l_path, rgb_path, scale_prior=None):
-    l, rgb = Image(l_path), Image(rgb_path)
-    lp, ls = l.preview(2400)
-    rp, rs = rgb.preview(2400)
-    sift = cv2.SIFT_create(nfeatures=16000, contrastThreshold=.015)
-    kl, dl = sift.detectAndCompute(gray8(lp), None)
-    kr, dr = sift.detectAndCompute(gray8(rp), None)
-    if dl is None or dr is None:
-        raise ValueError('Not enough lunar detail to match these mosaics.')
-    matcher = cv2.BFMatcher(cv2.NORM_L2)
-    pairs = matcher.knnMatch(dr, dl, k=2)
-    reverse = {p[0].queryIdx: p[0].trainIdx for p in matcher.knnMatch(dl, dr, k=2)
-               if len(p) == 2 and p[0].distance < .75*p[1].distance}
-    good = [p[0] for p in pairs if len(p) == 2 and p[0].distance < .75*p[1].distance
-            and reverse.get(p[0].trainIdx) == p[0].queryIdx]
-    if len(good) < 12:
-        raise ValueError(f'Only {len(good)} distinctive mutual matches. Use manual control points or more overlap.')
-    src = np.array([kr[p.queryIdx].pt for p in good], float)
-    dst = np.array([kl[p.trainIdx].pt for p in good], float)
-    m, keep = similarity(src, dst, 2.5)
-    if keep.sum() < 12 or keep.mean() < .25:
-        raise ValueError('The feature match is ambiguous. Use manual control points.')
-    hull = cv2.contourArea(cv2.convexHull(dst[keep].astype(np.float32)))
-    if hull < .015*lp.shape[0]*lp.shape[1]:
-        raise ValueError('Matches are concentrated in one small area. Use points spread across the Moon.')
-    native = ls @ m @ np.linalg.inv(rs)
-    scale = float(np.hypot(native[0, 0], native[1, 0]))
-    residual = np.linalg.norm((np.c_[src[keep], np.ones(keep.sum())] @ m.T)[:, :2]-dst[keep], axis=1)*ls[0, 0]
-    points = np.c_[dst[keep]*ls[0, 0], residual].tolist()
-    return dict(matrix=native.tolist(), method='features', scale=scale,
-                rotation=float(np.degrees(np.arctan2(native[1, 0], native[0, 0]))),
-                inliers=int(keep.sum()), candidates=len(good),
-                median=float(np.median(residual)), p95=float(np.percentile(residual, 95)),
-                worst=float(residual.max()), points=points,
-                scale_prior=scale_prior,
-                warning='Residuals describe fitted feature points. Unmeasured areas may differ; inspect the overlay.')
 
 
 def manual_match(src, dst):

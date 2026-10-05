@@ -389,7 +389,7 @@ diverges:
 | Area | Implemented 3 October | Decided since |
 |---|---|---|
 | Editing model | The application renders chains since phase 4, but its interface still edits the fixed adjustments, translated into a chain on every change; `lunar_finish` runs chains since phase 2 | Three chains of reorderable blocks |
-| Colour placement | Colour built as its own mosaic, then sampled onto L by one global transform | Each colour panel registered directly onto the luminance mosaic |
+| Colour placement | Each colour panel registered directly onto the luminance mosaic since phase 6; a project from before keeps its global transform until colour is placed again | Each colour panel registered directly onto the luminance mosaic |
 | Wavelet units | The interface's amount 0–3 (gain 1 + amount); since phase 4 it becomes bias = amount ÷ 10 (the same gain) on stored values | PixInsight biases (gain 1 + 10b) on stored values |
 | Unsharp mask | The interface's amount 0–1 and threshold 0–0.05 of full scale; since phase 4 translated into Photoshop units and applied with the soft threshold and measured radius law | Photoshop units, soft threshold, measured radius law |
 | Saturation | Chroma multiplier | Lunar-hue weighting |
@@ -611,6 +611,54 @@ Luminance sets at different pixel scales build into one mosaic on the finest set
 Tests: `mixed_checks.py` (T-GATE, T-SHARP, T-MIX against the truth, the one-set file, canvas scale and cap, the
 application journey); a phase-4 project opens with its build state moved. All eleven suites pass; 114 tests.
 
+### Phase 6 — 2026-10-05
+
+Colour is placed panel by panel onto the luminance mosaic; there is no colour mosaic any more.
+
+1. **`mosaic/colour_place.py`.** Each panel is found in up to three steps. First a global SIFT match on the canvas
+   reduced to about 2048 px, with the panel resampled to the same scale. Then, when that reduction is more than
+   2×, 512 px tiles on the halved canvas. Finally 256 px canvas tiles, phase-correlated against the panel warped
+   into each tile. The canvas tile is first blurred to the panel's sampling.
+2. **Pose model (D15).** Every fourth tile is held out, and the simplest model within 10 % of the best held-out
+   residual is kept: similarity, affine or poly3, the last pulled towards the affine fit. A panel with too few
+   tiles or a held-out residual above 2 px is rejected, and the reason is recorded.
+3. **Per panel.** Red and blue are moved onto green when both RGB-shift estimators agree (D16). Panels are matched
+   in brightness after subtracting each one's sky: log-gains are solved per overlap component, and further
+   components are matched by their median colour on the disk, which the report says. Panels are blended into the
+   colour canvas at the colour data's own sampling (D8, float k): 16-bit RGBA, alpha = coverage, feathered 64 px
+   from each panel edge. The pixel scale comes from optics, or is estimated by a wide-gate match (2.0000 for a
+   true 2).
+4. **Measured, synthetic.**
+
+   | Case | Placed | Error against the truth |
+   |---|---|---|
+   | Drift 0–3 px across the run, colour 2× coarser | 14 of 16 | 0.068 px rms (target 0.25) |
+   | Colour 6× coarser | 14 of 16 | 0.25 px rms (target 1.5) |
+   | 1.5 px radial distortion at the panel corners | 9 of 9 | 0.20 px rms; up to 0.94 px in the corners |
+
+   The unplaced panels are image corners with almost no disk. With distortion, poly3 was chosen for 7 of 9 panels,
+   and held-out residuals stayed within 0.12 px. The corners stay worse because tiles must lie wholly inside a
+   panel, so they reach only about 65 % of its radius, where cubic distortion is small; with 400 px panels the
+   distortion was not even measurable there. T-DE: no part of the disk is visibly wrong (ΔE*ab median 0.17,
+   99.9th percentile 0.63, against 2.3).
+5. **Measured, real data.** Twelve of the 25 September colour panels were placed back onto that night's mosaic
+   (the same scale; no separate infrared luminance exists). 11 placed, mostly with poly3, as D15 measured;
+   held-out residuals 0.17–1.24 px, 0.58 px rms over all — inside the 1–2 px target. Red was moved 0.11–0.16 px
+   on five panels. It took 36 s, with 6.7 GB peak for the full-size colour canvas at k = 1. Evidence:
+   `/Volumes/Astro/moontest_04102026/phase6/`.
+6. **Application.** Building colour now places it, which needs the luminance mosaic. `/api/match` places colour
+   again, then `alignment.measure` checks the placed result independently. Control points place a single-image
+   colour set. A colour set may feed both streams (D9), and is then its own colour. The placement's summary
+   stands in for the old match in the interface: matrix K, held-out residuals as the statistics, tile samples for
+   the errors view. `lrgb.register` is gone. A project from before keeps its global match and colour mosaic until
+   colour is placed again.
+
+Tests: `colour_checks.py` (T-PLACE with drift and with distortion, T-DE, T-COARSE, scale estimate and photometry,
+a set feeding both streams). In `lrgb_workflow.py`: the global-registration test now places colour onto a
+luminance 2.29× finer and turned 8°; "a failed set keeps the other mosaic" checks both new cases (no luminance:
+colour cannot start; colour fails: luminance stays); the local-error check runs `alignment.measure` on a colour
+mosaic matched the old way, because placement now corrects that error. All twelve suites pass; 119 tests.
+
 ### Changes made 2026-10-05 to `lunar_finish.py`
 
 1. **Wavelets match PixInsight.** `wavelet_gain()` applies the measured law; sharpening runs on each
@@ -640,6 +688,7 @@ setting) instead of the old, unintended gain 4. Divide any pre-2026-10-05 bias b
 | 4 October test build | `/Volumes/Astro/moontest_04102026/` |
 | Chain engine against the old code on real data (terminator patch, movie frames) | `/Volumes/Astro/moontest_04102026/phase2/` |
 | The application on chains: renders and timings against the old renderer | `/Volumes/Astro/moontest_04102026/phase4/` |
+| Colour placed per panel: real 25 September panels, report and composite | `/Volumes/Astro/moontest_04102026/phase6/` |
 | LunarAtlas reference checkout | `/Volumes/Astro/LunarAtlas` |
 
 Driving the applications headless: PixInsight with

@@ -162,6 +162,44 @@ def rgb_shift(rgb):
             for name, k in (('r', 0), ('b', 2))}
 
 
+def rgb_shift_decision(rgb):
+    """D16 on an RGB image: both estimators on up to three textured crops, size min(512, side / 3); a channel is
+    corrected only when, on each axis, they agree within 0.15 px on at least two crops, and the shift is at least
+    0.1 px. Returns the crops, every estimate, and per channel {'apply': [dx, dy], 'why'} (apply moves the channel
+    onto green)."""
+    size = min(512, min(rgb.shape[:2]) // 3)          # three non-overlapping crops fit
+    boxes = textured_boxes(rgb.mean(axis=2), 3, size)
+    est = [rgb_shift(rgb[y:y + size, x0:x0 + size]) for y, x0 in boxes]
+    out = {'crops': [[int(y), int(x0), size] for y, x0 in boxes],
+           'estimates': {ch: [[list(map(float, e[ch][0])), list(map(float, e[ch][1]))] for e in est] for ch in 'rb'}}
+    for ch in ('r', 'b'):
+        if len(est) < 2:
+            out[ch] = {'apply': [0.0, 0.0], 'why': 'fewer than two crops with enough texture'}
+            continue
+        mean = []
+        for axis in (0, 1):
+            agree = [(e[ch][0][axis] + e[ch][1][axis]) / 2 for e in est if abs(e[ch][0][axis] - e[ch][1][axis]) <= 0.15]
+            mean.append(float(np.mean(agree)) if len(agree) >= 2 else None)
+        if None in mean:
+            out[ch] = {'apply': [0.0, 0.0], 'why': 'the two estimators disagree'}
+        elif np.hypot(*mean) < 0.1:
+            out[ch] = {'apply': [0.0, 0.0], 'why': f'only {np.hypot(*mean):.2f} px off: nothing to correct'}
+        else:
+            out[ch] = {'apply': [-mean[0], -mean[1]], 'why': f'{np.hypot(*mean):.2f} px corrected'}
+    return out
+
+
+def shift_channels(rgb, decision):
+    """Red and blue moved by decision[ch]['apply'] (Lanczos-4, reflected border); green stays."""
+    out = rgb.copy()
+    for ch, k in (('r', 0), ('b', 2)):
+        dx, dy = decision.get(ch, {}).get('apply', [0.0, 0.0])
+        if dx or dy:
+            out[..., k] = cv2.warpAffine(rgb[..., k], np.float32([[1, 0, dx], [0, 1, dy]]), rgb.shape[1::-1],
+                                         flags=cv2.INTER_LANCZOS4, borderMode=cv2.BORDER_REFLECT)
+    return out
+
+
 # ---------------------------------------------------------------- resolution of a panel set (D14)
 
 def bright_crop(gray, size=1024, inset=32):

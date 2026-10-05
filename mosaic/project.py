@@ -88,7 +88,7 @@ def luminance_scales(sets):
     finest set's (≥ 1). From optics; otherwise from a confirmed estimate against another set (D10). One set needs
     neither. Raises ValueError naming a set whose scale is unknown or unconfirmed: a mixed stream is never built on
     a guess."""
-    sets = [s for s in sets if s['stream'] == 'luminance' and s.get('inputs')]
+    sets = [s for s in sets if s['stream'] in ('luminance', 'both') and s.get('inputs')]
     if len(sets) == 1:
         a = arcsec_px(sets[0].get('optics', {}))
         return {sets[0]['id']: dict(rel=1.0, arcsec_px=a, source='optics' if a else 'single set')}
@@ -258,7 +258,7 @@ class Project:
                 st.update(state='interrupted', error='Build interrupted. Restart this set; completed mosaics were kept.')
             if st.get('mosaic') and not p.path(st['mosaic']).is_file():
                 st.update(state='missing', error='The built mosaic is missing.', mosaic=None)
-                data['colour']['legacy_match'] = None
+                data['colour']['legacy_match'] = data['colour']['placement'] = None
                 data['geometry']['coverage'] = 'full'
                 data['view']['l_visible'] = True
         if version != SCHEMA or data != before:
@@ -272,11 +272,13 @@ class Project:
         ids = [s.get('id') if isinstance(s, dict) else None for s in sets] if isinstance(sets, list) else []
         if (not ids or len(set(ids)) != len(ids) or 'L' not in ids or 'RGB' not in ids
                 or any(not isinstance(i, str) or not i or len(i) > 32 for i in ids)
-                or any(s.get('stream') not in STREAMS or not isinstance(s.get('inputs'), list)
+                or any(s.get('stream') not in STREAMS + ('both',) or not isinstance(s.get('inputs'), list)
                        or not isinstance(s.get('optics', {}), dict) for s in sets)
-                or self.set('L')['stream'] != 'luminance' or self.set('RGB')['stream'] != 'colour'
-                or sum(s['stream'] == 'colour' for s in sets) != 1):
+                or self.set('L')['stream'] != 'luminance' or self.set('RGB')['stream'] not in ('colour', 'both')
+                or sum(s['stream'] in ('colour', 'both') for s in sets) != 1):
             raise ValueError('The project has invalid panel sets.')
+        if self.set('RGB')['stream'] == 'both' and any(s['inputs'] for s in self.sets_of('luminance')):
+            raise ValueError('A colour set that feeds both streams is the only data: the luminance sets must be empty.')
         for name in STREAMS:
             if not isinstance(d.get(name), dict) or d[name].get('state') not in BUILD_STATES:
                 raise ValueError(f'The project\'s {name} build state is invalid.')
@@ -308,20 +310,26 @@ class Project:
                 for v in self.set(key)['inputs']]
 
     def stream(self, name):
-        """The build state of a stream: state, mosaic, error, … (and, for colour until phase 6, legacy_match)."""
+        """The build state of a stream: state, mosaic, error, …; for colour also the placement (phase 6: k, report,
+        revision and the summary the renderer and interface read) or, for a project from before, legacy_match."""
         return self.data[name]
 
     def sets_of(self, name):
         return [s for s in self.data['sets'] if s['stream'] == name]
 
+    def feeding(self, name):
+        """The sets whose panels a stream is built from: its own, and a set marked both (D9)."""
+        return [s for s in self.data['sets'] if s['stream'] in (name, 'both')]
+
     def stream_of(self, key):
-        return self.data[self.set(key)['stream']]
+        stream = self.set(key)['stream']
+        return self.data['colour' if stream == 'both' else stream]
 
     def refresh_state(self, name):
         """An unbuilt stream is ready when one of its sets has panels, empty otherwise."""
         st = self.data[name]
         if st['state'] in ('empty', 'ready'):
-            st['state'] = 'ready' if any(s['inputs'] for s in self.sets_of(name)) else 'empty'
+            st['state'] = 'ready' if any(s['inputs'] for s in self.feeding(name)) else 'empty'
 
     def add_set(self, stream, label):
         """A new luminance set (colour gets more sets with per-panel placement, phase 6). Ids are s2, s3, …"""
@@ -336,11 +344,17 @@ class Project:
 
     @property
     def match(self):
-        return self.data['colour'].get('legacy_match')
+        """What maps the colour image onto the luminance canvas: since phase 6 the placement summary (matrix = K, the
+        colour canvas onto the canvas), else a schema-3 project's global match, kept until colour is placed."""
+        c = self.data['colour']
+        return c.get('placement') or c.get('legacy_match')
 
     @match.setter
     def match(self, value):
-        self.data['colour']['legacy_match'] = value
+        c = self.data['colour']
+        c['placement' if c.get('placement') or value is None else 'legacy_match'] = value
+        if value is None:
+            c['legacy_match'] = None
 
     @property
     def edits(self):
@@ -405,7 +419,7 @@ class Project:
         d = self.data
 
         def legacy(key):            # a schema-3 set: the set's own fields plus its stream's build state
-            st = {k: v for k, v in d[self.set(key)['stream']].items() if k != 'legacy_match'}
+            st = {k: v for k, v in d[self.set(key)['stream']].items() if k not in ('legacy_match', 'placement')}
             return copy.deepcopy(dict(st, **{k: v for k, v in self.set(key).items() if k not in ('id', 'stream', 'label')}))
         return dict(version=d['version'], id=d['id'], name=d['name'], created=d['created'], updated=d['updated'],
                     revision=d['revision'], folder=str(self.folder), orientation=copy.deepcopy(d['orientation']),

@@ -24,7 +24,6 @@ import tifffile
 
 import chain
 from app import Application, start_server
-from lrgb import manual_match
 from project import DEFAULT_EDITS, Project, edits_to_chain
 from synthetic import lunar_disk
 
@@ -54,12 +53,9 @@ class Fixture:
         self.app.select(self.root/'moon.lunarmosaic', True, 'Scene checks')
         self.app.inputs('L', [str(self.root/'L.tif')])
         self.app.inputs('RGB', [str(self.root/'RGB.tif')])
-        assert self.app.build(['L', 'RGB']) == {'L': 'built', 'RGB': 'built'}
-        src = np.array([[20, 20], [460, 20], [20, 420], [460, 420]], float)
-        dst = (np.c_[src, np.ones(4)] @ M.T)[:, :2]
-        p = self.app.project
-        p.match = manual_match(src, dst)
-        p.save()
+        # colour is placed panel by panel onto the luminance (phase 6); its scale is estimated, there are no optics
+        built = self.app.build(['L', 'RGB'])
+        assert built == {'L': 'built', 'RGB': 'built'}, (built, self.app.project.stream('colour').get('error'))
 
     def close(self):
         self.app.close()
@@ -113,7 +109,7 @@ class Migration(unittest.TestCase):
             self.assertEqual(d['geometry'], dict(rotation=12.0, mirror=True, coverage='common'))
             self.assertEqual(d['view'], dict(l_visible=False, rgb_visible=False))
             self.assertEqual([(s['id'], s['stream']) for s in d['sets']], [('L', 'luminance'), ('RGB', 'colour')])
-            self.assertEqual((d['luminance']['mosaic'], d['colour']['mosaic']), ('derived/L.tif', 'derived/RGB.tif'))
+            self.assertEqual((d['luminance']['mosaic'], d['colour']['mosaic']), ('derived/L.tif', 'derived/colour_canvas.tif'))
             self.assertTrue(all('state' not in s and 'mosaic' not in s for s in d['sets']))     # build state is per stream
             ch = d['chain']['chains']
             self.assertTrue(d['chain']['protect_space'])
@@ -147,19 +143,19 @@ class Migration(unittest.TestCase):
         f = Fixture()
         try:
             p = f.app.project
-            folder, data = p.folder, copy.deepcopy(p.data)
+            folder, data, match = p.folder, copy.deepcopy(p.data), copy.deepcopy(p.match)
             f.app.close()
-            # phase 4 kept each set's build state in the set and had no luminance stream object
+            # phase 4 kept each set's build state in the set, had no luminance stream object and one global match
             for x in data['sets']:
                 x.update(data[x['stream']] if x['stream'] == 'luminance' else
-                         {k: v for k, v in data['colour'].items() if k != 'legacy_match'})
-            colour = {'legacy_match': data['colour']['legacy_match']}
+                         {k: v for k, v in data['colour'].items() if k not in ('legacy_match', 'placement')})
+            colour = {'legacy_match': match}
             del data['luminance']
             data['colour'] = colour
             (folder/'project.json').write_text(json.dumps(data), 'utf-8')
             q = Project.open(folder)
             self.assertEqual((q.stream('luminance')['state'], q.stream('luminance')['mosaic']), ('built', 'derived/L.tif'))
-            self.assertEqual(q.stream('colour')['mosaic'], 'derived/RGB.tif')
+            self.assertEqual(q.stream('colour')['mosaic'], 'derived/colour_canvas.tif')
             self.assertEqual(q.match, colour['legacy_match'])
             self.assertTrue(all('state' not in x for x in q.data['sets']))
         finally:

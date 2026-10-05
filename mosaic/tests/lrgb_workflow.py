@@ -17,7 +17,7 @@ import numpy as np
 import tifffile
 from project import Project, DEFAULT_EDITS
 import lrgb
-from lrgb import Image, Scene, register, manual_match, largest_rectangle
+from lrgb import Image, manual_match, largest_rectangle
 from app import Application, start_server
 from alignment import measure
 from recent import RecentProjects
@@ -48,10 +48,18 @@ class Workflow(unittest.TestCase):
         self.temp.cleanup()
 
     def built(self):
+        # colour is placed onto the luminance mosaic (phase 6): the colour image matches it 1:1 here
         self.assertEqual(self.app.build(['L', 'RGB']), {'L':'built', 'RGB':'built'})
-        p = self.app.project
-        p.match = manual_match([[30,30],[550,30],[30,550],[550,550]], [[30,30],[550,30],[30,550],[550,550]])
-        p.save()
+        return self.app.get_scene()
+
+    def legacy_colour(self, rgb):
+        """A colour mosaic matched the schema-3 way (one global transform), as a project from before phase 6 has
+        it: alignment.measure must still find its local errors."""
+        p=self.app.project
+        tifffile.imwrite(p.path('derived/RGB.tif'),np.uint16(np.clip(rgb,0,1)*65535),photometric='rgb')
+        p.stream('colour').update(state='built',mosaic='derived/RGB.tif',placement=None,
+            legacy_match=manual_match([[30,30],[550,30],[30,550],[550,550]],[[30,30],[550,30],[30,550],[550,550]]))
+        p.save();self.app.scene=None
         return self.app.get_scene()
 
     def test_native_build_preserves_sources_and_reopens(self):
@@ -120,8 +128,8 @@ class Workflow(unittest.TestCase):
     def test_independent_checks_detect_local_error_and_unknown_regions(self):
         shifted=cv2.warpAffine(self.rgb,np.array([[1,0,3],[0,1,0]],np.float32),(640,640))
         rgb=self.rgb.copy();rgb[:,320:]=shifted[:,320:]
-        tifffile.imwrite(self.cp,np.uint16(rgb*65535),photometric='rgb')
-        scene=self.built()
+        self.assertEqual(self.app.build(['L']),{'L':'built'})
+        scene=self.legacy_colour(rgb)
         checks=measure(scene)
         left=[s['residual'] for s in checks['samples'] if s['state']=='measured' and s['x']<290]
         right=[s['residual'] for s in checks['samples'] if s['state']=='measured' and s['x']>360]
@@ -187,17 +195,22 @@ class Workflow(unittest.TestCase):
         self.assertLess(float(np.max(np.abs(im.pixels(im.raw)-self.rgb))),.00002)
 
     def test_mixed_scale_rotation_translation(self):
+        # colour placed onto a luminance 2.29× finer and turned 8° (phase 6; register() is gone): scale estimated
         expected = np.vstack([cv2.getRotationMatrix2D((320,320), 8, 2.29), [0,0,1]])
         expected[:2,2] += [65,40]
         target = cv2.warpAffine(self.l, expected[:2], (1500,1450))
         tifffile.imwrite(self.lp, np.round(target*65535).astype(np.uint16))
-        result = register(self.lp,self.cp)
-        m = np.array(result['matrix'])
-        corners = np.array([[80,80,1],[520,80,1],[80,520,1],[520,520,1]])
-        error = np.linalg.norm((corners@m.T-corners@expected.T)[:,:2], axis=1)
+        self.assertEqual(self.app.build(['L','RGB']), {'L':'built','RGB':'built'})
+        report = json.loads(self.app.project.path('derived/colour_place.json').read_text())
+        panel = next(iter(report['panels'].values()))
+        self.assertEqual(panel['state'], 'placed')
+        import colour_place
+        pose = colour_place.Pose(panel['transform']['size'], panel['transform']['model'], panel['transform']['params'])
+        corners = np.array([[80,80],[520,80],[80,520],[520,520]], float)
+        error = np.linalg.norm(pose.to_canvas(corners) - (np.c_[corners, np.ones(4)] @ expected.T)[:,:2], axis=1)
         self.assertLess(float(error.max()), .7)
-        self.assertAlmostEqual(result['scale'],2.29,places=2)
-        self.assertGreater(result['inliers'],100)
+        self.assertAlmostEqual(report['k'], 2.29, places=2)
+        self.assertEqual(self.app.project.match['matrix'], colour_place.K_matrix(report['k']).tolist())
 
     def test_smoothing_retains_luminance_detail(self):
         scene = self.built()
@@ -250,11 +263,18 @@ class Workflow(unittest.TestCase):
         self.assertEqual(out.read_bytes(),before)
 
     def test_failed_set_keeps_other_mosaic(self):
+        # colour is placed onto luminance (phase 6): with no luminance it cannot start, and says so
         self.lp.unlink()
-        result=self.app.build(['L','RGB'])
-        self.assertEqual(result,{'L':'failed','RGB':'built'})
+        self.assertEqual(self.app.build(['L','RGB']),{'L':'failed','RGB':'failed'})
+        self.assertIn('luminance mosaic first',self.app.project.stream('colour')['error'])
         self.assertIsNone(self.app.project.stream('luminance')['mosaic'])
-        self.assertTrue(self.app.project.path('derived/RGB.tif').is_file())
+        # and a colour placement that fails keeps the luminance mosaic
+        tifffile.imwrite(self.lp,np.round(self.l*65535).astype(np.uint16))
+        self.app.project.stream('luminance').update(state='ready',error=None)
+        self.cp.unlink()
+        self.assertEqual(self.app.build(['L','RGB']),{'L':'built','RGB':'failed'})
+        self.assertTrue(self.app.project.path('derived/L.tif').is_file())
+        self.assertIsNone(self.app.project.stream('colour')['mosaic'])
 
     def test_partial_import_keeps_valid_panels_and_reports_bad_files(self):
         bad=self.root/'unreadable.tif';bad.write_bytes(b'not an image')
@@ -358,7 +378,7 @@ class Workflow(unittest.TestCase):
     def test_missing_colour_reopens_luminance_without_stale_common_crop(self):
         self.built();p=self.app.project
         p.edits=dict(p.edits,coverage='common',l_visible=False);p.save();self.app.close()
-        p.path('derived/RGB.tif').rename(p.path('derived/RGB.moved.tif'))
+        p.path('derived/colour_canvas.tif').rename(p.path('derived/colour_canvas.moved.tif'))
         self.app.select(p.folder)
         restored=self.app.project
         self.assertEqual(restored.stream('colour')['state'],'missing')

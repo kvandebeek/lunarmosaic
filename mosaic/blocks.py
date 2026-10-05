@@ -422,30 +422,10 @@ def _shifts(name, v):
 
 
 def _rgbshift_prepare(kind, x, p, ctx):
-    """Both estimators on up to three textured crops of the probe; a channel is corrected only when, on each axis,
-    they agree within 0.15 px on at least two crops, and the shift is at least 0.1 px."""
+    """Both estimators on up to three textured crops of the probe (measurements.rgb_shift_decision)."""
     if kind != 'probe' or p['mode'] == 'manual':
         return {}
-    size = min(512, min(x.shape[:2]) // 3)          # three non-overlapping crops fit in the probe
-    boxes = ms.textured_boxes(x.mean(axis=2), 3, size)
-    est = [ms.rgb_shift(x[y:y + size, x0:x0 + size]) for y, x0 in boxes]
-    out = {'crops': [[int(y), int(x0), size] for y, x0 in boxes],
-           'estimates': {ch: [[list(map(float, e[ch][0])), list(map(float, e[ch][1]))] for e in est] for ch in 'rb'}}
-    for ch in ('r', 'b'):
-        if len(est) < 2:
-            out[ch] = {'apply': [0.0, 0.0], 'why': 'fewer than two crops with enough texture'}
-            continue
-        mean = []
-        for axis in (0, 1):
-            agree = [(e[ch][0][axis] + e[ch][1][axis]) / 2 for e in est if abs(e[ch][0][axis] - e[ch][1][axis]) <= 0.15]
-            mean.append(float(np.mean(agree)) if len(agree) >= 2 else None)
-        if None in mean:
-            out[ch] = {'apply': [0.0, 0.0], 'why': 'the two estimators disagree'}
-        elif np.hypot(*mean) < 0.1:
-            out[ch] = {'apply': [0.0, 0.0], 'why': f'only {np.hypot(*mean):.2f} px off: nothing to correct'}
-        else:
-            out[ch] = {'apply': [-mean[0], -mean[1]], 'why': f'{np.hypot(*mean):.2f} px corrected'}
-    return out
+    return ms.rgb_shift_decision(x)
 
 
 def _rgbshift_apply(x, p, st, ctx):

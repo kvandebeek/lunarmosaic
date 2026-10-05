@@ -49,7 +49,7 @@ class RecentProjects:
                     lum = [s for s in sets if s.get('stream') == 'luminance']
                     sets = {'L': dict(by_id['L'], **streams.get('luminance', {}), inputs=[x for s in lum for x in s['inputs']]),
                             'RGB': dict(by_id['RGB'], **streams.get('colour', {}))}
-                    p['match'] = (p.get('colour') or {}).get('legacy_match')
+                    p['match'] = (p.get('colour') or {}).get('placement') or (p.get('colour') or {}).get('legacy_match')
                 item.update(name=str(p['name']), available=True,
                             panels={k:len(sets[k]['inputs']) for k in ('L', 'RGB')})
                 built = {}
