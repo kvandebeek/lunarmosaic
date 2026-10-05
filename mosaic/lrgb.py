@@ -26,9 +26,11 @@ from project import edits_to_chain
 # and /api/export-preview publishes it so the UI can warn before the click.
 JPEG_MAX_SIDE = 65000
 JPEG_MAX_PIXELS = 80_000_000
-VIEWS = ('composite', 'luminance', 'colour', 'overlay', 'coverage', 'errors')
+VIEWS = ('composite', 'luminance', 'colour', 'overlay', 'coverage', 'errors', 'resolution')
 STAGE_OF = dict(composite='final', luminance='luminance', colour='colour', overlay='overlay', coverage='final',
-                errors='final')
+                errors='final', resolution='final')
+# the resolution view's tints, one per luminance set in the builder's set report
+SET_COLOURS = ((.95, .55, .25), (.30, .65, .95), (.45, .85, .45), (.90, .40, .75), (.95, .85, .30), (.55, .45, .95))
 TILE = 768            # output px per side of a view tile at full scale: bounds the canvas region a tile renders
 TILE_WORKERS = max(1, min(4, os.cpu_count() or 1))     # tiles rendered at once: memory grows with each
 STATS_KEEP = 4        # statistics kept per scene (each holds proxy-sized maps)
@@ -322,24 +324,49 @@ class Scene:
 
     def __init__(self, project, match=None):
         self.project = project
-        self.l = Image(project.path(project.set('L')['mosaic']))
-        s = project.set('RGB')
+        self.l = Image(project.path(project.stream('luminance')['mosaic']))
+        s = project.stream('colour')
         self.rgb = Image(project.path(s['mosaic'])) if s.get('mosaic') else None
         match = match if match is not None else project.match
         self.match_meta = match
         self.match = np.array(match['matrix'], float) if match and self.rgb else None
         self.labels, self.covered = {}, {}
-        for key in ('L', 'RGB'):
-            mosaic = project.set(key).get('mosaic')
+        for key, name in (('L', 'luminance'), ('RGB', 'colour')):
+            mosaic = project.stream(name).get('mosaic')
             if mosaic:
                 label = project.path(str(Path(mosaic).with_suffix('')) + '_labels.png')
                 if label.exists():
                     self.labels[key] = cv2.imread(str(label), cv2.IMREAD_UNCHANGED)
                     self.covered[key] = (self.labels[key] != 65535).astype(np.float32)
+        self.set_tint, self.set_legend, self.label_scale = self.read_sets()
         self.lum, self.col = LuminanceSource(self), MatchedColour(self)
         self._cond = threading.Condition()
         self._stats, self._running = OrderedDict(), set()
         self._base, self._base_busy = (None, None), False
+
+    def read_sets(self):
+        """For the resolution view: an RGBA tint at label resolution (which luminance set supplied each region) and
+        its legend, from the builder's set report; (None, [], 4) when the mosaic has none."""
+        report_path = self.project.stream('luminance').get('sets_report')
+        label = self.labels.get('L')
+        if not report_path or label is None:
+            return None, [], 4
+        try:
+            report = json.loads(self.project.path(report_path).read_text('utf-8'))
+            order = list(report['sets'])
+            index = np.array([order.index(s) for s in report['label_to_set']] + [len(order)])
+        except (OSError, ValueError, KeyError, TypeError):
+            return None, [], 4                 # an optional report must not stop the mosaic from opening
+        lut = np.array([SET_COLOURS[i % len(SET_COLOURS)] + (1.0,) for i in range(len(order))] + [(0, 0, 0, 0)], np.float32)
+        tint = lut[index[np.minimum(label, len(index) - 1)]]
+        names = {x['id']: x.get('label') or x['id'] for x in self.project.data['sets']}
+        canvas = self.project.stream('luminance').get('canvas_arcsec_px')
+        legend = [dict(id=sid, label=names.get(sid, sid), colour=SET_COLOURS[i % len(SET_COLOURS)], tier=v.get('tier'),
+                       scale_rel=v.get('scale_rel'), detail_px=v.get('detail_px'), disk_share=v.get('disk_share'),
+                       # the set's own pixel scale: the canvas's (after any reduction) × the reduction × scale_rel
+                       arcsec_px=canvas * report.get('canvas_scale', 1) * v.get('scale_rel', 1) if canvas else None)
+                  for i, (sid, v) in enumerate(report['sets'].items())]
+        return tint, legend, int(report.get('label_scale', 4))
 
     def layer(self, key, matrix, size):
         """One mosaic resampled through `matrix` with its coverage (alignment checks and the common crop)."""
@@ -504,7 +531,7 @@ class Scene:
             th, tw = min(t, h-ty), min(t, w-tx)
             U = r*(ox+tx)+np.arange(r*tw, dtype=np.float64)
             V = r*(oy+ty)+np.arange(r*th, dtype=np.float64)
-            parts = self._tile(inv, U, V, step, stage, stats, doc)
+            parts = self._tile(inv, U, V, step, stage, stats, doc, tint=view == 'resolution')
             if r > 1:
                 parts = [cv2.resize(v, (tw, th), interpolation=cv2.INTER_AREA) for v in parts]
             rgb[ty:ty+th, tx:tx+tw], lm[ty:ty+th, tx:tx+tw], cm[ty:ty+th, tx:tx+tw] = parts
@@ -541,9 +568,12 @@ class Scene:
                     cv2.circle(result, tuple(np.round(p[:2]).astype(int)), 5, colour, -1)
         valid = lm > .5
         missing = float(np.mean(cm[valid] <= .5))*100 if valid.any() else 100
-        return result, dict(missing_colour=missing, matched=self.match is not None)
+        info = dict(missing_colour=missing, matched=self.match is not None)
+        if view == 'resolution':
+            info['sets'] = self.set_legend
+        return result, info
 
-    def _tile(self, inv, U, V, step, stage, stats, doc):
+    def _tile(self, inv, U, V, step, stage, stats, doc, tint=False):
         """One tile of output grid U × V: its canvas region rendered and resampled; returns (rgb × L coverage, L
         coverage, colour coverage) on that grid — multiplied before any reduction, so a reduced render is the mean
         of the full one."""
@@ -561,6 +591,13 @@ class Scene:
         mx, my = (gx-j0).astype(np.float32), (gy-i0).astype(np.float32)
         # outside the canvas any value will do: the coverage below is zero there
         rgb = np.clip(cv2.remap(img, mx, my, cv2.INTER_LANCZOS4, borderMode=cv2.BORDER_REPLICATE), 0, 1)
+        if tint and self.set_tint is not None:
+            # label px j covers mosaic px [q·j, q·(j+1)); 38 % of the set's colour, as the builder's contribution map
+            q = self.label_scale
+            t = cv2.remap(self.set_tint, ((gx*step-(q-1)/2)/q).astype(np.float32), ((gy*step-(q-1)/2)/q).astype(np.float32),
+                          cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT)
+            a = .38*t[..., 3:]
+            rgb = rgb*(1-a)+t[..., :3]*a
         ones = np.ones(img.shape[:2], np.float32)
         lm, cm = (cv2.remap(ones if cover[k] is None else cover[k], mx, my, cv2.INTER_LINEAR) for k in ('luminance', 'colour'))
         return rgb*lm[..., None], lm, cm
@@ -613,8 +650,9 @@ class Scene:
         output = Path(output).expanduser().resolve()
         if output.exists():
             raise ValueError('The export file already exists. Choose another name.')
-        protected = {Path(p) for key in ('L', 'RGB') for p in self.project.input_paths(key)}
-        protected.update(self.project.path(s['mosaic']) for s in self.project.data['sets'] if s.get('mosaic'))
+        protected = {Path(p) for s in self.project.data['sets'] for p in self.project.input_paths(s['id'])}
+        protected.update(self.project.path(self.project.stream(n)['mosaic']) for n in ('luminance', 'colour')
+                         if self.project.stream(n).get('mosaic'))
         if output in protected or output.is_relative_to(self.project.folder / 'derived'):
             raise ValueError('Choose an export outside the built mosaics and source files.')
         if factor not in (1, .5, .25):

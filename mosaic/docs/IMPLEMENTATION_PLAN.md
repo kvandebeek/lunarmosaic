@@ -628,6 +628,17 @@ default proxy factor of 4 leaves too few SIFT keypoints on small panels (below t
 phase 0: 2048 px disk, 1024 px panels, overlap 0.45, `--proxy-factor 1` runs every stage in about 10 s;
 assert from the log that tiles were found and the mesh ran (`determinism.py` shows how).
 
+**As built (2026-10-05).** All of the above, with these additions and departures (DESIGN.md §9, phase 5):
+`mst.photometry` takes `scale_rel` and blurs the finer panel of an overlap to the coarser one's sampling before
+matching percentiles (unblurred, mixed overlaps got worse); `measurements.panel_detail` refuses a spectrum that
+stays flat to the sampling limit (low frequencies under 3× the floor) and the set then counts as resolving 2 of its
+own px; the builder's set report carries `label_scale`. In the application: build state lives in the `luminance`
+and `colour` objects of §4.6 (a phase-4 project is converted on opening); `/api/sets` takes `op` create, update,
+delete, `estimate` (a job, D10) and `confirm`; the confirmed canvas (`canvas_scale`, `max_canvas_mpx`) travels in
+the `/api/build` body; the default 400 Mpx cap applies to mixed streams only, so a single set builds as before; the
+panel scales file is kept as `derived/L_panel_scales.json` and is passed for one set too, so every built
+luminance mosaic has its set report.
+
 ### Phase 6 — Colour placed per panel onto the luminance canvas
 
 **Goal.** Replace the single global colour match with per-panel registration onto the luminance mosaic

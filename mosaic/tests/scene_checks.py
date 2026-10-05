@@ -95,7 +95,7 @@ class Migration(unittest.TestCase):
                          wavelet_denoise=1.5, usm_amount=.3, usm_radius=1.4, usm_threshold=.02, l_visible=False,
                          rgb_visible=False)
             self.assertTrue(all(edits[k] != DEFAULT_EDITS[k] for k in DEFAULT_EDITS))
-            sets = {s['id']: {k: v for k, v in s.items() if k not in ('id', 'stream', 'label')} for s in p.data['sets']}
+            sets = p.public()['sets']                      # the schema-3 shape: sets by key with their build state
             old = dict(version=3, id=p.data['id'], name=p.data['name'], created=p.data['created'],
                        updated=p.data['updated'], revision=7, sets=sets, match=p.match, orientation=None, edits=edits)
             folder = p.folder
@@ -112,8 +112,9 @@ class Migration(unittest.TestCase):
             self.assertEqual(q.match, old['match'])
             self.assertEqual(d['geometry'], dict(rotation=12.0, mirror=True, coverage='common'))
             self.assertEqual(d['view'], dict(l_visible=False, rgb_visible=False))
-            self.assertEqual([(s['id'], s['stream'], s['mosaic']) for s in d['sets']],
-                             [('L', 'luminance', 'derived/L.tif'), ('RGB', 'colour', 'derived/RGB.tif')])
+            self.assertEqual([(s['id'], s['stream']) for s in d['sets']], [('L', 'luminance'), ('RGB', 'colour')])
+            self.assertEqual((d['luminance']['mosaic'], d['colour']['mosaic']), ('derived/L.tif', 'derived/RGB.tif'))
+            self.assertTrue(all('state' not in s and 'mosaic' not in s for s in d['sets']))     # build state is per stream
             ch = d['chain']['chains']
             self.assertTrue(d['chain']['protect_space'])
             self.assertEqual([e['type'] for e in ch['luminance']], ['wavelets', 'unsharp_mask', 'highlights', 'contrast'])
@@ -138,6 +139,29 @@ class Migration(unittest.TestCase):
             self.assertEqual((folder/'project.json').read_bytes(), after_first)     # no save, same revision
             # the translation is deterministic: the same adjustments give the same chain, so statistics stay cached
             self.assertEqual(edits_to_chain(edits)[0], edits_to_chain(copy.deepcopy(edits))[0])
+        finally:
+            f.close()
+
+
+    def test_a_phase4_layout_project_moves_its_build_state_to_the_streams(self):
+        f = Fixture()
+        try:
+            p = f.app.project
+            folder, data = p.folder, copy.deepcopy(p.data)
+            f.app.close()
+            # phase 4 kept each set's build state in the set and had no luminance stream object
+            for x in data['sets']:
+                x.update(data[x['stream']] if x['stream'] == 'luminance' else
+                         {k: v for k, v in data['colour'].items() if k != 'legacy_match'})
+            colour = {'legacy_match': data['colour']['legacy_match']}
+            del data['luminance']
+            data['colour'] = colour
+            (folder/'project.json').write_text(json.dumps(data), 'utf-8')
+            q = Project.open(folder)
+            self.assertEqual((q.stream('luminance')['state'], q.stream('luminance')['mosaic']), ('built', 'derived/L.tif'))
+            self.assertEqual(q.stream('colour')['mosaic'], 'derived/RGB.tif')
+            self.assertEqual(q.match, colour['legacy_match'])
+            self.assertTrue(all('state' not in x for x in q.data['sets']))
         finally:
             f.close()
 

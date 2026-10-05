@@ -74,10 +74,9 @@ def textured_boxes(gray, n, size):
     return boxes
 
 
-def cutoff(gray, box=1024):
-    """DESIGN.md §7: the highest frequency (cycles/px) with real signal. Bright central patch, Hann window, radially
-    averaged power; the noise floor is the median power over 0.42–0.5 cycles/px; the cutoff is the first frequency
-    above 0.02 where power − floor ≤ 0.1 × floor. Recovers true cutoffs 0.15–0.45 within 0.001 on synthetic data."""
+def power_profile(gray, box=1024):
+    """(frequencies in cycles/px, radially averaged power, noise floor) of the central box × box patch, Hann
+    windowed; the floor is the median power over 0.42–0.5 cycles/px."""
     h, w = gray.shape
     box = min(box, h, w)
     y0, x0 = (h - box) // 2, (w - box) // 2
@@ -88,8 +87,15 @@ def cutoff(gray, box=1024):
     r = np.hypot(xx, yy).astype(int)
     prof = np.bincount(r.ravel(), P.ravel()) / np.maximum(np.bincount(r.ravel()), 1)
     f = np.arange(len(prof)) / box
+    return f, prof, float(np.median(prof[(f > 0.42) & (f <= 0.5)]))
+
+
+def cutoff(gray, box=1024, profile=None):
+    """DESIGN.md §7: the highest frequency (cycles/px) with real signal. Bright central patch, Hann window, radially
+    averaged power; the noise floor is the median power over 0.42–0.5 cycles/px; the cutoff is the first frequency
+    above 0.02 where power − floor ≤ 0.1 × floor. Recovers true cutoffs 0.15–0.45 within 0.001 on synthetic data."""
+    f, prof, floor = profile or power_profile(gray, box)
     k = (f > 0.02) & (f <= 0.5)
-    floor = float(np.median(prof[(f > 0.42) & (f <= 0.5)]))
     idx = np.nonzero(prof[k] - floor <= 0.1 * floor)[0]
     return float(f[k][idx[0]]) if len(idx) else 0.5
 
@@ -154,3 +160,73 @@ def rgb_shift(rgb):
     g = rgb[..., 1].astype(np.float32)
     return {name: (phase_shift(g, rgb[..., k].astype(np.float32)), lucas_kanade(g, rgb[..., k].astype(np.float32)))
             for name, k in (('r', 0), ('b', 2))}
+
+
+# ---------------------------------------------------------------- resolution of a panel set (D14)
+
+def bright_crop(gray, size=1024, inset=32):
+    """(y0, x0, n): the brightest n × n crop of a panel, n = min(size, the panel inside `inset` px), where its signal
+    stands furthest above the noise. Searched on an 8× reduced copy."""
+    h, w = gray.shape
+    n = min(size, h - 2 * inset, w - 2 * inset)
+    if n < 64:
+        return None
+    k = 8
+    small = cv2.resize(gray.astype(np.float32), (w // k, h // k), interpolation=cv2.INTER_AREA)
+    m = max(1, n // k)
+    score = cv2.boxFilter(small, -1, (m, m), normalize=True, borderType=cv2.BORDER_CONSTANT)
+    half = m // 2
+    lo = -(-inset // k) + half
+    valid = np.zeros_like(score, bool)
+    valid[lo:(h - inset - n) // k + half + 1, lo:(w - inset - n) // k + half + 1] = True
+    if not valid.any():
+        return None
+    cy, cx = np.unravel_index(np.argmax(np.where(valid, score, -np.inf)), score.shape)
+    y0 = int(np.clip((cy - half) * k, inset, h - inset - n))
+    x0 = int(np.clip((cx - half) * k, inset, w - inset - n))
+    return y0, x0, n
+
+
+def panel_detail(gray, size=1024, inset=32):
+    """The finest detail a panel holds, in its own px per cycle (1 / the information cutoff of §7), measured on its
+    brightest interior crop; None when that crop has no texture to measure. Linear sharpening of the panel does
+    not change it: it raises signal and noise alike at every frequency."""
+    box = bright_crop(gray, size, inset)
+    if box is None:
+        return None
+    y0, x0, n = box
+    crop = gray[y0:y0 + n, x0:x0 + n].astype(np.float32)
+    if float(texture(crop).mean()) < 1e-6:        # flat (the textured_boxes floor)
+        return None
+    f, prof, floor = profile = power_profile(crop, n)
+    # the floor is noise only if the signal stands well above it lower down; terrain's power falls steeply with
+    # frequency (400× from 0.04 to 0.45 cycles/px for f^-2.5), while a spectrum flat to the sampling limit — signal
+    # reaching Nyquist, or no signal — leaves nothing to measure against (it would read as a cutoff near 0.02)
+    if float(prof[(f > 0.02) & (f <= 0.06)].mean()) < 3 * floor:
+        return None
+    return 1.0 / cutoff(crop, n, profile)
+
+
+def set_detail(grays, scale_rel, fallback_rel=None):
+    """(detail, how) for one set: its finest detail in finest-set px = scale_rel × the median panel detail over the
+    panels given (the builder passes up to three of its most textured). With no measurable panel (no texture, or
+    signal flat to the sampling limit): `fallback_rel` (max of 2 px and the diffraction FWHM, when the optics are
+    known), or 2 × scale_rel."""
+    found = [d for d in (panel_detail(g) for g in grays) if d is not None]
+    if found:
+        return float(scale_rel * np.median(found)), f'measured on {len(found)} panel{"s" if len(found) > 1 else ""}'
+    if fallback_rel:
+        return float(fallback_rel), 'not measurable: from the pixel scale and the aperture'
+    return float(2 * scale_rel), 'not measurable: 2 px of the set'
+
+
+def tiers(details, tolerance=0.10):
+    """Sets grouped by measured detail, best-resolving (smallest detail) first; a set joins the current tier while
+    its detail is within `tolerance` of the tier's best (D14: sets within 10 % form a tier)."""
+    out = []
+    for s in sorted(details, key=lambda k: (details[k], k)):
+        if out and details[s] <= details[out[-1][0]] * (1 + tolerance):
+            out[-1].append(s)
+        else:
+            out.append([s])
+    return out

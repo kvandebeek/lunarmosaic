@@ -134,8 +134,9 @@ def parse_meta(path):
                                  "quality_estimator": f"lapl{lapl}", "ap_count": int(ap)}
 
 
-def read_image(path):
-    """Read in native bit depth. Returns (BGR float32 in 0–1, dtype name, channels)."""
+def read_image(path, scale=1.0):
+    """Read in native bit depth. Returns (BGR float32 in 0–1, dtype name, channels). scale < 1 reduces the panel
+    with INTER_AREA as it is read, in memory only (the builder's --canvas-scale)."""
     im = cv2.imread(path, cv2.IMREAD_UNCHANGED)
     if im is None:
         raise IOError("unreadable image")
@@ -148,10 +149,13 @@ def read_image(path):
         x = im.astype(np.float32)
     else:
         raise IOError(f"unsupported pixel type {dtype}")
+    if x.ndim == 3 and x.shape[2] == 4:
+        x = x[..., :3]
+    if scale != 1:
+        h, w = x.shape[:2]
+        x = cv2.resize(x, (max(1, round(w * scale)), max(1, round(h * scale))), interpolation=cv2.INTER_AREA)
     if x.ndim == 2:
         x = x[..., None]
-    if x.shape[2] == 4:
-        x = x[..., :3]
     return x, dtype, x.shape[2]
 
 
@@ -422,6 +426,45 @@ def candidate_pairs(descs, min_votes=4, top_k=20):
     return cand
 
 
+def estimate_scale(paths_a, paths_b, limit=6, wanted=5, cancelled=lambda: False):
+    """Plan D10, for a set without optics: its pixel scale relative to another set's (a's arcsec/px ÷ b's), from
+    matched panels. Candidate pairs across the two sets come from one feature index over up to `limit` panels of
+    each; up to `wanted` are verified with a wide scale gate (0.15–7), at least 60 inliers and an inlier ratio of
+    0.4. Returns (median ratio, pairs used, spread as the ratios' relative range); raises ValueError when no pair
+    verifies. A transform a -> b scales by a's pixel size in b's pixels, which is the ratio."""
+    panels = [(0, p) for p in paths_a[:limit]] + [(1, p) for p in paths_b[:limit]]
+    images = []
+    for side, path in panels:
+        if cancelled():
+            raise InterruptedError('Scale estimate cancelled.')
+        x, _, _ = read_image(path)
+        if x.shape[2] == 1:
+            x = np.repeat(x, 3, axis=2)
+        L = luminance(x)
+        images.append((side, L, subject_and_sky(L, x, border=32, erode=8)[1]))
+    f = proxy_factor([L.shape for _, L, _ in images])
+    feats = []
+    for side, L, m in images:
+        P8, pm = make_proxy(L, m, f)
+        feats.append((side, detect_features(P8, pm), pm))
+    cross = sorted((i, j) for i, j in candidate_pairs([d for _, (_, d), _ in feats]) if feats[i][0] != feats[j][0])
+    ratios = []
+    for i, j in cross:
+        if cancelled():
+            raise InterruptedError('Scale estimate cancelled.')
+        a, b = (i, j) if feats[i][0] == 0 else (j, i)
+        r, _ = verify_pair(feats[a][1], feats[b][1], feats[a][2], feats[b][2], scale_range=(0.15, 7), min_inliers=60,
+                           min_ratio=0.4)
+        if r:
+            ratios.append(r['scale'])
+            if len(ratios) == wanted:
+                break
+    if not ratios:
+        raise ValueError('No panel of one set could be matched with the other; enter the optics instead.')
+    ratio = float(np.median(ratios))
+    return ratio, len(ratios), float((max(ratios) - min(ratios)) / ratio)
+
+
 def all_pairs(n):
     return set(itertools.combinations(range(n), 2))
 
@@ -435,8 +478,12 @@ def _knn(query, train, k, method):
 
 
 def verify_pair(fa, fb, pma, pmb, ransac_px=1.0, min_inliers=30, min_ratio=0.25,
-                scale_range=(0.97, 1.03), min_overlap=0.05, min_hull=0.02, matcher="flann"):
+                scale_range=(0.97, 1.03), min_overlap=0.05, min_hull=0.02, matcher="flann", expected=1.0):
     """Match two proxies and verify a similarity transform. Returns (result dict | None, reject reason).
+
+    The transform maps proxy a -> proxy b, so its scale is `expected` = scale_rel[a] / scale_rel[b] when the
+    panels come from sets at different pixel scales (a coarse a, 2, against a fine b, 1: expected 2); the
+    scale gate is scale_range × expected.
 
     RANSAC draws from OpenCV's thread-local RNG; seeding it per pair makes results independent of which
     worker thread handles the pair (without this, ~30 % of pairs varied between identical runs)."""
@@ -464,7 +511,7 @@ def verify_pair(fa, fb, pma, pmb, ransac_px=1.0, min_inliers=30, min_ratio=0.25,
     if n / len(good) < min_ratio:
         return None, "low-inlier-ratio"
     s = float(np.hypot(T[0, 0], T[1, 0]))
-    if not scale_range[0] < s < scale_range[1]:
+    if not scale_range[0] * expected < s < scale_range[1] * expected:
         return None, "scale"
     hb, wb = pmb.shape
     mb_in_a = cv2.warpAffine(pmb, cv2.invertAffineTransform(T), (pma.shape[1], pma.shape[0]), flags=cv2.INTER_NEAREST)

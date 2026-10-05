@@ -147,6 +147,21 @@ def white_balance_probe(size=256, seed=926):
                 gain_ratios=np.array([1.08/.95, 1.08, 1.0]), seed=seed)
 
 
+def terrain(size=1024, beta=2.5, optics_sigma=.8, seed=928):
+    """Lunar-like texture, zero mean and unit rms: power falling as f^-beta, as terrain's does, then blurred by
+    optics of Gaussian sigma px. Unlike band_limited_texture's flat passband, a coarser sampling of it still has a
+    falling spectrum, so its information cutoff can be measured as on real panels."""
+    if not isinstance(size, int) or size < 32 or not beta > 0 or not optics_sigma >= 0:
+        raise ValueError('Use size >= 32, a positive beta and a nonnegative optics sigma.')
+    rng = np.random.default_rng(seed)
+    f = np.hypot(*np.meshgrid(np.fft.fftfreq(size), np.fft.fftfreq(size)))
+    amplitude = np.where(f > 0, np.maximum(f, 1/size)**(-beta/2), 0)
+    t = np.fft.ifft2(amplitude*np.exp(2j*np.pi*rng.random((size, size)))).real.astype(np.float32)
+    if optics_sigma:
+        t = cv2.GaussianBlur(t, (0, 0), optics_sigma)
+    return (t-t.mean())/t.std()
+
+
 def band_limited_texture(size=1024, cutoff=.25, *, signal_rms=.08, noise_rms=.002, seed=927):
     """Flat spectral passband through cutoff cycles/pixel, plus independent white noise.
 

@@ -22,7 +22,9 @@ import cv2
 import numpy as np
 import tifffile
 import chain
-from project import Project
+import measurements as ms
+from project import Project, STREAMS, CANVAS_CAP_MPX, clean_optics, luminance_scales
+import project as projects
 import lrgb
 from lrgb import Image, Scene, register, manual_match
 from alignment import measure
@@ -136,9 +138,9 @@ class Application:
                 self.lease.__exit__(None, None, None)
             self.worker.cancel()
             self.project, self.lease, self.scene = p, lease, None
-            for key in ('L', 'RGB'):
-                if p.set(key).get('mosaic'):
-                    self.build_facts(p, key)
+            for name in STREAMS:
+                if p.stream(name).get('mosaic'):
+                    self.build_facts(p, name)
             self.cancel.clear()
             self.job = dict(state='idle')
             if self.history:
@@ -156,10 +158,11 @@ class Application:
             raise ValueError('Wait for the current operation or cancel it first.')
 
     @staticmethod
-    def build_facts(project, key):
-        s = project.set(key)
+    def build_facts(project, name):
+        s = project.stream(name)
         layout = project.path(str(Path(s['mosaic']).with_suffix(''))+'_layout.json')
-        facts = dict(placed=1, contributing=1, not_placed=[]) if len(s['inputs']) == 1 else None
+        panels = sum(len(x['inputs']) for x in project.sets_of(name))
+        facts = dict(placed=1, contributing=1, not_placed=[]) if panels == 1 else None
         if layout.is_file():
             try:
                 report = json.loads(layout.read_text('utf-8'))
@@ -215,14 +218,16 @@ class Application:
 
     def inputs(self, key, paths, optics=None, allow_partial=False):
         self.idle()
-        if key not in ('L', 'RGB'):
-            raise ValueError('Unknown panel set.')
+        try:
+            s = self.project.set(key)
+        except KeyError:
+            raise ValueError('Unknown panel set.') from None
         if not isinstance(paths, list) or not paths or any(not isinstance(x, str) or not x.strip() for x in paths):
             raise ValueError('Choose one or more source folders or files.')
         if optics is not None and not isinstance(optics, dict):
             raise ValueError('Invalid optics values.')
-        s = self.project.set(key)
-        if s.get('mosaic'):
+        stream = self.project.stream_of(key)
+        if stream.get('mosaic'):
             raise ValueError('This set is already built. Create a new project to replace its panels.')
         paths = [str(self.project.path(x)) if not Path(x).is_absolute() and Path(x).parts[0] == 'sources' else x for x in paths]
         files = mc.find_images(paths, recursive=True)
@@ -233,7 +238,7 @@ class Application:
         for file in files:
             try:
                 w, h, channels, dtype = header_size(file)
-                if channels < 3 and key == 'RGB':
+                if channels < 3 and s['stream'] == 'colour':
                     raise ValueError('Mono panel; use the luminance set.')
                 valid.append(file); sizes.append((w, h)); depths.append(str(dtype))
             except (ValueError, OSError, cv2.error) as e:
@@ -244,43 +249,45 @@ class Application:
             raise ValueError('No readable panels in this set. ' + '; '.join(v['name']+': '+v['reason'] for v in skipped[:4]))
         files = valid
         if optics is not None:
-            clean = {}
-            for name in ('pixel_um', 'focal_mm', 'barlow'):
-                v = optics.get(name)
-                if v not in (None, ''):
-                    v = float(v)
-                    if not np.isfinite(v) or not 0 < v < 100000:
-                        raise ValueError('Optics values must be positive numbers.')
-                    clean[name] = v
-            s['optics'] = clean
+            # the fields sent replace theirs (a blank one removes it); fields not sent, such as the aperture, stay
+            s['optics'] = dict({k: v for k, v in s.get('optics', {}).items() if k not in optics}, **clean_optics(optics))
         resolved = [Path(x).resolve() for x in files]
         s.update(inputs=[str(x.relative_to(self.project.folder)) if x.is_relative_to(self.project.folder) else str(x) for x in resolved],
-                 state='ready', error=None, skipped=skipped,
+                 skipped=skipped,
                  headers=dict(min_width=min(v[0] for v in sizes), max_width=max(v[0] for v in sizes),
                               min_height=min(v[1] for v in sizes), max_height=max(v[1] for v in sizes),
                               depths=sorted(set(depths))))
+        s.pop('scale_estimate', None)                 # other panels: an estimate made on the old ones no longer holds
+        stream.update(state='ready', error=None)
         self.project.save()
 
-    def build(self, keys):
+    def build(self, keys, canvas=None):
+        """Build the streams the given sets feed: all luminance sets jointly into one mosaic (phase 5), then the
+        colour set. Results are keyed L and RGB, as the interface reads them."""
         p = self.project
         result = {}
-        for key in keys:
+        wanted = {p.set(k)['stream'] for k in keys}
+        for name in [n for n in STREAMS if n in wanted]:
             if self.cancel.is_set():
                 break
-            s = p.set(key)
+            s = p.stream(name)
+            key = 'L' if name == 'luminance' else 'RGB'
             if s.get('mosaic'):
                 continue
-            if not s['inputs']:
+            paths = [x for st in p.sets_of(name) for x in p.input_paths(st['id'])]
+            if not paths:
                 continue
             with self.lock:
+                if name == 'luminance' and canvas:
+                    s.update({k: canvas[k] for k in ('canvas_scale', 'max_canvas_mpx') if k in canvas})
                 s.update(state='building', error=None, started=time.time(), last_stage=1)
                 p.save()
             self.update_job(set=key, progress=0, stage=0, title='Checking panels')
             output = p.folder / 'derived' / f'{key}.tif'
             try:
-                if len(s['inputs']) == 1:
+                if len(paths) == 1:
                     # A one-panel mosaic still gets a retained native 16-bit TIFF.
-                    source = Image(p.input_paths(key)[0])
+                    source = Image(paths[0])
                     with self.lock:
                         s['last_stage'] = 2
                         p.save()
@@ -298,18 +305,23 @@ class Application:
                         del target
                     os.replace(temp, output)
                 else:
-                    command = [sys.executable, '-u', str(ROOT/'mosaic'/'mosaic_builder.py'), *p.input_paths(key),
+                    command = [sys.executable, '-u', str(ROOT/'mosaic'/'mosaic_builder.py'), *paths,
                                '-o', str(output), '--no-preview', '--no-display-tif', '--no-north-up']
+                    if name == 'luminance':
+                        command += self.luminance_options(p, s)
                     proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                             cwd=ROOT, encoding='utf-8', errors='replace')
                     with self.lock:
                         self.process = proc
                         if self.cancel.is_set():
                             self.cancel_job()
+                    failure = None
                     for line in proc.stdout:
                         line = line.strip()
                         with self.lock:
-                            self.job['log'] = (self.job['log']+[line])[-80:]
+                            self.job['log'] = (self.job.get('log', [])+[line])[-80:]
+                        if line.startswith('FAIL:'):
+                            failure = line[5:].strip()
                         m = re.match(r'\[(\d+)/8\]\s+(.+)', line)
                         if m:
                             stage = int(m[1])+1
@@ -321,20 +333,26 @@ class Application:
                         if tick:
                             stage = self.job.get('stage', 1)
                             self.update_job(progress=((stage-1)+int(tick[1])/max(1, int(tick[2])))/9)
+                    proc.stdout.close()
                     code = proc.wait()
                     with self.lock:
                         self.process = None
                     if self.cancel.is_set():
                         raise InterruptedError('Build cancelled. Restart this set to build it again.')
                     if code != 0 or not output.exists():
-                        raise ValueError('Mosaic build failed. See the build log below; the other set can still be built.')
+                        raise ValueError((failure[0].upper() + failure[1:] + '.' if failure else
+                                          'Mosaic build failed. See the build log below; the other set can still be built.'))
                 if self.cancel.is_set():
                     raise InterruptedError('Build cancelled.')
                 with self.lock:
                     image = Image(output)
                     s.update(state='built', mosaic=f'derived/{key}.tif', width=image.w, height=image.h,
                              duration=time.time()-s['started'])
-                    self.build_facts(p, key)
+                    if name == 'luminance':
+                        report = output.with_name(f'{key}_sets.json')
+                        s['sets_report'] = f'derived/{report.name}' if report.is_file() else None
+                        s['canvas_arcsec_px'] = self.canvas_arcsec_px(p, s)
+                    self.build_facts(p, name)
                     p.match = None
                     p.data['geometry']['coverage'] = 'full'
                     p.data['view']['l_visible'] = True
@@ -352,19 +370,185 @@ class Application:
                     break
         return result
 
+    @staticmethod
+    def luminance_options(p, stream):
+        """Builder options for the luminance stream: the panel scales file — one set or several, so the mosaic
+        always comes with its set report — and, for a mixed stream, the size cap the user confirmed (400 Mpx unless
+        they confirmed more; a single set keeps today's unlimited build)."""
+        scales = luminance_scales(p.data['sets'])               # refuses unknown or unconfirmed scales
+        canvas_set = min(scales, key=lambda k: (scales[k]['rel'], k))
+        doc = dict(canvas_set=canvas_set, panels=[], sets={})
+        for st in p.sets_of('luminance'):
+            if st['id'] not in scales:
+                continue
+            doc['panels'] += [dict(path=x, set=st['id'], scale_rel=scales[st['id']]['rel']) for x in p.input_paths(st['id'])]
+            meta = {k: v for k, v in st.get('optics', {}).items() if k in ('aperture_mm', 'wavelength_nm')}
+            if scales[st['id']]['arcsec_px']:
+                meta['arcsec_px'] = scales[st['id']]['arcsec_px']
+            doc['sets'][st['id']] = meta
+        path = p.folder/'derived'/'L_panel_scales.json'
+        path.write_text(json.dumps(doc, indent=1), 'utf-8')
+        options = ['--panel-scales', str(path)]
+        cap = stream.get('max_canvas_mpx') or (CANVAS_CAP_MPX if len(scales) > 1 else None)
+        if cap:
+            options += ['--max-canvas-mpx', str(cap)]
+        if stream.get('canvas_scale', 1) != 1:
+            options += ['--canvas-scale', str(stream['canvas_scale'])]
+        return options
+
+    @staticmethod
+    def canvas_arcsec_px(p, stream):
+        """The luminance canvas's pixel scale: the finest set's, divided by the canvas reduction; None when no set's
+        optics give an absolute scale."""
+        try:
+            scales = luminance_scales(p.data['sets'])
+        except ValueError:
+            return None
+        finest = min((v['arcsec_px'] for v in scales.values() if v['arcsec_px']), default=None)
+        return finest / stream.get('canvas_scale', 1) if finest else None
+
+    @staticmethod
+    def canvas_options(canvas):
+        """The canvas settings confirmed with a build: canvas_scale (0–1] and max_canvas_mpx (> 0)."""
+        if canvas is None:
+            return None
+        if not isinstance(canvas, dict) or set(canvas) - {'canvas_scale', 'max_canvas_mpx'}:
+            raise ValueError('The canvas settings are canvas_scale and max_canvas_mpx.')
+        out = {}
+        for k, ok in (('canvas_scale', lambda v: 0 < v <= 1), ('max_canvas_mpx', lambda v: v > 0)):
+            v = canvas.get(k)
+            if v is not None:
+                if isinstance(v, bool) or not isinstance(v, (int, float)) or not np.isfinite(v) or not ok(v):
+                    raise ValueError('The canvas scale is above 0 and at most 1; the size limit is positive.')
+                out[k] = float(v)
+        return out
+
+    def sets_op(self, o):
+        """/api/sets: create, update (label, optics) or delete a luminance set; estimate the scales of sets without
+        optics (a job, D10) or confirm an estimate. Colour keeps its one set until phase 6."""
+        p, op, data = self.project, o.get('op'), o.get('set') or {}
+        if not isinstance(data, dict):
+            raise ValueError('Describe the set as an object.')
+        if op == 'estimate':
+            self.start('Estimate set scales', self.estimate_scales)
+            return
+        self.idle()
+        if op == 'create':
+            key = p.add_set(data.get('stream', 'luminance'), data.get('label'))
+            if data.get('optics'):
+                p.set(key)['optics'] = clean_optics(data['optics'])
+        else:
+            try:
+                s = p.set(data.get('id'))
+            except KeyError:
+                raise ValueError('Unknown panel set.') from None
+            if op == 'update':
+                if 'label' in data:
+                    s['label'] = str(data['label'])[:120]
+                if 'optics' in data:
+                    if p.stream_of(s['id']).get('mosaic'):
+                        raise ValueError('This set is already built. Create a new project to change its optics.')
+                    s['optics'] = clean_optics(data['optics'])
+                    s.pop('scale_estimate', None)
+            elif op == 'delete':
+                if s['id'] in ('L', 'RGB'):
+                    raise ValueError('The first luminance set and the colour set cannot be deleted.')
+                if p.stream_of(s['id']).get('mosaic'):
+                    raise ValueError('The luminance mosaic was built with this set. Create a new project to change its sets.')
+                p.data['sets'].remove(s)
+                for other in p.data['sets']:               # an estimate made against this set no longer resolves
+                    if (other.get('scale_estimate') or {}).get('relative_to') == s['id']:
+                        other.pop('scale_estimate')
+                p.refresh_state('luminance')
+            elif op == 'confirm':
+                if not s.get('scale_estimate'):
+                    raise ValueError('Estimate this set\'s scale first.')
+                s['scale_estimate']['confirmed'] = True
+            else:
+                raise ValueError('Unknown set operation.')
+        p.save()
+
+    def estimate_scales(self):
+        """D10: each luminance set without optics gets its pixel scale relative to a set with optics (or to the first
+        set), measured on matched panels; stored unconfirmed, for the user to check before a mixed build."""
+        p = self.project
+        with self.lock:
+            sets = [s for s in p.sets_of('luminance') if s['inputs']]
+            paths = {s['id']: p.input_paths(s['id']) for s in sets}
+        if len(sets) < 2:
+            raise ValueError('Estimating scales needs two luminance sets with panels.')
+        ref = next((s for s in sets if projects.arcsec_px(s.get('optics', {}))), sets[0])
+        result = {}
+        for s in sets:
+            if s is ref or projects.arcsec_px(s.get('optics', {})):
+                continue
+            if self.cancel.is_set():
+                raise InterruptedError('Scale estimate cancelled.')
+            self.update_job(title=f'Matching {s.get("label") or s["id"]} against {ref.get("label") or ref["id"]}')
+            ratio, used, spread = mc.estimate_scale(paths[s['id']], paths[ref['id']], cancelled=self.cancel.is_set)
+            with self.lock:
+                s['scale_estimate'] = dict(relative_to=ref['id'], ratio=ratio, pairs=used, spread=spread, confirmed=False)
+                p.save()
+            result[s['id']] = s['scale_estimate']
+        return result
+
+    def finest_detail(self, key, paths):
+        """The measured detail of a set in its own px (D14), on up to three panels; cached per set and panels."""
+        cache = self.__dict__.setdefault('_details', {})
+        sample = tuple(paths[::max(1, len(paths)//3)][:3])
+        if (key, sample) not in cache:
+            grays = []
+            for path in sample:
+                x, _, _ = mc.read_image(path)
+                grays.append(mc.luminance(x if x.shape[2] == 3 else np.repeat(x, 3, axis=2)))
+            cache[(key, sample)] = ms.set_detail(grays, 1.0)[0]
+        return cache[(key, sample)]
+
+    def canvas_estimate(self, sets, paths, stream):
+        """/api/canvas-estimate (plan phase 5): each luminance set's scale, the finest pixel scale and a lower bound
+        for the canvas — the Moon at perigee, about 2010″ across, at that scale; panels overhang the limb, so the
+        real canvas is larger — in px, Mpx and GB at 16-bit RGB, against the 400 Mpx confirmation threshold; and
+        the finest set's measured detail, with a smaller canvas suggested when its pixels are far finer than that."""
+        sets = [s for s in sets if paths.get(s['id'])]
+        if not sets:
+            raise ValueError('Add luminance panels first.')
+        try:
+            scales, problem = luminance_scales(sets), None
+        except ValueError as e:
+            scales, problem = {}, str(e)
+        c = stream.get('canvas_scale', 1)
+        out = dict(threshold_mpx=CANVAS_CAP_MPX, problem=problem, canvas_scale=c,
+                   max_canvas_mpx=stream.get('max_canvas_mpx'),
+                   sets=[dict(id=s['id'], label=s.get('label'), panels=len(paths[s['id']]),
+                              estimate=copy.deepcopy(s.get('scale_estimate')), **(
+                                  {k: scales[s['id']][k] for k in ('rel', 'arcsec_px', 'source')} if s['id'] in scales
+                                  else dict(rel=None, arcsec_px=None, source=None))) for s in sets])
+        if not scales:
+            return out
+        finest = min(scales, key=lambda k: (scales[k]['rel'], k))
+        detail = self.finest_detail(finest, paths[finest])
+        out['finest'] = dict(id=finest, arcsec_px=scales[finest]['arcsec_px'], detail_px=detail)
+        if scales[finest]['arcsec_px']:
+            side = 2010 / (scales[finest]['arcsec_px'] / c)
+            mpx = side * side / 1e6
+            out['lower_bound'] = dict(px=int(round(side)), mpx=round(mpx, 1), gb=round(side * side * 6 / 1e9, 2))
+            out['needs_confirmation'] = mpx > (stream.get('max_canvas_mpx') or CANVAS_CAP_MPX)
+        if detail and detail > 3:
+            out['oversampled'] = dict(px_per_detail=round(detail, 2), suggested_canvas_scale=round(2.5 / detail, 3))
+        return out
+
     def match(self):
         p = self.project
         paths = []
-        for key in ('L', 'RGB'):
-            s = p.set(key)
+        for name in STREAMS:
+            s = p.stream(name)
             if not s.get('mosaic'):
                 raise ValueError('Build both mosaics before matching.')
             paths.append(p.path(s['mosaic']))
-        optics = [p.set(k)['optics'] for k in ('L', 'RGB')]
-        prior = None
-        if all(o.get('pixel_um') and o.get('focal_mm') for o in optics):
-            sampling = [o['pixel_um']/(o['focal_mm']*o.get('barlow', 1)) for o in optics]
-            prior = sampling[1]/sampling[0]
+        # the expected colour/luminance scale: the luminance canvas is the finest luminance set's grid
+        lum = p.stream('luminance').get('canvas_arcsec_px') or projects.arcsec_px(p.set('L')['optics'])
+        rgb = projects.arcsec_px(p.set('RGB')['optics'])
+        prior = rgb/lum if lum and rgb else None
         self.update_job(title='Finding corresponding lunar detail')
         result = register(*paths, scale_prior=prior)
         result['diagnostics'] = self.measure_scene(Scene(p, match=result))
@@ -398,7 +582,7 @@ class Application:
 
     def north_up(self):
         p = self.project
-        if not p.set('L').get('mosaic'):
+        if not p.stream('luminance').get('mosaic'):
             raise ValueError('Build luminance before finding lunar north.')
         baseline = (p.data['geometry']['rotation'], p.data['geometry']['mirror'])
         with tempfile.TemporaryDirectory(prefix='.north-job-', dir=p.folder/'derived') as folder:
@@ -416,6 +600,7 @@ class Application:
                     with self.lock:
                         self.job['log'] = (self.job.get('log', [])+[line])[-80:]
                     self.update_job(title=line[:120])
+                proc.stdout.close()
                 code = proc.wait()
             finally:
                 with self.lock:
@@ -436,7 +621,7 @@ class Application:
 
     def get_scene(self):
         if self.scene is None:
-            if not self.project or not self.project.set('L').get('mosaic'):
+            if not self.project or not self.project.stream('luminance').get('mosaic'):
                 raise ValueError('Build the luminance mosaic first.')
             self.scene = Scene(self.project)
         return self.scene
@@ -518,6 +703,13 @@ class Application:
                 rgb, _ = scene.render_edits(transform, (w, height), edits, view, precise=scale >= .75)
                 _, png = cv2.imencode('.png', np.round(rgb[..., ::-1]*255).astype(np.uint8))
                 h.reply(png.tobytes(), 'image/png')
+            elif path == '/api/canvas-estimate':
+                with self.lock:
+                    p = self.require(dict(id=query.get('id', [''])[0]))
+                    sets = copy.deepcopy(p.sets_of('luminance'))
+                    paths = {x['id']: p.input_paths(x['id']) for x in sets if x['inputs']}
+                    stream = copy.deepcopy(p.stream('luminance'))
+                h.json(self.canvas_estimate(sets, paths, stream))
             elif path == '/api/render':
                 # plan §4.7: a region of the oriented full view (view px, before the coverage crop) at full
                 # scale, exact — what a preview rectangle shows; 16-bit PNG by default
@@ -550,7 +742,7 @@ class Application:
                     key = query.get('set', [''])[0]
                     if key not in ('L', 'RGB'):
                         raise ValueError('Unknown panel set.')
-                    source = self.project.set(key).get('mosaic')
+                    source = self.project.stream_of(key).get('mosaic')
                     if not source:
                         raise ValueError('Build this layer first.')
                     image = Image(self.project.path(source))
@@ -575,7 +767,7 @@ class Application:
                     p = self.require(dict(id=q.get('id', [''])[0]))
                     self.idle()
                     key = q.get('set', [''])[0]
-                    if key not in ('L', 'RGB') or p.set(key).get('mosaic'):
+                    if key not in {x['id'] for x in p.data['sets']} or p.stream_of(key).get('mosaic'):
                         raise ValueError('Choose an unbuilt panel set.')
                     name = Path(q.get('name', ['panel'])[0]).name
                     if Path(name).suffix.lower().lstrip('.') not in mc.DEFAULT_EXTS:
@@ -626,9 +818,12 @@ class Application:
                         self.inputs(o['set'], o['paths'], o.get('optics'), allow_partial=True)
                     elif path == '/api/build':
                         keys = o.get('sets', ['L', 'RGB'])
-                        if not isinstance(keys, list) or not keys or any(k not in ('L', 'RGB') for k in keys):
+                        if not isinstance(keys, list) or not keys or any(k not in {x['id'] for x in p.data['sets']} for k in keys):
                             raise ValueError('Choose luminance or colour sets.')
-                        self.start('Build mosaics', lambda: self.build(keys))
+                        canvas = self.canvas_options(o.get('canvas'))
+                        self.start('Build mosaics', lambda: self.build(keys, canvas))
+                    elif path == '/api/sets':
+                        self.sets_op(o)
                     elif path == '/api/match':
                         self.start('Match colour to luminance', self.match)
                     elif path == '/api/check-match':
@@ -637,8 +832,8 @@ class Application:
                         self.start('Find lunar north', self.north_up)
                     elif path == '/api/manual':
                         self.idle()
-                        for key in ('L', 'RGB'):
-                            if not p.set(key).get('mosaic'):
+                        for name in STREAMS:
+                            if not p.stream(name).get('mosaic'):
                                 raise ValueError('Build both mosaics first.')
                         p.match = manual_match(o['rgb_points'], o['l_points'])
                         self.scene = None

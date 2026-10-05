@@ -29,6 +29,7 @@ import tool_settings as ts  # noqa: E402
 import mosaic_common as mc  # noqa: E402
 import mosaic_stages as mst  # noqa: E402
 import preview_style as ps  # noqa: E402
+import measurements as ms  # noqa: E402
 
 N_STAGES = 8
 IMPLEMENTED_UP_TO = 8
@@ -90,6 +91,10 @@ def hold(frames):
 
 FRIENDLY = {0: "Checking the inputs", 1: "Finding features", 2: "Matching overlaps", 3: "Placing panels",
             4: "Fine alignment", 5: "Matching brightness", 6: "Choosing the sharpest regions", 7: "Blending", 8: "Finishing"}
+
+
+class Stop(Exception):
+    """A planned stop before blending, with its reason (the canvas exceeds the confirmed size)."""
 
 
 class Abort(Exception):
@@ -346,6 +351,41 @@ def gather_inputs(args):
         else:
             kept.append(p)
     return kept, dropped, info
+
+
+def load_panel_scales(path):
+    """The --panel-scales file (plan phase 5): {"panels": [{"path", "set", "scale_rel"}], "canvas_set": id, and
+    optionally "sets": {id: {"arcsec_px", "aperture_mm", "wavelength_nm"}}}. scale_rel is the panel's arcsec/px ÷
+    the finest set's, so ≥ 1; the canvas set is the finest and fixes the canvas scale. Not --manifest, which is the
+    panel classifier's. Returns ({real path: (set, scale_rel)}, canvas set, sets)."""
+    with open(path, encoding="utf-8") as fh:
+        doc = json.load(fh)
+    panels = doc.get("panels") if isinstance(doc, dict) else None
+    if not isinstance(panels, list) or not panels:
+        raise ValueError('it needs a non-empty "panels" list')
+    out = {}
+    for e in panels:
+        if not isinstance(e, dict) or not isinstance(e.get("path"), str) or not isinstance(e.get("set"), str):
+            raise ValueError("every panel needs a path and a set")
+        v = e.get("scale_rel")
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 1:
+            raise ValueError(f"{e['path']}: scale_rel must be a number of at least 1 (panel arcsec/px ÷ the finest)")
+        out[os.path.realpath(e["path"])] = (e["set"], float(v))
+    members = {}
+    for sid, v in out.values():
+        members.setdefault(sid, set()).add(v)
+    canvas_set = doc.get("canvas_set")
+    if canvas_set not in members:
+        raise ValueError("canvas_set must name one of the panels' sets")
+    if members[canvas_set] != {1.0}:
+        raise ValueError(f"the canvas set {canvas_set} must be the finest: scale_rel 1 for all its panels")
+    for sid, v in members.items():
+        if len(v) > 1:
+            raise ValueError(f"set {sid}: all its panels need the same scale_rel")
+    sets = doc.get("sets") or {}
+    if not isinstance(sets, dict) or any(not isinstance(v, dict) for v in sets.values()):
+        raise ValueError('"sets" must map set ids to objects')
+    return out, canvas_set, sets
 
 
 def display_quality(paths, args, tenengrad):
@@ -798,7 +838,7 @@ def pipeline(args, pr, pv, stg):
     pr.info(f"{len(paths)} readable · {', '.join(f'{v}× {k}' for k, v in kinds.items())} · {min(ws)}–{max(ws)} × {min(hs)}–{max(hs)}")
     if len(kinds) > 1:
         pr.warn("mixed bit depths / channel counts: all data is converted to 16-bit RGB")
-    total_px = sum(w * h for w, h, _, _ in heads.values())
+    total_px = sum(w * h for w, h, _, _ in heads.values()) * args.canvas_scale ** 2
     ram = mc.physical_memory()
     est_ram = total_px * 2 * 1.15 + 2e9           # float16 luminance of all panels + working sets (stages 1–3)
     free = shutil.disk_usage(out_dir).free
@@ -809,6 +849,11 @@ def pipeline(args, pr, pv, stg):
     if free < need_disk:
         pr.info("FAIL: not enough free disk space for the output; free space or write elsewhere with -o")
         return 3
+    if args.scales:
+        missing = [p for p in paths if os.path.realpath(p) not in args.scales[0]]
+        if missing:
+            pr.info(f"FAIL: {len(missing)} panel(s) are missing from the panel scales file, e.g. {os.path.basename(missing[0])}")
+            return 2
     dates = Counter(mc.parse_meta(p)[1].get("date") for p in paths)
     date = dates.most_common(1)[0][0] if dates else None
     pv.set_all("session", f"{date + ' · ' if date else ''}{len(paths)} panels")
@@ -822,9 +867,10 @@ def pipeline(args, pr, pv, stg):
     pr.header(f"Coarse features (proxy 1/{args.proxy_factor}×)", 1)
     f = args.proxy_factor
     data, feats, proxies, sizes, failed = {}, {}, {}, {}, []
+    pset, prel = {}, {}                      # each panel's set and scale relative to the finest set (phase 5)
 
     def stage1(p):
-        x, _, _ = mc.read_image(p)
+        x, _, _ = mc.read_image(p, args.canvas_scale)
         if x.shape[2] == 1:
             x = np.repeat(x, 3, axis=2)
         L = mc.luminance(x)
@@ -852,6 +898,7 @@ def pipeline(args, pr, pv, stg):
             if pid != base:
                 pr.warn(f"{os.path.basename(p)}: id {base} already used, this panel is {pid}")
             ids[p] = pid
+            pset[pid], prel[pid] = args.scales[0][os.path.realpath(p)] if args.scales else ("all", 1.0)
             sizes[pid] = (L16.shape[1], L16.shape[0])
             if len(pts) < args.min_keypoints:
                 failed.append((pid, f"unplaceable (too few features: {len(pts)})"))
@@ -950,6 +997,30 @@ def pipeline(args, pr, pv, stg):
         crops = Counter(proxies[n]["crop"] for n in nodes)
         pr.info("stacking-edge artefact crop per panel: " + " · ".join(f"{v}× {k} px" for k, v in sorted(crops.items())) +
                 ("" if args.border == "auto" else " (fixed by --border)"))
+    set_info, tier_list = {}, None
+    if args.scales:
+        # D14: each set's resolution, measured — tiers follow it, never the pixel scale alone
+        meta = args.scales[2]
+        for sid in sorted({pset[n] for n in nodes}):
+            members = sorted((n for n in nodes if pset[n] == sid), key=lambda n: (-proxies[n]["tenengrad"], n))
+            rel, info = prel[members[0]], meta.get(sid, {})
+            fallback = None
+            if info.get("arcsec_px") and info.get("aperture_mm"):
+                fwhm = 1.028 * info.get("wavelength_nm", 550) * 1e-9 / (info["aperture_mm"] * 1e-3) * 206264.8
+                fallback = max(2 * rel, fwhm * args.canvas_scale / (info["arcsec_px"] / rel))
+            detail, how = ms.set_detail([data[n]["L"].astype(np.float32) for n in members[:3]], rel, fallback)
+            set_info[sid] = {"scale_rel": rel, "panels": members, "detail_px": detail, "detail_method": how}
+            pr.info(f"set {sid}: {len(members)} panels at {rel:.3f}× the finest pixel scale · finest detail "
+                    f"{detail:.2f} canvas px ({how})")
+        tier_list = ms.tiers({sid: v["detail_px"] for sid, v in set_info.items()})
+        for k, t in enumerate(tier_list, 1):
+            for sid in t:
+                set_info[sid]["tier"] = k
+        pr.info("tiers by measured resolution, best first: " + " · ".join(" + ".join(t) for t in tier_list))
+        ratio = max(prel[n] for n in nodes) / min(prel[n] for n in nodes)
+        if ratio > 4:
+            pr.warn(f"the sets' pixel scales differ {ratio:.1f}×: with one proxy factor for all, the coarse panels' "
+                    "proxies are small and may find few features")
     if args.stop_after < 2:
         return stopped(pr, 1)
 
@@ -966,7 +1037,8 @@ def pipeline(args, pr, pv, stg):
 
     def ver(ab):
         a, b = ab
-        return ab, mc.verify_pair(feats[a], feats[b], proxies[a]["pm"], proxies[b]["pm"])
+        # the proxy transform maps a -> b: its scale is scale_rel[a] / scale_rel[b]
+        return ab, mc.verify_pair(feats[a], feats[b], proxies[a]["pm"], proxies[b]["pm"], expected=prel[a] / prel[b])
     cand = sorted(cand)
     with ThreadPoolExecutor(args.workers) as ex:
         for k, ((a, b), (res, why)) in enumerate(pool_results(ex, ex.map(ver, cand), pv), 1):
@@ -1062,7 +1134,12 @@ def pipeline(args, pr, pv, stg):
     mainset = set(main)
     pairs = [to_pair(a, b, r) for (a, b), r in accepted.items() if a in mainset and b in mainset]
     deg = Counter([p["a"] for p in pairs] + [p["b"] for p in pairs])
-    ref = max(main, key=lambda n: (deg[n], n))
+    # the reference fixes the canvas scale, so it comes from the finest set (not necessarily the best-resolving)
+    finest = [n for n in main if not args.scales or pset[n] == args.scales[1]]
+    if not finest:
+        pr.info(f"FAIL: the finest set did not join the mosaic: no panel of set {args.scales[1]} overlaps the others")
+        return 2
+    ref = max(finest, key=lambda n: (deg[n], n))
     dropped_pairs = []
     closure_done = False
     while True:
@@ -1108,7 +1185,7 @@ def pipeline(args, pr, pv, stg):
                         extra.append((a, b))
             n_ok = 0
             for a, b in extra:
-                r, why = mc.verify_pair(feats[a], feats[b], proxies[a]["pm"], proxies[b]["pm"])
+                r, why = mc.verify_pair(feats[a], feats[b], proxies[a]["pm"], proxies[b]["pm"], expected=prel[a] / prel[b])
                 if r:
                     accepted[(a, b)] = r
                     pairs.append(to_pair(a, b, r))
@@ -1154,6 +1231,10 @@ def pipeline(args, pr, pv, stg):
             f"output ~{out_bytes / 2**30:.2f} GiB uncompressed · free disk {free / 2**30:.0f} GiB")
     if free < out_bytes + 0.5e9:
         pr.warn("free disk space is below the output size")
+    if args.max_canvas_mpx and canvas[0] * canvas[1] / 1e6 > args.max_canvas_mpx:
+        pr.info(f"FAIL: the canvas is {canvas[0] * canvas[1] / 1e6:.0f} Mpx, above the confirmed "
+                f"{args.max_canvas_mpx:.0f} Mpx: confirm the larger canvas or build with a smaller --canvas-scale")
+        return 4
 
     scale = min(1.0, 1600 / max(canvas))
     views = layout_views(main, theta, idx, sizes, proxies, f, offset, canvas, per_rms, scale)   # diagnostic files
@@ -1168,7 +1249,8 @@ def pipeline(args, pr, pv, stg):
         "model": "similarity (pose applied to panel-centred full-resolution pixel coordinates)",
         "rms_px": float(np.sqrt(np.mean(allr ** 2))), "keypoint_rms_px": float(np.sqrt(np.mean(ptr ** 2))), "level": "proxy",
         "panels": {n: {"path": data[n]["path"], "size": sizes[n], "pose_abtxty": theta[idx[n]].tolist(),
-                       "scale": sc[n], "rot_deg": rot[n], "rms_px": per_rms[n], "partners": deg[n]} for n in main},
+                       "scale": sc[n], "rot_deg": rot[n], "rms_px": per_rms[n], "partners": deg[n],
+                       **({"set": pset[n], "scale_rel": prel[n]} if args.scales else {})} for n in main},
         "pairs": [{"a": p["a"], "b": p["b"], "inliers": p["inliers"]} for p in pairs],
         "dropped_pairs": [{"a": a, "b": b, "rms_px": e} for a, b, e in dropped_pairs],
         "not_placed": [{"id": n, "reason": why} for n, why in failed],
@@ -1177,7 +1259,14 @@ def pipeline(args, pr, pv, stg):
         json.dump(json_safe(layout), fh, indent=1)
     pr.info(f"layout: {stem}_layout.json · {os.path.basename(stem)}_layout.png · {os.path.basename(stem)}_layout_composite.png")
 
-    result = run_stages_4_to_8(args, pr, pv, stg, main, pairs, ref, theta, idx, sizes, data, proxies, f, stem, deg, failed, paths, layout)
+    if args.scales:
+        layout.update(canvas_set=args.scales[1], canvas_scale=args.canvas_scale)
+    try:
+        result = run_stages_4_to_8(args, pr, pv, stg, main, pairs, ref, theta, idx, sizes, data, proxies, f, stem, deg,
+                                   failed, paths, layout, pset, set_info, tier_list, prel)
+    except Stop as e:
+        pr.info(f"FAIL: {e}")
+        return 4
     placed = len(main)
     total = len(paths)
     excl = ", ".join(f"{n} ({why})" for n, why in failed) or "none"
@@ -1185,7 +1274,8 @@ def pipeline(args, pr, pv, stg):
     return 0
 
 
-def run_stages_4_to_8(args, pr, pv, stg, main, pairs, ref, theta, idx, sizes, data, proxies, f, stem, deg, failed, paths, layout):
+def run_stages_4_to_8(args, pr, pv, stg, main, pairs, ref, theta, idx, sizes, data, proxies, f, stem, deg, failed, paths, layout,
+                      pset=None, set_info=None, tier_list=None, prel=None):
     """Stages 4–8. Returns a short summary for the final line."""
     if args.stop_after < 4:
         return ""
@@ -1271,6 +1361,9 @@ def run_stages_4_to_8(args, pr, pv, stg, main, pairs, ref, theta, idx, sizes, da
                 pr.warn(f"orientation kept as captured: {e}")
                 orientation["reason"] = str(e)
     P, offset, canvas = geometry(theta_f, idx_f)
+    if args.max_canvas_mpx and canvas[0] * canvas[1] / 1e6 > args.max_canvas_mpx:
+        raise Stop(f"the canvas is {canvas[0] * canvas[1] / 1e6:.0f} Mpx after fine alignment, above the confirmed "
+                   f"{args.max_canvas_mpx:.0f} Mpx: confirm the larger canvas or build with a smaller --canvas-scale")
     for render, fr in zip(round_frames[:st4["iteration"]], spread_frames(step_frames(4), min(len(round_frames), st4["iteration"]))):
         pv.show(render, record=hold(fr), window=False)
     per = st4["per_rms"]
@@ -1313,7 +1406,8 @@ def run_stages_4_to_8(args, pr, pv, stg, main, pairs, ref, theta, idx, sizes, da
     rgb4 = {n: proxies[n]["rgb4"] for n in main}
     m4 = {n: proxies[n]["m4"] for n in main}
     sat4 = {n: proxies[n]["sat4"] for n in main}
-    gains, offs, st5 = mst.photometry(main, list(coarse), P, rgb4, m4, sat4, f, ref)
+    gains, offs, st5 = mst.photometry(main, list(coarse), P, rgb4, m4, sat4, f, ref,
+                                      scale_rel={n: prel[n] for n in main} if args.scales else None)
     g = np.array([gains[n] for n in main])
     o = np.array([offs[n] for n in main]) * 65535
     if not st5["pairs"]:
@@ -1365,8 +1459,12 @@ def run_stages_4_to_8(args, pr, pv, stg, main, pairs, ref, theta, idx, sizes, da
             pv.show(lambda s_: s_.layout(label_overlay(grey8, lab_now, canvas, q, len(main)), [], 6, FRIENDLY[6],
                                          f"{k} of {len(main)} panels compared", k / len(main), ro6),
                     record=hold(plan6[k - 1]) if pv.outputs else None, min_interval=0.1)
+    tiers = [[n for n in main if pset[n] in t] for t in tier_list] if tier_list and len(tier_list) > 1 else None
     lab, shares = mst.select_regions(main, sizes, L, P, canvas_pad, q, pool,
-                                     borders={n: proxies[n]["crop"] for n in main}, on_panel=on_panel)
+                                     borders={n: proxies[n]["crop"] for n in main}, on_panel=on_panel, tiers=tiers)
+    if tiers:
+        pr.info("by tier, best-resolving first: " + " · ".join(
+            f"{' + '.join(t)} {sum(shares[n] for n in main if pset[n] in t) * 100:.1f} %" for t in tier_list))
     contributing = [n for n in main if shares[n] > 0]
     top = sorted(shares.items(), key=lambda kv: -kv[1])[:3]
     pr.info(f"{len(contributing)} panels win at least one region · {len(main) - len(contributing)} dominated (skipped in blending) · "
@@ -1392,7 +1490,7 @@ def run_stages_4_to_8(args, pr, pv, stg, main, pairs, ref, theta, idx, sizes, da
     blend_pool = ThreadPoolExecutor(3)
     job = lambda n: mst.blend_panel(n, main.index(n), data[n]["path"], sizes[n], P[n], gains[n], offs[n], lab, q,
                                     canvas_pad, args.levels, border=proxies[n]["crop"],
-                                    model=model, th=theta_f[idx_f[n]], offset=offset)
+                                    model=model, th=theta_f[idx_f[n]], offset=offset, scale=args.canvas_scale)
     lv = min(3, args.levels)
     f7_anim, f7_final = split_frames(step_frames(7), [7.3, 1.5])
     plan7 = spread_frames(f7_anim, len(order))
@@ -1485,6 +1583,18 @@ def run_stages_4_to_8(args, pr, pv, stg, main, pairs, ref, theta, idx, sizes, da
                    "disk_share": {n: v for n, v in disk_shares.items() if v > 0}})
     with open(stg.path(stem + "_layout.json"), "w") as fh:
         json.dump(json_safe(layout), fh, indent=1)
+    if args.scales:
+        # for the application's resolution view: which set supplied each region of _labels.png, and how well it resolves
+        sets_report = {
+            "schema": "mosaic-sets/1", "canvas_set": args.scales[1], "canvas_scale": args.canvas_scale, "tiers": tier_list,
+            "sets": {sid: dict(v, placed=[n for n in main if pset[n] == sid],
+                               disk_share=float(sum(disk_shares.get(n, 0) for n in main if pset[n] == sid)))
+                     for sid, v in set_info.items()},
+            "label_index": main, "label_scale": q, "label_to_set": [pset[n] for n in main]}
+        with open(stg.path(stem + "_sets.json"), "w") as fh:
+            json.dump(json_safe(sets_report), fh, indent=1)
+        pr.info(f"set report: {os.path.basename(stem)}_sets.json · lunar disk by set " +
+                ", ".join(f"{sid} {v['disk_share'] * 100:.1f} %" for sid, v in sets_report["sets"].items()))
     top_d = sorted(disk_shares.items(), key=lambda kv: -kv[1])[:3]
     pr.info(f"{sum(v > 0 for v in disk_shares.values())} panels supply part of the lunar disk · largest " +
             ", ".join(f"{n} {v * 100:.1f} %" for n, v in top_d))
@@ -1569,6 +1679,13 @@ def main():
     ap.add_argument("inputs", nargs="+", help="image folders/files and/or panel manifest JSON")
     ap.add_argument("-o", "--output", required=True, help="output TIFF path (layout files are written next to it)")
     ap.add_argument("--manifest", help="optional manifest: exclude rejects, apply --exclude-tier")
+    ap.add_argument("--panel-scales", metavar="FILE",
+                    help='panels from sets at different pixel scales: {"panels": [{"path", "set", "scale_rel"}], '
+                         '"canvas_set": id}, scale_rel = panel arcsec/px ÷ the finest set\'s (≥ 1); writes <out>_sets.json')
+    ap.add_argument("--canvas-scale", type=float, default=1.0,
+                    help="reduce every panel by this factor (0–1) as it is read, for a smaller canvas (default 1)")
+    ap.add_argument("--max-canvas-mpx", type=float, default=0,
+                    help="stop before blending when the canvas exceeds this many Mpx (default 0 = no limit)")
     ap.add_argument("--exclude-tier", default="", help="comma-separated tiers to exclude (default: none)")
     ap.add_argument("--proxy-factor", type=int, default=ts.get("MOSAIC_PROXY_FACTOR"), help="proxy downscale factor for pair discovery (default 4 = 0.25×)")
     ap.add_argument("--features", type=int, default=ts.get("MOSAIC_FEATURES"), help="SIFT keypoints per panel (on the proxy)")
@@ -1608,11 +1725,13 @@ def main():
                stem + "_contributions.png", stem + "_labels.png", args.record, args.record_vertical, args.log]
     if args.display_tif:
         planned.append(stem + "_display.tif")
+    if args.panel_scales:
+        planned.append(stem + "_sets.json")
     try:
         inputs = gather_inputs(args)[0]
     except Exception:
         inputs = []                      # reported by the pipeline's preflight
-    mc.check_outputs(planned, inputs + [p for p in args.inputs + [args.manifest] if p and os.path.isfile(p)])
+    mc.check_outputs(planned, inputs + [p for p in args.inputs + [args.manifest, args.panel_scales] if p and os.path.isfile(p)])
     stg = mc.Staging()                   # outputs appear only when the run succeeds
 
     pr = mc.Progress(N_STAGES, args.log)
@@ -1701,6 +1820,16 @@ def check_args(ap, args):
         ap.error(f"output folder {out_dir} does not exist")
     if args.exclude_tier and not (args.manifest or any(p.lower().endswith(".json") for p in args.inputs)):
         ap.error("--exclude-tier needs the classifier's manifest: pass --manifest panels/panel_manifest.json")
+    if not 0 < args.canvas_scale <= 1:
+        ap.error("--canvas-scale must be above 0 and at most 1")
+    if args.max_canvas_mpx < 0:
+        ap.error("--max-canvas-mpx cannot be negative")
+    args.scales = None
+    if args.panel_scales:
+        try:
+            args.scales = load_panel_scales(args.panel_scales)
+        except (OSError, ValueError) as e:
+            ap.error(f"--panel-scales {args.panel_scales}: {e}")
 
 
 if __name__ == "__main__":

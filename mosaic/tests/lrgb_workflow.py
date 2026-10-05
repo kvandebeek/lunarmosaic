@@ -59,17 +59,17 @@ class Workflow(unittest.TestCase):
         self.built()
         self.app.close()
         p = Project.open(self.root/'moon.lunarmosaic')
-        self.assertEqual(p.set('L')['state'], 'built')
-        self.assertEqual(p.set('RGB')['width'], 640)
+        self.assertEqual(p.stream('luminance')['state'], 'built')
+        self.assertEqual(p.stream('colour')['width'], 640)
         self.assertIsNotNone(p.match)
         self.assertEqual(before, [hashlib.sha256(x.read_bytes()).digest() for x in (self.lp,self.cp)])
 
     def legacy(self,version,edits):
         """Rewrite the open project's file in its schema-1–3 shape (sets by key, a global match, flat edits)."""
         p=self.app.project;self.app.close()
+        sets={k:{x:y for x,y in v.items() if x!='legacy_match'} for k,v in p.public()['sets'].items()}
         old=dict(version=version,id=p.data['id'],name=p.data['name'],created=p.data['created'],updated=p.data['updated'],
-                 revision=p.data['revision'],sets={s['id']:{k:v for k,v in s.items() if k not in ('id','stream','label')}
-                 for s in p.data['sets']},match=p.match,orientation=None,edits=edits)
+                 revision=p.data['revision'],sets=sets,match=p.match,orientation=None,edits=edits)
         (p.folder/'project.json').write_text(json.dumps(old),'utf-8')
         return p.folder,old
 
@@ -253,7 +253,7 @@ class Workflow(unittest.TestCase):
         self.lp.unlink()
         result=self.app.build(['L','RGB'])
         self.assertEqual(result,{'L':'failed','RGB':'built'})
-        self.assertIsNone(self.app.project.set('L')['mosaic'])
+        self.assertIsNone(self.app.project.stream('luminance')['mosaic'])
         self.assertTrue(self.app.project.path('derived/RGB.tif').is_file())
 
     def test_partial_import_keeps_valid_panels_and_reports_bad_files(self):
@@ -271,7 +271,7 @@ class Workflow(unittest.TestCase):
         self.built();p=self.app.project
         history=RecentProjects(self.root/'history'/'recent.json')
         history.remember(p.folder);history.remember(p.folder)
-        p.set('L')['state']='building';p.save()
+        p.stream('luminance')['state']='building';p.save()
         before=(p.folder/'project.json').read_bytes()
         self.assertEqual(len(history.read()),1)
         summary=history.summaries()[0]
@@ -351,9 +351,9 @@ class Workflow(unittest.TestCase):
         other=Application()
         with self.assertRaises(ValueError):other.select(self.app.project.folder)
         other.close()
-        self.app.project.set('L')['state']='building';self.app.project.save();self.app.close()
+        self.app.project.stream('luminance')['state']='building';self.app.project.save();self.app.close()
         p=Project.open(self.root/'moon.lunarmosaic')
-        self.assertEqual(p.set('L')['state'],'interrupted')
+        self.assertEqual(p.stream('luminance')['state'],'interrupted')
 
     def test_missing_colour_reopens_luminance_without_stale_common_crop(self):
         self.built();p=self.app.project
@@ -361,7 +361,7 @@ class Workflow(unittest.TestCase):
         p.path('derived/RGB.tif').rename(p.path('derived/RGB.moved.tif'))
         self.app.select(p.folder)
         restored=self.app.project
-        self.assertEqual(restored.set('RGB')['state'],'missing')
+        self.assertEqual(restored.stream('colour')['state'],'missing')
         self.assertIsNone(restored.match)
         self.assertEqual(restored.edits['coverage'],'full')
         self.assertTrue(restored.edits['l_visible'])

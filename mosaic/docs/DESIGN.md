@@ -395,7 +395,7 @@ diverges:
 | Saturation | Chroma multiplier | Lunar-hue weighting |
 | Missing | In the interface: all of these (the renderer can run them since phase 4; the interface cannot add them until phase 7). As chain blocks (run by `lunar_finish --chain`) since phase 3: white balance, sub-pixel RGB shift, deconvolution, limb fade, levels, curves, Gaussian blur | White balance, sub-pixel RGB shift, deconvolution, limb fade, daylight sky model, named previews |
 | Build recovery | Interrupted builds restart | Resume from completed stages |
-| Luminance sets | One set; pairs outside a 0.97–1.03 scale ratio are rejected | Several sets and scales per stream, selected in tiers by measured resolution |
+| Luminance sets | Several sets at different scales build into one mosaic since phase 5 (builder, API and resolution view); the current interface still shows one | Several sets and scales per stream, selected in tiers by measured resolution |
 | Lab conversion | Exact in `lunar_finish` since phase 1 and in the application since phase 4 (OpenCV's float conversion before: round trip off by 66 ADU rms) | Exact float math with the same constants |
 
 That table is the migration list for the chain editor.
@@ -576,6 +576,40 @@ half-scale export, approximate view, newest statistics win). `lrgb_workflow.py` 
 its 24 tests now reach the project through the schema-4 accessors, call `render_edits`, and write the version-1
 and version-2 files in their real shape (they relabelled a schema-3 file before); no tolerance changed. All ten
 suites pass; 102 tests.
+
+### Phase 5 — 2026-10-05
+
+Luminance sets at different pixel scales build into one mosaic on the finest set's grid.
+
+1. **Builder.** `--panel-scales FILE` gives each panel its set and its scale relative to the finest set. The pair
+   gate expects that ratio, the reference panel comes from the finest set, and region selection runs tier by
+   tier: sets are ordered by their measured resolution, and each tier competes only where no better tier
+   validly covers. `<out>_sets.json` reports each set's detail, its tier and its share of the disk, and maps every
+   region label to its set. `--canvas-scale` reduces the panels as they are read; `--max-canvas-mpx` stops the
+   build before blending when the canvas is larger than confirmed. Without the file the builder is unchanged:
+   checked bit for bit against the phase-4 builder, layout included.
+2. **Measured on a 2× mixed build** (9 fine and 4 coarse panels with terrain-like detail and noise): every panel
+   placed within 0.07 px rms of the truth, the fine set supplying 99.98 % of the area it covers.
+3. **Tiers are necessary, as D14 says.** With one fine and one 2× coarser panel of the same area, choosing by
+   sharpness per native pixel — the old rule — gave the coarse panel 97 % of the fine panel's cells, 99 % once
+   unsharp-masked. With tiers it gets none, and a set at the finest scale but blurred by σ 3 px yields to the
+   coarser, sharper one.
+4. **Two corrections found while building.** Brightness matching compared intensity percentiles, and a sharper
+   panel has a wider spread: on the mixed build the overlaps got worse (median mismatch 0.72 % → 1.09 %, gains up
+   to 1.22). The finer side is now blurred to the coarser one's sampling first: 0.18 % → 0.11 %, gains within 1 %
+   of the true 1. And the information cutoff assumes the highest frequencies hold only noise: a spectrum that stays
+   flat to the sampling limit made a 2× coarser panel read 78 px blurry. Such a panel is now "not measurable" and
+   counts as resolving 2 of its own pixels. Terrain's power falls steeply with frequency, so real panels are
+   measured as before.
+5. **Application.** Build state moved from the sets to the streams. `/api/sets` adds, edits and deletes luminance
+   sets; a set without optics gets its scale estimated from matched panels (measured 2.00 for a true 2), and a
+   mixed build waits until the estimate is confirmed. `/api/canvas-estimate` gives the canvas lower bound and
+   suggests a smaller canvas when the finest set is oversampled. The luminance stream builds every set in one run;
+   a mixed stream stops at 400 Mpx unless a larger canvas is confirmed, while a single set builds as before. The
+   `resolution` view tints each region by the set that supplied it, with a legend of pixel scales.
+
+Tests: `mixed_checks.py` (T-GATE, T-SHARP, T-MIX against the truth, the one-set file, canvas scale and cap, the
+application journey); a phase-4 project opens with its build state moved. All eleven suites pass; 114 tests.
 
 ### Changes made 2026-10-05 to `lunar_finish.py`
 

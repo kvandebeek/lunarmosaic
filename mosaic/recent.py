@@ -42,8 +42,13 @@ class RecentProjects:
                 folder = Path(entry['folder'])
                 p = json.loads((folder/'project.json').read_text('utf-8'))
                 sets = p['sets']
-                if isinstance(sets, list):                 # schema 4: a list of sets; the match moved to colour
-                    sets = {s['id']: s for s in sets}
+                if isinstance(sets, list):
+                    # schema 4: a list of sets, build state per stream, the match in the colour stream
+                    streams = {k: v for k, v in p.items() if k in ('luminance', 'colour') and isinstance(v, dict)}
+                    by_id = {s['id']: s for s in sets}
+                    lum = [s for s in sets if s.get('stream') == 'luminance']
+                    sets = {'L': dict(by_id['L'], **streams.get('luminance', {}), inputs=[x for s in lum for x in s['inputs']]),
+                            'RGB': dict(by_id['RGB'], **streams.get('colour', {}))}
                     p['match'] = (p.get('colour') or {}).get('legacy_match')
                 item.update(name=str(p['name']), available=True,
                             panels={k:len(sets[k]['inputs']) for k in ('L', 'RGB')})

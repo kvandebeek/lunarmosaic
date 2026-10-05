@@ -663,11 +663,15 @@ def proxy_conv(f):
     return np.array([[1 / f, 0, 0.5 / f - 0.5], [0, 1 / f, 0.5 / f - 0.5], [0, 0, 1.0]])
 
 
-def photometry(nodes, pair_keys, P, rgb4, m4, sat4, f, ref, sigma_meas=0.003, sigma_g=0.2, sigma_o=0.003):
+def photometry(nodes, pair_keys, P, rgb4, m4, sat4, f, ref, sigma_meas=0.003, sigma_g=0.2, sigma_o=0.003, scale_rel=None):
     """Solve g, o per panel and channel so that g_a·v_a + o_a = g_b·v_b + o_b on shared terrain (matched
     percentiles of the overlap). Reference panel fixed at g = 1, o = 0. Priors in physical units: gains loosely
     around 1 (sigma_g), offsets tightly around 0 (sigma_o, fraction of full scale; ~200 ADU), because gain and
-    offset trade off against each other on a narrow brightness range. Returns gains, offsets (BGR), stats."""
+    offset trade off against each other on a narrow brightness range. Returns gains, offsets (BGR), stats.
+
+    Panels from sets at different pixel scales (scale_rel) are compared at the coarser one's sampling: a sharper
+    panel has a wider brightness spread, so its percentiles differ even where the brightness agrees (measured on
+    a 2× mixed build: matching them unblurred took the median overlap mismatch from 0.72 % to 1.09 %)."""
     Cf = proxy_conv(f)
     qs = [10, 25, 50, 75, 90]
     obs = []
@@ -675,12 +679,21 @@ def photometry(nodes, pair_keys, P, rgb4, m4, sat4, f, ref, sigma_meas=0.003, si
         Tq = Cf @ np.linalg.inv(P[b]) @ P[a] @ np.linalg.inv(Cf)
         ha, wa = rgb4[a].shape[:2]
         Bw = cv2.warpAffine(rgb4[b].astype(np.float32), Tq[:2], (wa, ha), flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP)
+        Aa = rgb4[a]
+        k = 1.0 if scale_rel is None else scale_rel[b] / scale_rel[a]        # b's pixel in a's pixels
+        if k != 1:
+            # area-reduced by k and interpolated back has a variance of about k²/4 px²: blur the finer side to that
+            sigma = 0.5 * np.sqrt(abs(k * k - 1)) / (1 if k > 1 else k)
+            if k > 1:
+                Aa = cv2.GaussianBlur(Aa.astype(np.float32), (0, 0), sigma)
+            else:
+                Bw = cv2.GaussianBlur(Bw, (0, 0), sigma)
         okb = cv2.warpAffine((m4[b] & ~sat4[b]).astype(np.uint8), Tq[:2], (wa, ha), flags=cv2.INTER_NEAREST | cv2.WARP_INVERSE_MAP)
         common = (m4[a] & ~sat4[a] & (okb > 0)).astype(np.uint8)
         common = cv2.erode(common, np.ones((7, 7), np.uint8)) > 0
         if common.sum() < 3000:
             continue
-        va = np.percentile(rgb4[a][common].astype(np.float32), qs, axis=0)
+        va = np.percentile(Aa[common].astype(np.float32), qs, axis=0)
         vb = np.percentile(Bw[common], qs, axis=0)
         obs.append((a, b, va, vb, np.sqrt(common.sum() / 1e4)))
     free = [n for n in nodes if n != ref]
@@ -764,42 +777,54 @@ def label_matrix(P, q):
     return Sc @ P @ Sp
 
 
-def select_regions(nodes, sizes, L, P, canvas_pad, q, pool, borders=None, on_panel=None, smooth=6):
+def select_regions(nodes, sizes, L, P, canvas_pad, q, pool, borders=None, on_panel=None, smooth=6, tiers=None):
+    """Label each 1/q canvas cell with the panel that supplies it: the sharpest valid view wins, then a speckle
+    clean-up. `tiers` (D14: lists of panels, best-resolving set first) makes each tier compete only for the cells
+    that no better tier validly covers — sharpness per native pixel compares panels of one scale fairly, never
+    panels of different scales. Labels are indices into `nodes`."""
     Wl, Hl = canvas_pad[0] // q, canvas_pad[1] // q
-    best = np.full((Hl, Wl), -1.0, np.float32)
-    lab = np.full((Hl, Wl), 65535, np.uint16)
-    geo = {}
+    lab2 = np.full((Hl, Wl), 65535, np.uint16)
+    taken = np.zeros((Hl, Wl), bool)                 # cells a better tier validly covers
+    done = 0
 
     def job(n):
         return (n,) + sharpness_map(L[n], q, border=(borders or {}).get(n, 32))
-    for k, (n, s4, valid) in enumerate(pool.map(job, nodes), 1):
-        Mq = label_matrix(P[n], q)
-        h4, w4 = s4.shape
-        cor = np.array([[0, 0, 1], [w4, 0, 1], [0, h4, 1], [w4, h4, 1]], float) @ Mq.T
-        x0, y0 = max(0, int(cor[:, 0].min()) - 2), max(0, int(cor[:, 1].min()) - 2)
-        x1, y1 = min(Wl, int(cor[:, 0].max()) + 3), min(Hl, int(cor[:, 1].max()) + 3)
-        Mb = (np.array([[1, 0, -x0], [0, 1, -y0], [0, 0, 1.0]]) @ Mq)[:2]
-        sw = cv2.warpAffine(s4, Mb, (x1 - x0, y1 - y0), flags=cv2.INTER_LINEAR)
-        vw = cv2.warpAffine(valid, Mb, (x1 - x0, y1 - y0), flags=cv2.INTER_NEAREST) > 0
-        geo[n] = (Mb, (x0, y0, x1, y1), valid)
-        sub, lsub = best[y0:y1, x0:x1], lab[y0:y1, x0:x1]
-        upd = vw & (sw > sub)
-        sub[upd] = sw[upd]
-        lsub[upd] = nodes.index(n)
-        if on_panel:
-            on_panel(k, lab)
-    # speckle cleanup: smoothed indicators compete again, so small islands merge into their surroundings
-    best2 = np.full((Hl, Wl), -1.0, np.float32)
-    lab2 = np.full((Hl, Wl), 65535, np.uint16)
-    for i, n in enumerate(nodes):
-        Mb, (x0, y0, x1, y1), valid = geo[n]
-        ind = cv2.GaussianBlur((lab[y0:y1, x0:x1] == i).astype(np.float32), (0, 0), smooth)
-        vw = cv2.warpAffine(valid, Mb, (x1 - x0, y1 - y0), flags=cv2.INTER_NEAREST) > 0
-        ind[~vw] = -1
-        sub, lsub = best2[y0:y1, x0:x1], lab2[y0:y1, x0:x1]
-        upd = ind > sub
-        sub[upd] = ind[upd]
-        lsub[upd] = i
+    for tier in tiers or [list(nodes)]:
+        best = np.full((Hl, Wl), -1.0, np.float32)
+        lab = np.full((Hl, Wl), 65535, np.uint16)
+        geo = {}
+        for n, s4, valid in pool.map(job, tier):
+            done += 1
+            Mq = label_matrix(P[n], q)
+            h4, w4 = s4.shape
+            cor = np.array([[0, 0, 1], [w4, 0, 1], [0, h4, 1], [w4, h4, 1]], float) @ Mq.T
+            x0, y0 = max(0, int(cor[:, 0].min()) - 2), max(0, int(cor[:, 1].min()) - 2)
+            x1, y1 = min(Wl, int(cor[:, 0].max()) + 3), min(Hl, int(cor[:, 1].max()) + 3)
+            Mb = (np.array([[1, 0, -x0], [0, 1, -y0], [0, 0, 1.0]]) @ Mq)[:2]
+            sw = cv2.warpAffine(s4, Mb, (x1 - x0, y1 - y0), flags=cv2.INTER_LINEAR)
+            vw = cv2.warpAffine(valid, Mb, (x1 - x0, y1 - y0), flags=cv2.INTER_NEAREST) > 0
+            geo[n] = (Mb, (x0, y0, x1, y1), valid)
+            sub, lsub = best[y0:y1, x0:x1], lab[y0:y1, x0:x1]
+            upd = vw & (sw > sub) & ~taken[y0:y1, x0:x1]
+            sub[upd] = sw[upd]
+            lsub[upd] = nodes.index(n)
+            if on_panel:
+                on_panel(done, lab)
+        # speckle cleanup: smoothed indicators compete again, so small islands merge into their surroundings
+        best2 = np.full((Hl, Wl), -1.0, np.float32)
+        cover = np.zeros((Hl, Wl), bool)
+        for n in tier:
+            i = nodes.index(n)
+            Mb, (x0, y0, x1, y1), valid = geo[n]
+            ind = cv2.GaussianBlur((lab[y0:y1, x0:x1] == i).astype(np.float32), (0, 0), smooth)
+            vw = cv2.warpAffine(valid, Mb, (x1 - x0, y1 - y0), flags=cv2.INTER_NEAREST) > 0
+            cover[y0:y1, x0:x1] |= vw
+            ind[~vw | taken[y0:y1, x0:x1]] = -1
+            sub, lsub = best2[y0:y1, x0:x1], lab2[y0:y1, x0:x1]
+            upd = ind > sub
+            sub[upd] = ind[upd]
+            lsub[upd] = i
+        taken |= cover
     counts = np.bincount(lab2[lab2 != 65535].ravel(), minlength=len(nodes))
     shares = {n: float(counts[i]) / max(1, counts.sum()) for i, n in enumerate(nodes)}
     return lab2, shares
@@ -823,7 +848,8 @@ def pushpull(img, valid, min_size=16):
     return np.where(valid[..., None], img, est).astype(np.float32)
 
 
-def blend_panel(n, i, path, size, P, gain, off, lab, q, canvas_pad, levels, border=32, model=None, th=None, offset=(0, 0)):
+def blend_panel(n, i, path, size, P, gain, off, lab, q, canvas_pad, levels, border=32, model=None, th=None, offset=(0, 0),
+                scale=1.0):
     """Warp one panel into the bounding box of its won region and build its pyramids. With a polynomial model
     the exact inverse mapping is computed on a 16 px grid and interpolated (cv2.remap); otherwise warpAffine."""
     ys, xs = np.nonzero(lab == i)
@@ -836,7 +862,7 @@ def blend_panel(n, i, path, size, P, gain, off, lab, q, canvas_pad, levels, bord
     x1 = min(canvas_pad[0], -(-((xs.max() + 1) * q + margin) // step) * step)
     y1 = min(canvas_pad[1], -(-((ys.max() + 1) * q + margin) // step) * step)
     bw, bh = x1 - x0, y1 - y0
-    img, _, _ = mc.read_image(path)
+    img, _, _ = mc.read_image(path, scale)          # read as stage 1 read it (--canvas-scale)
     if img.shape[2] == 1:
         img = np.repeat(img, 3, axis=2)
     img = img * gain.astype(np.float32) + off.astype(np.float32)

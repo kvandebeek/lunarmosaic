@@ -1,9 +1,10 @@
 """Durable, versioned LRGB project (schema 4); source images are never edited.
 
-Schema 4 (plan §4.6): a list of panel sets, each feeding a stream; the colour placement; geometry (rotation, mirror,
-coverage) and view (layer visibility) kept apart from the editing chain. Until the interface moves to chains (plan
-phase 7) it still edits the flat adjustments of schema 3: they live in `legacy_edits`, and every change regenerates
-the chain from them. Build state stays per set while each stream has one set; phase 5 moves it to the stream.
+Schema 4 (plan §4.6): a list of panel sets, each feeding a stream — any number of luminance sets, built jointly
+into one luminance mosaic on the finest set's grid (phase 5), and the colour set; the build state of each stream;
+geometry (rotation, mirror, coverage) and view (layer visibility) kept apart from the editing chain. Until the
+interface moves to chains (plan phase 7) it still edits the flat adjustments of schema 3: they live in
+`legacy_edits`, and every change regenerates the chain from them.
 
 Projects of schema 1–3 are migrated once, on opening, and the original file is kept as project.v<N>.json.
 """
@@ -21,6 +22,7 @@ from datetime import datetime, timezone
 import chain
 
 SCHEMA = 4
+STREAMS = ('luminance', 'colour')
 GEOMETRY_KEYS, VIEW_KEYS = ('rotation', 'mirror', 'coverage'), ('l_visible', 'rgb_visible')
 DEFAULT_EDITS = dict(saturation=1.0, smoothing=0.0, strength=1.0,
                      highlights=0.0, contrast=0.0, rotation=0.0, coverage='full', mirror=False,
@@ -30,7 +32,11 @@ DEFAULT_EDITS = dict(saturation=1.0, smoothing=0.0, strength=1.0,
 RANGES = dict(saturation=(0, 4), smoothing=(0, 8), strength=(0, 1),
               highlights=(0, 1), contrast=(-1, 1), rotation=(-180, 180), wavelet_denoise=(0, 5),
               usm_amount=(0, 1), usm_radius=(.3, 5), usm_threshold=(0, .05))
-SET_DEFAULTS = dict(inputs=[], optics={}, state='empty', mosaic=None, error=None)
+# what a set holds; everything else a schema-3 set held is its stream's build state
+SET_KEYS = ('id', 'stream', 'label', 'inputs', 'optics', 'skipped', 'headers', 'scale_estimate')
+OPTICS = ('pixel_um', 'focal_mm', 'barlow', 'aperture_mm', 'wavelength_nm')
+BUILD_STATES = ('empty', 'ready', 'queued', 'building', 'built', 'failed', 'interrupted', 'missing')
+CANVAS_CAP_MPX = 400          # above this the canvas needs confirming (plan phase 5)
 
 
 def now():
@@ -38,7 +44,84 @@ def now():
 
 
 def new_set(key, stream, label):
-    return dict(id=key, stream=stream, label=label, **copy.deepcopy(SET_DEFAULTS))
+    return dict(id=key, stream=stream, label=label, inputs=[], optics={})
+
+
+def new_stream():
+    return dict(state='empty', mosaic=None, error=None)
+
+
+def split_set(old):
+    """A schema-3 set (or a phase-4 schema-4 one) -> (its set fields, its build state)."""
+    return ({k: copy.deepcopy(v) for k, v in old.items() if k in SET_KEYS},
+            {k: copy.deepcopy(v) for k, v in old.items() if k not in SET_KEYS})
+
+
+def clean_optics(optics):
+    """Optics as entered: positive numbers (µm, mm, ×, mm, nm), blanks dropped; raises ValueError."""
+    if not isinstance(optics, dict) or set(optics) - set(OPTICS):
+        raise ValueError('Optics are ' + ', '.join(OPTICS) + '.')
+    clean = {}
+    for name in OPTICS:
+        v = optics.get(name)
+        if v in (None, ''):
+            continue
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            raise ValueError('Optics values must be positive numbers.') from None
+        if not math.isfinite(v) or not 0 < v < 100000:
+            raise ValueError('Optics values must be positive numbers.')
+        clean[name] = v
+    return clean
+
+
+def arcsec_px(optics):
+    """The pixel scale from optics, 206.265 × pixel µm ÷ (focal mm × Barlow), or None without them."""
+    if optics.get('pixel_um') and optics.get('focal_mm'):
+        return 206.265 * optics['pixel_um'] / (optics['focal_mm'] * optics.get('barlow', 1.0))
+    return None
+
+
+def luminance_scales(sets):
+    """{set id: {rel, arcsec_px, source}} for the luminance sets with panels: rel = the set's pixel scale ÷ the
+    finest set's (≥ 1). From optics; otherwise from a confirmed estimate against another set (D10). One set needs
+    neither. Raises ValueError naming a set whose scale is unknown or unconfirmed: a mixed stream is never built on
+    a guess."""
+    sets = [s for s in sets if s['stream'] == 'luminance' and s.get('inputs')]
+    if len(sets) == 1:
+        a = arcsec_px(sets[0].get('optics', {}))
+        return {sets[0]['id']: dict(rel=1.0, arcsec_px=a, source='optics' if a else 'single set')}
+    known = {s['id']: (arcsec_px(s.get('optics', {})), 'optics') for s in sets if arcsec_px(s.get('optics', {}))}
+    ratios = {}
+    for s in sets:
+        e = s.get('scale_estimate')
+        if s['id'] not in known and e:
+            if not e.get('confirmed'):
+                raise ValueError(f'Confirm the estimated scale of set {s.get("label") or s["id"]} '
+                                 f'({e["ratio"]:.3f}× {e["relative_to"]}) before building.')
+            ratios[s['id']] = (e['relative_to'], e['ratio'])
+    # resolve estimates against sets of known scale; with no optics at all, against an arbitrary unit
+    scale = {k: v[0] for k, v in known.items()}
+    source = {k: v[1] for k, v in known.items()}
+    unit = None
+    for _ in range(len(sets)):
+        for sid, (ref, r) in ratios.items():
+            if sid not in scale and ref in scale:
+                scale[sid], source[sid] = r * scale[ref], 'estimated'
+        if not known and unit is None and ratios:
+            unit = next(iter(ratios.values()))[0]
+            scale.setdefault(unit, 1.0)
+            source.setdefault(unit, 'estimated')
+    missing = [s for s in sets if s['id'] not in scale]
+    if missing:
+        s = missing[0]
+        raise ValueError(f'Set {s.get("label") or s["id"]} needs its optics (pixel size and focal length) or an '
+                         'estimated scale before a mixed build.')
+    finest = min(scale.values())
+    absolute = bool(known)
+    return {sid: dict(rel=scale[sid] / finest, arcsec_px=scale[sid] if absolute else None, source=source[sid])
+            for sid in scale}
 
 
 def _entry(path, type, params):
@@ -95,21 +178,33 @@ def chain_doc(part):
 def migrate(data):
     """Schema 1–3 -> 4, without changing the values of what carries over; returns (data, notes)."""
     edits = dict(copy.deepcopy(DEFAULT_EDITS), **data.get('edits', {}))
-    sets = []
+    sets, streams = [], {}
     for key, stream, label in (('L', 'luminance', 'Luminance'), ('RGB', 'colour', 'Colour')):
-        old = copy.deepcopy(data['sets'][key])
-        s = new_set(key, stream, label)
-        s.update(old)
-        s.update(id=key, stream=stream)
-        sets.append(s)
+        part, state = split_set(data['sets'][key])
+        sets.append(dict(new_set(key, stream, label), **part, id=key, stream=stream))
+        streams[stream] = dict(new_stream(), **state)
+    streams['colour']['legacy_match'] = data.get('match')
     doc, notes = edits_to_chain(edits)
     out = dict(version=SCHEMA, id=data['id'], name=data.get('name', 'Untitled Moon'), created=data.get('created', now()),
-               updated=data.get('updated', now()), revision=data.get('revision', 0), sets=sets,
-               colour={'legacy_match': data.get('match')}, orientation=data.get('orientation'),
+               updated=data.get('updated', now()), revision=data.get('revision', 0), sets=sets, **streams,
+               orientation=data.get('orientation'),
                geometry={k: edits[k] for k in GEOMETRY_KEYS}, view={k: edits[k] for k in VIEW_KEYS},
                legacy_edits={k: v for k, v in edits.items() if k not in GEOMETRY_KEYS + VIEW_KEYS},
                chain=chain_part(doc), notes=notes)
     return out, notes
+
+
+def from_phase4(data):
+    """The first schema-4 layout (phase 4, never released) kept build state in each set: move it to the streams."""
+    if 'luminance' in data or not any('state' in s for s in data.get('sets', [])):
+        return data
+    data = copy.deepcopy(data)
+    for s in list(data['sets']):
+        part, state = split_set(s)
+        data['sets'][data['sets'].index(s)] = part
+        if s.get('stream') in STREAMS:
+            data[s['stream']] = dict(new_stream(), **data.get(s['stream'], {}), **state)
+    return data
 
 
 class Project:
@@ -126,7 +221,7 @@ class Project:
         edits = copy.deepcopy(DEFAULT_EDITS)
         p = cls(folder, dict(version=SCHEMA, id=uuid.uuid4().hex, name=str(name)[:120], created=now(), updated=now(),
                              revision=0, sets=[new_set('L', 'luminance', 'Luminance'), new_set('RGB', 'colour', 'Colour')],
-                             colour={'legacy_match': None}, orientation=None,
+                             luminance=new_stream(), colour=dict(new_stream(), legacy_match=None), orientation=None,
                              geometry={k: edits[k] for k in GEOMETRY_KEYS}, view={k: edits[k] for k in VIEW_KEYS},
                              legacy_edits={k: v for k, v in edits.items() if k not in GEOMETRY_KEYS + VIEW_KEYS},
                              chain=chain_part(chain.empty()), notes=[]))
@@ -154,13 +249,15 @@ class Project:
         elif version != SCHEMA:
             raise ValueError('This project version is not supported.')
         before = copy.deepcopy(data)
+        data = from_phase4(data)
         p = cls(folder, data)
         p.validate()
-        for s in data['sets']:
-            if s['state'] in ('building', 'queued'):
-                s.update(state='interrupted', error='Build interrupted. Restart this set; completed mosaics were kept.')
-            if s.get('mosaic') and not p.path(s['mosaic']).is_file():
-                s.update(state='missing', error='The built mosaic is missing.', mosaic=None)
+        for name in STREAMS:
+            st = data[name]
+            if st['state'] in ('building', 'queued'):
+                st.update(state='interrupted', error='Build interrupted. Restart this set; completed mosaics were kept.')
+            if st.get('mosaic') and not p.path(st['mosaic']).is_file():
+                st.update(state='missing', error='The built mosaic is missing.', mosaic=None)
                 data['colour']['legacy_match'] = None
                 data['geometry']['coverage'] = 'full'
                 data['view']['l_visible'] = True
@@ -172,10 +269,17 @@ class Project:
         """Sets, geometry, view and chain (plan phase 4); raises ValueError with the first problem."""
         d = self.data
         sets = d.get('sets')
-        if (not isinstance(sets, list) or [s.get('id') if isinstance(s, dict) else None for s in sets] != ['L', 'RGB']
-                or [s.get('stream') for s in sets] != ['luminance', 'colour']
-                or any(not isinstance(s.get('inputs'), list) for s in sets)):
+        ids = [s.get('id') if isinstance(s, dict) else None for s in sets] if isinstance(sets, list) else []
+        if (not ids or len(set(ids)) != len(ids) or 'L' not in ids or 'RGB' not in ids
+                or any(not isinstance(i, str) or not i or len(i) > 32 for i in ids)
+                or any(s.get('stream') not in STREAMS or not isinstance(s.get('inputs'), list)
+                       or not isinstance(s.get('optics', {}), dict) for s in sets)
+                or self.set('L')['stream'] != 'luminance' or self.set('RGB')['stream'] != 'colour'
+                or sum(s['stream'] == 'colour' for s in sets) != 1):
             raise ValueError('The project has invalid panel sets.')
+        for name in STREAMS:
+            if not isinstance(d.get(name), dict) or d[name].get('state') not in BUILD_STATES:
+                raise ValueError(f'The project\'s {name} build state is invalid.')
         for key, keys in (('geometry', GEOMETRY_KEYS), ('view', VIEW_KEYS)):
             if not isinstance(d.get(key), dict) or set(d[key]) != set(keys):
                 raise ValueError(f'The project\'s {key} is invalid.')
@@ -202,6 +306,31 @@ class Project:
     def input_paths(self, key):
         return [str(Path(v).resolve()) if Path(v).is_absolute() else str(self.path(v))
                 for v in self.set(key)['inputs']]
+
+    def stream(self, name):
+        """The build state of a stream: state, mosaic, error, … (and, for colour until phase 6, legacy_match)."""
+        return self.data[name]
+
+    def sets_of(self, name):
+        return [s for s in self.data['sets'] if s['stream'] == name]
+
+    def stream_of(self, key):
+        return self.data[self.set(key)['stream']]
+
+    def refresh_state(self, name):
+        """An unbuilt stream is ready when one of its sets has panels, empty otherwise."""
+        st = self.data[name]
+        if st['state'] in ('empty', 'ready'):
+            st['state'] = 'ready' if any(s['inputs'] for s in self.sets_of(name)) else 'empty'
+
+    def add_set(self, stream, label):
+        """A new luminance set (colour gets more sets with per-panel placement, phase 6). Ids are s2, s3, …"""
+        if stream != 'luminance':
+            raise ValueError('Only luminance sets can be added for now; colour has one set until phase 6.')
+        taken = {s['id'] for s in self.data['sets']}
+        key = next(f's{n}' for n in range(2, 1000) if f's{n}' not in taken)
+        self.data['sets'].append(new_set(key, stream, str(label or f'Luminance {key[1:]}')[:120]))
+        return key
 
     # ---------------------------------------------------------------- the schema-3 view, until phase 7
 
@@ -274,9 +403,12 @@ class Project:
         """For the interface: the schema-3 shape it reads today (sets by key, match, edits), with the schema-4 data
         alongside under `schema4`. Phase 7 drops the schema-3 part."""
         d = self.data
+
+        def legacy(key):            # a schema-3 set: the set's own fields plus its stream's build state
+            st = {k: v for k, v in d[self.set(key)['stream']].items() if k != 'legacy_match'}
+            return copy.deepcopy(dict(st, **{k: v for k, v in self.set(key).items() if k not in ('id', 'stream', 'label')}))
         return dict(version=d['version'], id=d['id'], name=d['name'], created=d['created'], updated=d['updated'],
                     revision=d['revision'], folder=str(self.folder), orientation=copy.deepcopy(d['orientation']),
-                    sets={s['id']: {k: copy.deepcopy(v) for k, v in s.items() if k not in ('id', 'stream', 'label')}
-                          for s in d['sets']},
+                    sets={'L': legacy('L'), 'RGB': legacy('RGB')},
                     match=copy.deepcopy(self.match), edits=self.edits, notes=list(d.get('notes', [])),
                     schema4=copy.deepcopy(d))
