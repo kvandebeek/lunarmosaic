@@ -4,6 +4,8 @@
 // /api/analysis. Blocks can be added (those a path cannot take are greyed, with the reason), reordered by dragging
 // or with Alt+↑/↓, switched off, duplicated and deleted; every block has a limb fade. Each change hands the whole
 // new chain document to onChange, which saves it.
+// bug 21: a useful slider span per (block type, parameter), well inside the full accepted range
+const SLIDER_RANGE = {'unsharp_mask.radius': [0, 8], 'gaussian_blur.sigma': [0, 8], 'levels.gamma': [0.1, 3]};
 const PATHS = [['luminance', 'Luminance chain', 'on the luminance, before the merge'],
                ['colour', 'Colour chain', 'on the colour, before the merge'],
                ['final', 'Final chain', 'on the merged image']];
@@ -21,6 +23,36 @@ export function h(tag, attrs = {}, ...children) {
   }
   for (const c of children.flat()) if (c !== null && c !== undefined && c !== false) el.append(c.nodeType ? c : document.createTextNode(String(c)));
   return el;
+}
+
+// Native number fields localise their *display* independently of the page.  The
+// rest of the application uses a point in measurements and summaries, so keep a
+// small, explicit parser/formatter for editable values too.  A comma remains a
+// friendly input spelling, but is normalised when the value is committed.
+export const decimalValue = value => {
+  const text = String(value ?? '').trim().replace(/\s+/g, '').replace(',', '.');
+  return text ? Number(text) : NaN;
+};
+export const decimalText = value => {
+  const n = Number(value);
+  return Number.isFinite(n) ? String(Number(n.toFixed(10))) : '';
+};
+
+// BUGS.md bug 15/16: native number-input arrows are a few px high and step by 1 regardless of the field; this
+// pair is a real touch target and steps by the field's own amount. `input` keeps the full accepted range; only
+// the visible step comes from here, so a typed value outside it is never blocked.
+export function spinner(input, {step = 1, min, max} = {}) {
+  const nudge = sign => {
+    let n = (decimalValue(input.value) || 0) + sign * step;
+    if (min !== undefined) n = Math.max(min, n);
+    if (max !== undefined) n = Math.min(max, n);
+    n = Math.round(n / step) * step;                        // land on a clean step, not 0.30000000000000004
+    input.value = decimalText(n);
+    input.dispatchEvent(new Event('change', {bubbles: true}));
+  };
+  return h('span', {class: 'spin'},
+    h('button', {type: 'button', class: 'spin-btn down', tabindex: -1, 'aria-label': `Decrease ${input.getAttribute('aria-label') || ''}`.trim(), onclick: () => nudge(-1)}, '−'),
+    h('button', {type: 'button', class: 'spin-btn up', tabindex: -1, 'aria-label': `Increase ${input.getAttribute('aria-label') || ''}`.trim(), onclick: () => nudge(1)}, '+'));
 }
 
 export const newId = () => [...crypto.getRandomValues(new Uint8Array(4))].map(b => b.toString(16).padStart(2, '0')).join('');
@@ -52,32 +84,35 @@ export function summary(e) {
   }
 }
 
-// a number with its slider (when the range is bounded) and its unit
+// a number with its slider (when the range is bounded), its spin buttons and its unit
 function numberField(spec, value, set) {
   const bounded = spec.min !== undefined && spec.max !== undefined;
   const step = spec.step || (spec.kind === 'int' ? 1 : 0.01);
   const lo = spec.min !== undefined ? spec.min + (spec.min_open ? step : 0) : undefined;
   const hi = spec.max !== undefined ? spec.max - (spec.max_open ? step : 0) : undefined;
-  const parse = v => { const n = Number(v); return spec.kind === 'int' ? Math.round(n) : n; };
-  const input = h('input', {type: 'number', value, step, min: lo, max: hi, 'aria-label': spec.label});
-  const slider = bounded ? h('input', {type: 'range', value, step, min: lo, max: hi, tabindex: -1, 'aria-hidden': 'true'}) : null;
+  // bug 21: the slider may cover a narrower, more useful span than the field's full accepted range
+  const sliderLo = spec.sliderMin ?? lo, sliderHi = spec.sliderMax ?? hi;
+  const parse = v => { const n = decimalValue(v); return spec.kind === 'int' ? Math.round(n) : n; };
+  const input = h('input', {class: 'numeric-input', type: 'text', inputmode: 'decimal', value: decimalText(value),
+    'data-min': lo, 'data-max': hi, 'aria-label': spec.label});
+  const slider = bounded ? h('input', {type: 'range', value, step, min: sliderLo, max: sliderHi, tabindex: -1, 'aria-hidden': 'true'}) : null;
   // while a slider moves, changes are live (saved, not re-rendered, so the drag goes on); release re-renders
   const commit = (v, live) => {
     let n = parse(v);
     if (!Number.isFinite(n)) return;
     if (lo !== undefined) n = Math.max(lo, n);
     if (hi !== undefined) n = Math.min(hi, n);
-    input.value = n;
-    if (slider) slider.value = n;
+    input.value = decimalText(n);
+    if (slider) slider.value = n;                           // the browser pins this at an end past the slider's own range
     set(n, live);
   };
   input.addEventListener('change', () => commit(input.value));
   if (slider) {
-    slider.addEventListener('input', () => { input.value = slider.value; commit(slider.value, true); });
+    slider.addEventListener('input', () => { input.value = decimalText(slider.value); commit(slider.value, true); });
     slider.addEventListener('change', () => commit(slider.value));
   }
   return h('label', {class: 'param'}, h('span', {class: 'param-name'}, spec.label, spec.unit ? h('small', {text: ` ${spec.unit}`}) : null),
-           h('span', {class: 'param-inputs'}, slider, input));
+           h('span', {class: 'param-inputs'}, slider, input, spinner(input, {step, min: lo, max: hi})));
 }
 
 function choiceField(spec, value, set) {
@@ -191,7 +226,31 @@ function curveEditor(e, read, set) {
   return [svg, out, h('p', {class: 'hint', text: hist ? 'The histogram is of the image arriving at this block, after every block above it.' : 'The histogram appears once the statistics are ready.'})];
 }
 
-function psfField(e, set) {
+// Levels has its own transfer graph: the histogram is the input to this block, while the orange line is the
+// current black/white/gamma mapping.  The numeric controls remain the authoritative, keyboard-accessible edit.
+function levelsEditor(e, read) {
+  const S = 256, ns = 'http://www.w3.org/2000/svg', svg = document.createElementNS(ns, 'svg');
+  const el = (tag, attrs) => { const node = document.createElementNS(ns, tag); for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v); return node; };
+  svg.setAttribute('viewBox', `-8 -8 ${S + 16} ${S + 16}`); svg.setAttribute('class', 'levels-hist'); svg.setAttribute('role', 'img');
+  svg.setAttribute('aria-label', 'Levels histogram and current input-to-output mapping');
+  const hist = read?.histogram;
+  if (hist) {
+    const top = Math.max(...hist.map(v => Math.log1p(v)), 1);
+    svg.append(el('path', {class: 'hist', d: 'M0 256 ' + hist.map((v, i) => `L${i} ${S - Math.log1p(v) / top * S}`).join(' ') + ' L255 256 Z'}));
+  }
+  svg.append(el('rect', {x: 0, y: 0, width: S, height: S, class: 'frame'}));
+  for (const q of [64, 128, 192]) svg.append(el('path', {class: 'grid', d: `M${q} 0V${S}M0 ${q}H${S}`}));
+  const p = e.params, b = p.black, w = p.white, gamma = p.gamma, ob = p.out_black, ow = p.out_white;
+  const mapped = x => ob + (ow - ob) * Math.pow(Math.max(0, Math.min(1, (x - b) / Math.max(1e-6, w - b))), 1 / gamma);
+  svg.append(el('path', {class: 'line', d: Array.from({length: 256}, (_, x) => `${x ? 'L' : 'M'}${x} ${S - Math.max(0, Math.min(255, mapped(x)))}`).join('')}));
+  for (const [x, label] of [[b, 'Black point'], [w, 'White point']]) {
+    const marker = el('path', {class: 'level-marker', d: `M${x} ${S}V${S - 13}M${x - 5} ${S}L${x} ${S - 6}L${x + 5} ${S}`});
+    marker.setAttribute('aria-label', label); svg.append(marker);
+  }
+  return [svg, h('p', {class: 'hint', text: hist ? 'Histogram: the image arriving at this block. The line shows its current levels mapping.' : 'The histogram appears once the statistics are ready.'})];
+}
+
+function psfField(e, set, onBrowse) {
   const psf = e.params.psf;
   const kind = h('select', {'aria-label': 'PSF', onchange: () => set({psf: kind.value === 'file' ? {kind: 'file', path: psf.path || ''}
       : {kind: 'synthetic', airy_radius: 3, diffraction_intensity: 100, seeing_index: 3}})},
@@ -200,7 +259,8 @@ function psfField(e, set) {
   const rows = [h('label', {class: 'param'}, h('span', {class: 'param-name'}, 'PSF'), kind)];
   if (psf.kind === 'file') {
     const path = h('input', {value: psf.path || '', placeholder: '/path/to/psf.tif', onchange: () => set({psf: {kind: 'file', path: path.value}})});
-    rows.push(h('label', {class: 'param'}, h('span', {class: 'param-name'}, 'PSF image (16-bit, centred)'), path));
+    const browseBtn = h('button', {class: 'btn small', type: 'button', onclick: () => onBrowse('file', path)}, 'Browse…');
+    rows.push(h('label', {class: 'param'}, h('span', {class: 'param-name'}, 'PSF image (16-bit, centred)'), h('span', {class: 'param-inputs'}, path, browseBtn)));
   } else {
     for (const [k, label, lo, hi, step] of [['airy_radius', 'Airy disk radius', 1, 100, 0.5], ['diffraction_intensity', 'Diffraction intensity', 10, 200, 1], ['seeing_index', 'Seeing index', 1, 5, 0.1]])
       rows.push(numberField({label, kind: 'float', min: lo, max: hi, step, unit: k === 'airy_radius' ? 'px' : ''}, psf[k], (v, live) => set({psf: {...psf, [k]: v}}, live)));
@@ -252,8 +312,10 @@ function readoutLines(e, r) {
 }
 
 export class ChainEditor {
-  constructor({root, catalog, onChange, onDraw = () => {}, onSelect = () => {}}) {
-    Object.assign(this, {root, onChange, onDraw, onSelect});
+  // onNotice(text, undo): bugs-codex.md CODEX-03, a toast with an undo for a block this editor just deleted
+  // onBrowse(kind, input): BUGS.md bug 14, a path box with no file chooser
+  constructor({root, catalog, onChange, onDraw = () => {}, onSelect = () => {}, onNotice = () => {}, onBrowse = () => {}}) {
+    Object.assign(this, {root, onChange, onDraw, onSelect, onNotice, onBrowse});
     this.catalog = Object.fromEntries(catalog.map(b => [b.type, b]));
     this.open = new Set();      // block ids shown expanded
     this.menu = null;           // the path whose add menu is open
@@ -263,6 +325,7 @@ export class ChainEditor {
     this.pressed = false;       // a pointer is down in the editor (a curve point moving): show() waits for it
     this.waiting = null;
     this.version = 0;           // counts the editor's own changes
+    this.context = {};           // {hasColour}: bug 25, the Merge strength has no effect before colour is placed
     root.addEventListener('pointerdown', () => { this.pressed = true; }, true);
     window.addEventListener('pointerup', () => this.release(), true);
     window.addEventListener('pointercancel', () => this.release(), true);
@@ -277,16 +340,17 @@ export class ChainEditor {
       const w = this.waiting;
       this.waiting = null;
       if (!w || this.pressed) return;
-      if (w.version === this.version) this.show(w.doc, w.analysis);
-      else if (w.analysis) this.analysis = w.analysis;
+      if (w.version === this.version) this.show(w.doc, w.analysis, w.context);
+      else { if (w.analysis) this.analysis = w.analysis; if (w.context) this.context = w.context; }
     }, 0);
   }
 
   // A document from outside (the saved chain, new readouts): drawn again, keeping focus on the same block.
-  show(doc, analysis) {
-    if (this.pressed) { this.waiting = {doc, analysis, version: this.version}; return; }
+  show(doc, analysis, context) {
+    if (this.pressed) { this.waiting = {doc, analysis, context, version: this.version}; return; }
     this.doc = doc;
     if (analysis) this.analysis = analysis;
+    if (context) this.context = context;
     const active = document.activeElement;
     this.render(this.root.contains(active) ? active.closest('[data-id]')?.dataset.id : undefined);
   }
@@ -352,13 +416,14 @@ export class ChainEditor {
       return h('section', {class: 'chain', dataset: {path}}, ...parts);
     });
     const strength = doc.chains.merge?.strength ?? 1;
-    const merge = h('section', {class: 'chain merge'}, h('div', {class: 'chain-head'}, h('div', {class: 'eyebrow', text: 'MERGE'}),
+    // bug 25: on a luminance-only project this slider has nothing to blend and does nothing
+    const merge = this.context.hasColour ? h('section', {class: 'chain merge'}, h('div', {class: 'chain-head'}, h('div', {class: 'eyebrow', text: 'MERGE'}),
       h('small', {class: 'hint', text: 'lightness from the luminance, colour from the colour chain'})),
       numberField({label: 'Colour strength', kind: 'float', min: 0, max: 1, step: 0.01}, strength,
-        (v, live) => this.edit(d => { d.chains.merge = {strength: v}; }, live)));
+        (v, live) => this.edit(d => { d.chains.merge = {strength: v}; }, live))) : null;
     const protect = boolField({label: 'Keep space black'}, doc.protect_space !== false,
       v => this.commit(d => { d.protect_space = v; }), false, 'sky outside the Moon is restored after every block');
-    this.root.replaceChildren(sections[0], sections[1], merge, sections[2], h('div', {class: 'chain-foot'}, protect));
+    this.root.replaceChildren(...[sections[0], sections[1], merge, sections[2], h('div', {class: 'chain-foot'}, protect)].filter(Boolean));
     if (focus) this.root.querySelector(`[data-id="${focus}"] .block-head`)?.focus();
   }
 
@@ -381,7 +446,11 @@ export class ChainEditor {
           this.open.add(copy.id);
           this.commit(d => d.chains[path].splice(i + 1, 0, copy), copy.id);
         }}, '⧉'),
-        h('button', {class: 'icon', type: 'button', title: 'Delete', 'aria-label': 'Delete', onclick: () => this.commit(d => d.chains[path].splice(i, 1))}, '×')));
+        h('button', {class: 'icon', type: 'button', title: 'Delete', 'aria-label': 'Delete', onclick: () => {
+          const removed = clone(e);
+          this.commit(d => d.chains[path].splice(i, 1));
+          this.onNotice(`${spec?.label || e.type} deleted.`, () => this.commit(d => d.chains[path].splice(i, 0, removed), removed.id));
+        }}, '×')));
     const li = h('li', {class: `block${e.enabled === false ? ' off' : ''}${refusal ? ' refused' : ''}${opened ? ' open' : ''}`, dataset: {id: e.id, path}}, head);
     if (refusal) li.append(h('p', {class: 'warning', text: refusal}));
     if (opened && spec) li.append(this.body(path, e, spec));
@@ -409,7 +478,7 @@ export class ChainEditor {
     } else if (e.type === 'curves') {
       fields.push(...curveEditor(e, read, set));
     } else if (e.type === 'deconvolution') {
-      fields.push(...psfField(e, set));
+      fields.push(...psfField(e, set, (k, input) => this.onBrowse(k, input)));
       for (const k of ['iterations', 'dering_strength', 'dering_radius', 'blend_raw']) fields.push(numberField(specs[k], e.params[k], (v, live) => set({[k]: v}, live)));
     } else if (e.type === 'white_balance') {
       fields.push(referenceField(specs.background, e.params.background, v => set({background: v}), cb => this.onDraw('background', cb)),
@@ -420,15 +489,31 @@ export class ChainEditor {
     } else if (e.type === 'rgb_shift') {
       fields.push(choiceField(specs.mode, e.params.mode, v => set({mode: v})));
       if (e.params.mode === 'manual') fields.push(h('div', {class: 'nudges'}, ...['r', 'b'].map(c => nudgePad(c, e.params.manual[c], v => set({manual: {...e.params.manual, [c]: v}})))));
+    } else if (e.type === 'levels') {
+      // BUGS.md bug 24: detect the black and white points from the image arriving at this block
+      const r = read || {};
+      fields.push(...levelsEditor(e, r));
+      for (const p of spec.params) {
+        const range = SLIDER_RANGE[`levels.${p.name}`];
+        fields.push(numberField(range ? {...p, sliderMin: range[0], sliderMax: range[1]} : p, e.params[p.name], (x, live) => set({[p.name]: x}, live)));
+        if (p.name === 'black' && (r.shadow_level !== undefined || r.sky_level !== undefined)) fields.push(h('p', {class: 'hint'}, 'Set black from: ',
+          r.shadow_level !== undefined ? h('button', {class: 'btn small', type: 'button', onclick: () => set({black: Math.round(r.shadow_level)})}, `Shadow detail · ${Math.round(r.shadow_level)}`) : null,
+          r.sky_level !== undefined ? h('button', {class: 'btn small', type: 'button', onclick: () => set({black: Math.round(r.sky_level)})}, `Sky · ${Math.round(r.sky_level)}`) : null));
+        if (p.name === 'white' && r.highlight_level !== undefined) fields.push(h('p', {class: 'hint'}, 'Set white from: ',
+          h('button', {class: 'btn small', type: 'button', onclick: () => set({white: Math.round(r.highlight_level)})}, `Brightest disk detail · ${Math.round(r.highlight_level)}`)));
+      }
     } else {
       for (const p of spec.params) {
+        if (e.type === 'unsharp_mask' && p.name === 'mode' && path === 'luminance') continue;
         const v = e.params[p.name];
+        const range = SLIDER_RANGE[`${e.type}.${p.name}`];
+        const field = range ? {...p, sliderMin: range[0], sliderMax: range[1]} : p;
         if (p.kind === 'bool') fields.push(boolField(p, v, x => set({[p.name]: x})));
         else if (p.kind === 'choice') fields.push(choiceField(p, v, x => set({[p.name]: x})));
-        else if (p.kind === 'float' || p.kind === 'int') fields.push(numberField(p, v, (x, live) => set({[p.name]: x}, live)));
+        else if (p.kind === 'float' || p.kind === 'int') fields.push(numberField(field, v, (x, live) => set({[p.name]: x}, live)));
       }
     }
-    const fade = numberField({label: e.type === 'saturation' ? 'Fade its factor near the limb' : 'Fade near the limb', kind: 'float', min: 0, max: 2000, step: 1, unit: 'px (0 = off)'},
+    const fade = numberField({label: e.type === 'saturation' ? 'Fade its factor near the limb' : 'Fade near the limb', kind: 'float', min: 0, max: 2000, sliderMax: 200, step: 1, unit: 'px (0 = off)'},
       e.limb_fade_px || 0, (v, live) => this.edit(d => { d.chains[path].find(x => x.id === e.id).limb_fade_px = v; }, live));
     return h('div', {class: 'block-body'}, h('p', {class: 'hint', text: spec.note}), ...fields, fade, ...readoutLines(e, read));
   }

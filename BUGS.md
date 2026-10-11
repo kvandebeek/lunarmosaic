@@ -1,5 +1,850 @@
 # Bug Report — LunarMosaic
 
+## Found in use
+
+Bugs found while using the app, newest last. Numbering continues from the review below.
+
+| Bug | Status | Found | Summary |
+|---|---|---|---|
+| 14 | Fixed 2026-10-07 | 2026-10-06 | Path boxes are text-only; clicking one should open a folder or file chooser |
+| 15 | Fixed 2026-10-07 | 2026-10-06 | The up/down arrows on number fields are too small |
+| 16 | Fixed 2026-10-07 | 2026-10-06 | Pixel size arrows step by 1 µm instead of 0.1 |
+| 17 | Fixed 2026-10-07 | 2026-10-06 | Secondary text is too small to read comfortably |
+| 18 | Fixed 2026-10-07 | 2026-10-06 | Editing shows no progress while a block is being calculated (feature request) |
+| 19 | Fixed 2026-10-07 | 2026-10-06 | With a preview open, a change still recalculates the main image and every other preview |
+| 20 | Fixed 2026-10-07 | 2026-10-06 | The preview viewer cannot zoom in (feature request) |
+| 21 | Fixed 2026-10-07 | 2026-10-06 | Sliders span far more than the useful range (USM radius, Fade near the limb) |
+| 22 | Fixed 2026-10-07 | 2026-10-06 | Unsharp mask offers an rgb / luminosity choice on the luminance chain, where it changes nothing |
+| 23 | Fixed 2026-10-07 | 2026-10-06 | Number boxes show a decimal comma (1,4) next to summaries with a point (1.4 px) |
+| 24 | Fixed 2026-10-07 | 2026-10-06 | Levels cannot detect the black and white points itself (feature request) |
+| 25 | Fixed 2026-10-07 | 2026-10-06 | A luminance-only (grey) project still shows colour controls (Merge, export dialog) |
+| 26 | Fixed 2026-10-07 | 2026-10-06 | The export file name drops the capture date and time, which LunarAtlas reads |
+| 27 | Fixed 2026-10-07 | 2026-10-06 | A quoted or relative path creates the project inside the app's own folder |
+| 28 | Fixed 2026-10-07 | 2026-10-06 | The export preview can be dragged, and its drag thumbnail is stretched |
+| 29 | Fixed 2026-10-07 | 2026-10-06 | Selecting text tints the whole app brown; almost everything is selectable |
+| 30 | Fixed 2026-10-07 | 2026-10-06 | The preview viewer cannot be moved (feature request) |
+| 31 | Fixed 2026-10-07 | 2026-10-06 | Only one preview can be viewed at a time (feature request) |
+| 32 | Fixed 2026-10-07 | 2026-10-06 | A preview cannot switch between luminance, colour and combined (feature request) |
+| 33 | Fixed 2026-10-07 | 2026-10-06 | Exporting jumps back to step 2 (Build) |
+| 34 | Fixed 2026-10-07 | 2026-10-06 | The app icon in the header is a font character that does not read as a Moon |
+| 35 | Fixed 2026-10-07 | 2026-10-07 | A zoomed-in preview cannot be panned by dragging |
+| 36 | Fixed 2026-10-07 | 2026-10-07 | Closing a preview after panning/zooming the main view leaves the main view's zoomed detail stale |
+| 37 | Fixed 2026-10-07 | 2026-10-07 | Switching a preview's mode back and forth quickly discards in-flight renders instead of reusing them |
+| 38 | Fixed 2026-10-07 | 2026-10-07 | The main view sits on a blue background, not black, making it hard to see the image's own edge (feature request: default to black, let user choose) |
+| 39 | Fixed 2026-10-07 | 2026-10-07 | Fonts still too small in places: leftover 10–12.5 px sizes and the bundled theme's buttons and tags |
+| 40 | Fixed 2026-10-11 | 2026-10-11 | *Open project →* sits jammed under the path box, smaller than the buttons around it |
+| 41 | Fixed 2026-10-11 | 2026-10-11 | Levels never shows its histogram (nor its "set from image" buttons) |
+| 42 | Fixed 2026-10-11 | 2026-10-11 | Export canvas "Moon centred" centres the mosaic's bounding box, not the lunar disk |
+| 43 | Fixed 2026-10-11 | 2026-10-11 | Export refuses to replace an existing file, with no way to say yes |
+
+### Fix notes — 2026-10-07
+
+Fixed in place on `impl/phase-8`, not pushed. Each bug's own section above still records the problem as
+found; this section records what the fix actually did, and is honest about what is only partial.
+
+- **14.** A macOS folder/file/save chooser (`osascript`, new `/api/choose` route) behind a *Browse…* button
+  beside every path box: new project folder, open project, panel folder, export output, deconvolution PSF.
+  Typing still works; on another OS the button says so and the box still takes typed text.
+- **15/16.** A shared pair of larger ± buttons (`spinner()` in `chains.js`) replaces the native arrows on every
+  number field in the app, each stepping by that field's own amount — 0.1 for pixel size and Barlow, 0.1° for
+  rotation, each chain parameter's own step.
+- **17.** The app now uses named readable sizes throughout its secondary copy, compact controls and microcopy;
+  the previously tiny editor labels, table text and status text share the same type scale.
+- **18.** Every canvas, detail and 1:1 preview render has a short-lived server status record. The toolbar shows
+  the actual current statistics block, then `completed/total` chain-block work across render tiles, before image
+  encoding; thumbnails retain their own loading cue.
+- **19.** While one or more preview viewers are open, the main canvas and detail layer wait; only the open
+  previews re-render. Closing the final viewer refreshes the canvas once at the current chain state.
+- **20.** Wheel-zoom, +/− buttons and a reset-to-100% label are now independent for every preview viewer.
+- **21.** The two sliders named (Unsharp mask radius, Fade near the limb) now cover a useful span; so do
+  Gaussian blur σ and Levels gamma, found while fixing the first two. The typed box still accepts the full
+  range in every case.
+- **22.** Unsharp mask's Mode no longer appears on the luminance chain.
+- **23.** Numeric boxes are explicit decimal text fields: they display a point consistently with summaries and
+  measurements, accept a typed comma as a friendly input spelling, and retain each field's custom ± controls,
+  range and validation. Rotation is rounded to 0.01° when shown.
+- **24.** Levels gets two "set from image" buttons: black from the sky background or the darkest shadow
+  detail, white from the brightest 0.1 % of the disk, each computed on the image arriving at the block.
+- **25.** Merge is hidden with no colour placed; the export dialog's title, its colour-coverage and layer
+  rows, and the default export layer all follow whether colour is placed.
+- **26.** The export file's default name is stamped with the middle input panel's own SharpCap-style capture
+  time, when the panel names carry one, and drops "-LRGB" with no colour placed.
+- **27.** A pasted path with surrounding quotes, or a relative or empty one, is refused with a clear message
+  before anything is written, for the project folder and the export output file. This only changed the HTTP
+  path (the browser's text boxes); the CLI and the test suite still pass relative paths from their own
+  working directory, exactly as before. **The project this bug was found in is still sitting inside the
+  repository** (`'/Users/kristofvandebeek/Desktop/session 04102026-stacked'` under the repo root) — left in
+  place; move it by hand.
+- **28.** `draggable="false"` on the export preview, both layer thumbnails, the preview strip thumbnails, the
+  preview viewer's image, and the manual-match images.
+- **29.** The interface itself is no longer selectable (`user-select:none` on `body`); text boxes, the build
+  log, `#job-result`, hints, warnings and the placement table stay selectable. The selection colour is now
+  set in `mosaic.css` only, so LunarAtlas's own colour is untouched.
+- **30, 31.** Each preview opens in its own movable, resizable desktop-style panel. Dragging the title bar
+  cannot pan the canvas underneath; position and size are remembered per project/preview in local storage, and
+  new viewers cascade rather than stacking exactly on top of each other.
+- **32.** The preview viewer got its own Combined / Luminance / Colour toggle (`/api/render`'s existing
+  `stage` parameter), shown once colour is placed — independent of the canvas's own L/C buttons, the choice
+  this bug's notes left open.
+- **33.** Export no longer switches to the Build page from the workspace; its progress and a Cancel button
+  show in the workspace's own status bar, and a toast names the output file once it finishes.
+- **34.** The header now shows the same drawn Moon LunarAtlas already serves as the browser tab's icon,
+  instead of a text character — the plainer of the two options this bug's notes offered.
+
+### Fix notes — 2026-10-07, bugs 35–39
+
+Bugs 36 and 37 came from a review of the uncommitted fixes for 14–34 (regressions in those fixes); 35, 38
+and 39 were found in use.
+
+- **35.** Dragging inside a preview viewer's image scrolls it like a hand tool (`Previews.pan()`); a press on
+  the viewer's own scrollbars is left alone. The wheel now zooms about the cursor and the ± buttons about the
+  centre, so zooming lands where you point. Journey check: zoom in four steps, drag, the body has scrolled.
+- **36.** `loadDetail()` used to skip whenever any viewer was open, and nothing reloaded the sharp tile when
+  the viewer closed, so a pan or zoom done meanwhile stayed blurry. Viewers are movable panels now (30/31),
+  not a cover over the canvas, so a pan or zoom always loads detail; only a chain change actually deferred
+  behind an open viewer (bug 19's `mainStale`) holds it back, and the canvas refresh that closing triggers
+  reloads it. `refreshPreview()` clears `mainStale` whenever it runs, whatever triggered it. Also: deleting a
+  preview from the strip while its viewer is open now counts as a close, so a deferred refresh is not stranded.
+- **37.** Preview render requests are cached per preview *and* mode (`"id:mode"`), so switching modes back and
+  forth reuses a render still in flight; only a newer chain stamp supersedes one. The loading cue and the
+  strip thumbnail follow the mode the viewer shows.
+- **38.** The canvas, preview viewers and strip thumbnails sit on `--canvas-bg`, black by default, with a
+  *Background* colour picker in the canvas toolbar, kept in this browser (localStorage, like viewer layout).
+  For the colour to show anywhere but around the image, `/api/preview` and `/api/viewport` now send RGBA PNGs
+  whose alpha is the mosaic's coverage (`canvas_png()` in `app.py`; `render_view` reports `coverage`): off
+  the canvas and in gaps there is no data, so the background shows. Before, the viewport tile was opaque
+  black over the whole stage, so the blue only showed while that tile was not loaded — which bug 36 made
+  common with a viewer open. `/api/render` (viewers) and the export preview stay opaque: they show what an
+  export contains. `lrgb_workflow` checks the RGBA tile is transparent off the canvas; the journey checks the
+  default, a change, and that the choice survives a reload.
+- **39.** Every hard-coded 10–12.5 px size left in `mosaic.css` now uses the named type scale, and the scale
+  went up 1 px (micro 13, compact 14, secondary 15, body 16). The bundled LunarAtlas theme's `.btn`
+  (12.5–13 px), `.tag`, `.chip`, `kbd` and `.sub` are overridden onto the same scale. LunarAtlas's own CSS is
+  unchanged.
+
+### Bug 14 — path boxes are text-only; clicking one should open a folder or file chooser
+
+**Where:** the start screen, `impl/phase-8` at `cc9f86f`.
+
+**Actual:** clicking *New project folder* only places a text cursor. The user must type or paste a
+full path such as `/path/to/My Moon.lunarmosaic`.
+
+**Expected:** clicking the box opens the macOS chooser, and the chosen path fills the box.
+
+**Same problem elsewhere:** every path the interface asks for is a plain text input:
+
+| Box | Chooser needed | Code |
+|---|---|---|
+| New project folder | new folder (name and location) | `mosaic/ui/index.html:11` |
+| Project folder or project.json | existing folder or `project.json` | `mosaic/ui/index.html:12` |
+| Export → Output file | save as | `mosaic/ui/index.html:66` |
+| Panel folder ("Use folder") | existing folder | `mosaic/ui/mosaic.js:139` |
+| Deconvolution PSF file | existing file | `mosaic/ui/chains.js:202` |
+
+The panel card also has *Choose a folder of panels* (`webkitdirectory`, `mosaic/ui/mosaic.js:137`),
+but that uploads copies of the files, not their path. The other boxes have no equivalent.
+
+**Notes for the fix:** a browser page never sees an absolute path, so the page cannot open the
+chooser itself. The local server has to open it, for example with `osascript` (`choose folder`,
+`choose file`, `choose file name`) behind a new `/api/choose` route. The page then calls that route
+and fills the box with the answer. Typing a path should still work. Opening the chooser on every
+click would get in the way of editing a typed path, so a *Browse…* button beside the box, or opening
+it only when the box is empty, may suit better.
+
+### Bug 15 — the up/down arrows on number fields are too small
+
+**Where:** first seen on *Camera & optics → Pixel size · µm* in a panel set card, while loading
+`~/Desktop/session 04102026-stacked`. Screenshot: `~/Desktop/Screenshots/Schermafbeelding
+2026-10-06 om 21.54.12.png`.
+
+**Actual:** the arrows are the browser's native spin buttons. They are a few pixels high inside a
+38 px field and hard to hit.
+
+**Expected:** arrows large enough to click easily.
+
+**Cause:** the stylesheet never touches the spin buttons, so every `type=number` input shows the
+browser default:
+
+- the four optics fields, `mosaic/ui/mosaic.js:142`
+- *Shared rotation · degrees*, `mosaic/ui/index.html:51`
+- every chain parameter built by `numberField()`, `mosaic/ui/chains.js:62` (these are 78 px wide,
+  `mosaic/ui/style.css:68`)
+
+**Notes for the fix:** the native spin buttons cannot be resized with CSS. A fix hides them
+(`::-webkit-inner-spin-button { appearance: none }`, plus `appearance: textfield` for Firefox) and
+draws its own − / + buttons that call `stepUp()` / `stepDown()` and fire `input` and `change`.
+Doing it once in a shared helper covers all three places.
+
+### Bug 16 — Pixel size arrows step by 1 µm instead of 0.1
+
+**Where:** *Camera & optics → Pixel size · µm*, same session as Bug 15.
+
+**Actual:** an arrow click changes the value by 1, for example 2.9 → 3.9.
+
+**Expected:** steps of 0.1 µm.
+
+**Cause:** all four optics fields are created with `step: 'any'` (`mosaic/ui/mosaic.js:142`). With
+`any`, the arrows fall back to a step of 1. That suits focal length and aperture in mm. It is too
+coarse for pixel size. Barlow has the same 1 step, where 1.5× and 2.5× are common.
+
+**Notes for the fix:** give each optics field its own step. A plain `step: 0.1` makes the browser
+flag a value such as 3.76 µm as invalid and snap it to 3.8 on the next arrow click. Keeping `any`
+and stepping by 0.1 in the custom buttons from Bug 15 avoids both.
+
+### Bug 17 — secondary text is too small to read comfortably
+
+**Where:** seen on three screens, but the cause is app-wide.
+
+- Setup, below the sets: the *A set is one camera…* hint, the *Canvas size* estimate, and *Colour is
+  optional…* (`mosaic/ui/index.html:23`, `:28`, `:29`).
+- Build and place: the set summary (*14 panels from 1 set · building*), the stage lists with their
+  numbers, and the *Luminance builds first…* hint (`mosaic/ui/index.html:33`, stage lists from
+  `mosaic/ui/mosaic.js`).
+- The chain editor (screenshot `Schermafbeelding 2026-10-06 om 22.01.44.png`):
+  - each block's settings summary under its name (*L1 1.55*, *43 % · 1.0 px · 0*), 11 px,
+    `.block-title small` (`mosaic.css:57`);
+  - the chain's caption *on the luminance, before the merge*, 11 px, `.chain-head small` (`:44`);
+  - the curve readout (*0→0 · 45→59 · …*) and the explanations, 12 px `.hint`
+    (`mosaic/ui/chains.js:160`);
+  - the units after a setting's name (*px (0 = off)*, *× noise*), a plain `<small>` inside the 12 px
+    `.param-name` (`:64`). The browser shrinks it again, to about 10 px.
+
+  The block names themselves are only 13 px (`.block-title strong`, `:56`).
+
+**Actual:** the body text is 14 px, but nearly all explanatory text is smaller. `mosaic/ui/mosaic.css`
+has 27 rules at 12 px (including `.hint`, `label`, `.set-summary`, `.action-strip p`), 24 at
+11 px (including `.eyebrow` and the stage numbers), one at 11.5 px and one at 10 px. The stage lists
+are 13 px. On a dark background in the dimmer `--text-3` colour, this text is hard to read.
+
+**Expected:** comfortable reading size for every sentence the user is meant to read.
+
+**Notes for the fix:** neither `DESIGN.md` nor `DESIGN_DECISIONS.md` sets a type scale, so there is
+no record to keep in step. A small set of size tokens on `:root` (for example 15 px body, 13–14 px
+secondary, 12 px only for eyebrows and badges), applied across `mosaic.css`, fixes all of it in one
+pass. Moving hints from `--text-3` to `--text-2` would also help contrast. The fix should then be
+written into `DESIGN.md` as the record. The editor panel (`--editor-w`) and the 78 px chain
+parameter fields need a check afterwards, because larger text may no longer fit them.
+
+### Bug 18 — editing shows no progress while a block is being calculated (feature request)
+
+**Where:** the editing screen, after changing a block's settings.
+
+**Actual:** nothing shows that work is going on. The mosaic and the preview rectangles keep the old
+image until the new one arrives, then swap. A slow block (deconvolution, wavelets on a large canvas)
+looks the same as a change that did nothing.
+
+**Expected:** the block being calculated shows a progress bar in the chain list, and the bar disappears
+when the image is updated.
+
+**Cause:** each image is a single blocking request that returns only the finished PNG:
+`/api/viewport` for the mosaic (`mosaic/ui/mosaic.js:471`), `/api/preview` (`mosaic.js:437`) and
+`/api/render` for preview rectangles (`mosaic/ui/previews.js:146`). The server (`mosaic/app.py`, the
+`/api/viewport`, `/api/preview` and `/api/render` handlers) gives the page no way to ask what is
+running.
+
+**Notes for the fix:**
+
+- The server already has a place to hook in: `run_chain()` calls `hook(entry, block, x, domain)`
+  before each block runs (`mosaic/chain.py:330`). Recording the block id, its index, and the block
+  count there, per render, is enough for an "N of M" bar.
+- The page then needs a small status route, `/api/render-status`, which it polls while a request is
+  open. Or the server could stream progress over a long-lived connection. Polling matches how
+  build jobs report progress today (`#job-progress`, `#status-job`).
+- Statistics are computed once per chain on the whole canvas (DESIGN.md §2, "Rendering"). That pass
+  may be the slow part, so it should show in the bar too, not only the block steps.
+- Several renders can run at once (the mosaic plus each preview rectangle). The bar should follow
+  the render the user is waiting for, or show the slowest one.
+- A bar per block needs per-block progress inside the slow blocks (deconvolution iterations,
+  wavelet layers). Without that, the bar moves block by block, which is still far better than
+  nothing.
+
+### Bug 19 — with a preview open, a change still recalculates the main image and every other preview
+
+**Where:** the editing screen, with a preview rectangle open in the 1:1 viewer.
+
+**Actual:** changing a block re-renders everything:
+
+1. the whole-mosaic image, through `scheduleRefresh()` → `refreshPreview()` → `/api/geometry` and
+   `/api/preview` (`mosaic/ui/mosaic.js:402`, `:428`), triggered when a chain change is saved (`:59`)
+   and again when the state poll sees the new revision (`:508`);
+2. the sharp overlay for the current zoom, through `positionImage()` → `loadDetail()` →
+   `/api/viewport` (`mosaic.js:462`, `:466`);
+3. every preview rectangle, not just the open one: `Previews.render()` calls `load()` for each
+   (`mosaic/ui/previews.js:121`), and each is an `/api/render` at 1:1.
+
+The server handles requests on parallel threads (`ThreadingHTTPServer`, reused from
+`moon_atlas/atlas_view.py:684`), so these renders compete for the CPU. The preview the user is
+looking at arrives later than it would on its own.
+
+**Expected:** while a preview is open, a change renders only that preview. The main image, and the
+other previews, catch up once when the preview is closed.
+
+**Notes for the fix:**
+
+- In `mosaic.js`, skip `scheduleRefresh()` and `loadDetail()` while `previews.selected` is set. Keep a
+  "main image is stale" flag, and refresh once from `Previews.close()`. The viewer covers the canvas
+  anyway, so nothing visible is lost.
+- In `Previews.render()`, load only the selected preview while one is open. Load the rest when it
+  closes, or when the user selects them.
+- Whole-canvas statistics are still needed (DESIGN.md §2, "Rendering": statistics are computed once
+  per chain on the whole canvas). That is what lets a preview equal the same pixels of a full export
+  exactly, so only the main image's pixels should be skipped, not the statistics.
+- The geometry and coverage line (`#status-dimensions`, `#coverage-info`) is updated inside
+  `refreshPreview()`. Geometry changes (rotation, mirror, coverage) move the preview rectangles too, so
+  those should probably still refresh everything.
+- Pairs with Bug 18: the progress bar then has a single render to follow.
+
+### Bug 20 — the preview viewer cannot zoom in (feature request)
+
+**Where:** the editing screen, a preview rectangle open in the viewer.
+
+**Actual:** the viewer shows the preview at 1:1 and can only be scrolled
+(`#preview-viewer`, `mosaic/ui/index.html:55`; `.viewer-body` is `overflow:auto`,
+`mosaic/ui/mosaic.css:121`). Wheel and toolbar zoom act only on the main mosaic: `stage.onwheel` and
+`#zoom-in` / `#zoom-out` / `#one-to-one` / `#fit` (`mosaic/ui/mosaic.js:568`, `:572`). Small detail —
+the result of a sharpening or deconvolution change — is hard to judge.
+
+**Expected:** zoom in on the preview (200 %, 400 %, …), pan around it, and return to 1:1.
+
+**Notes for the fix:**
+
+- This needs no new render. The preview already arrives at full resolution, and the image is drawn
+  with `image-rendering:pixelated` (`mosaic.css:122`), so enlarging it in the page shows true pixels.
+  Set the `<img>` width to `naturalWidth × zoom`, and keep the point under the cursor fixed by
+  adjusting `.viewer-body`'s scroll position.
+- Use the same controls as the main canvas: the wheel over the viewer, plus the toolbar buttons and
+  keys when the viewer is open. The title (`Previews.title()`, `mosaic/ui/previews.js:175`) can carry
+  the zoom: `… · 400 %`. Dragging to pan would match the canvas, where scrolling alone is awkward.
+- On a Retina screen, today's "1:1" is really 2 × 2 screen pixels per image pixel, because the image
+  is sized in CSS pixels. A true 100 % there is `naturalWidth / devicePixelRatio`. The zoom levels
+  should count image pixels per screen pixel so that 100 % means the same on every display.
+- Keep the zoom when the preview re-renders after a change (`Previews.load()` swaps `src`), so the
+  same spot can be compared before and after.
+
+### Bug 21 — sliders span far more than the useful range (USM radius, Fade near the limb)
+
+`numberField()` gives the slider and the typed box the same min and max (`mosaic/ui/chains.js:57`–`63`),
+so each slider runs linearly over everything the parameter accepts. Two cases reported:
+
+**Unsharp mask → Radius** (screenshot `Schermafbeelding 2026-10-06 om 22.02.16.png`). The range is
+0.1–250 px (`'radius': Param('float', 1.0, 0.1, 250)`, `mosaic/blocks.py:146`). Every radius used on
+lunar data (about 0.3–3 px) lies in the first 1 % of the track, so the slider cannot set one.
+*Expected:* a slider from 0 to about 8 px.
+
+**Fade near the limb**, on every block (screenshot of 2026-10-06, Levels open). The range is
+0–2000 px (`chains.js:431`; the server only requires ≥ 0, `mosaic/chain.py:85`). The value is the
+distance inside the limb over which the block's effect ramps from nothing to full
+(`_fade()`, `chain.py:321`). On this session's canvas the Moon's radius is about 2,900 px, so most of
+the track fades the block over most of the disk. Limb artefacts from sharpening span a few to tens
+of pixels. *Expected:* a much smaller range. 0–200 px is a reasonable start, to confirm on real data.
+
+**Notes for the fix:**
+
+- Give `Param` a separate slider range, for example `slider=(0.1, 8)`, sent to the page with the
+  block catalogue. `numberField()` then uses it for the `<input type=range>` only. The typed box and
+  server validation keep 0.1–250, so a larger radius can still be typed (the slider then sits at its
+  end). Projects and chain files saved with a large radius stay valid.
+- A slider minimum of exactly 0 is unsafe. `usm_sigma(0)` takes `log(0)`, which gives NaN
+  (`mosaic/filters.py:109`). The slider should start at 0.1, or the block should treat 0 as "off".
+- The limb fade is not a block `Param` but a field on every chain entry (`limb_fade_px`), so its
+  slider range is set in `chains.js:431`. Lowering only the slider keeps typed values up to 2000 px.
+- Other sliders may have the same mismatch, and the same `slider` range would fix them: Gaussian blur
+  σ 0–50 px (`blocks.py:331`) and *Threshold* 0–255. Check them with the user before changing.
+- Levels *Gamma* (0.1–9.99, `blocks.py:248`) is linear too, so the neutral 1.0 sits at 9 % of the
+  track (screenshot of 2026-10-06, Levels open). A gamma slider wants a log scale centred on 1, as in
+  Photoshop, where the midtone handle starts in the middle.
+
+### Bug 22 — Unsharp mask offers an rgb / luminosity choice on the luminance chain, where it changes nothing
+
+**Where:** the chain editor, *Luminance chain → Unsharp mask → Mode*. Screenshot `Schermafbeelding
+2026-10-06 om 22.02.47.png`.
+
+**Actual:** the block offers *rgb* or *luminosity*, with no hint of what they mean. On the luminance
+chain the choice makes almost no difference. Measured with `filters.unsharp()` on a grey test image
+(amount 96 %, radius 1.4 px): the two modes differ by at most 2.1 levels out of 255, and by 0.1 on
+average. Luminosity sharpens darks slightly less and brights slightly more, because L* is a slightly
+different tone curve from the stored sRGB values. Both stay exactly grey. The luminance layer also
+contributes only lightness to the merge (`mosaic/lrgb.py:576`).
+
+**Why it is there:** Unsharp mask is one block on all three chains (`PATHS = ('luminance', 'colour',
+'final')`, `mosaic/blocks.py:20`), and the editor shows every parameter on every chain
+(`mosaic/ui/chains.js:421`). On the colour and final chains the choice does matter: luminosity
+sharpens lightness (L*) only and leaves colour alone, so it adds no coloured halos. RGB sharpens each
+channel separately.
+
+**Expected:** no Mode choice on the luminance chain. Where it does appear, its meaning should be
+clear.
+
+**Notes for the fix:**
+
+- Hide *Mode* when the block sits on the luminance chain. A chain file moved from the luminance chain
+  to another chain keeps its saved value, so nothing is lost.
+- `choiceField()` shows the raw value as the label (`chains.js:85`). Give choices labels, for
+  example *Each colour channel* and *Brightness only*, with a one-line hint.
+- DESIGN.md already covers whole blocks: "Blocks that make no sense on a path are shown greyed with
+  the reason rather than hidden." It says nothing about single parameters. Hiding a parameter that
+  makes no sense on a chain should be recorded there as a decision.
+
+### Bug 23 — number boxes show a decimal comma (1,4) next to summaries with a point (1.4 px)
+
+**Where:** every `type=number` box, for example *Unsharp mask → Radius* in the same screenshot. Spotted
+in the screenshot, not reported by the user.
+
+**Actual:** the box shows *1,4*, while the block summary right above it shows *1.4 px*. The browser
+formats number inputs in the system's locale (Dutch here).
+
+**Also:** *Shared rotation · degrees* shows `-6,989386413572576` after *Find lunar north* (screenshot of
+the whole workspace, 2026-10-06). The value is written into the box unrounded
+(`$('#rotation').value = p.geometry.rotation`, `mosaic/ui/mosaic.js:377`). Show it rounded to the
+box's 0.1° step, or to 0.01°, and keep the full value in the project.
+
+**Expected:** DESIGN.md item 10, "Numbers are written the English way (6,721 px; 45.2 Mpx), like the
+text around them", which the summaries follow.
+
+**Notes for the fix:** setting `lang="en"` on the page or the inputs may not be enough. Browsers
+differ in whether number inputs follow the page's language or the system's. A reliable fix is
+`type=text` with `inputmode=decimal` and the app's own parsing, which accepts a typed comma as
+well. That fits with Bug 15, which already replaces the native arrows.
+
+### Bug 24 — Levels cannot detect the black and white points itself (feature request)
+
+**Where:** the chain editor, *Levels* block (`mosaic/blocks.py:246`).
+
+**Actual:** *Black* and *White* can only be set by hand, by slider or typed value. The block computes
+no statistics at all: it has no `prepare`, unlike Curves, whose `_curves_prepare()` builds a histogram
+of the image arriving at the block (`blocks.py:309`).
+
+**Expected:** a button beside *Black* that detects the black level and sets it, and the same beside
+*White*.
+
+**Notes for the fix:**
+
+- The statistics pass already has what is needed: `ctx.stats.disk` (the eroded lit disk) and
+  `ctx.stats.space` (the sky), on the proxy grid (`mosaic/chain.py:195`, `:204`). Highlights already
+  takes percentiles over the disk (`_highlights_prepare()`, `blocks.py:155`). A `_levels_prepare()`
+  can return candidate black and white levels as readouts. These are measured on the image *arriving
+  at this block*, after every block above it. The page shows them through `/api/analysis`, and the
+  buttons copy them into the parameters.
+- What "black" means needs choosing. It could be the sky background (a high percentile of the
+  `space` region, so the sky noise goes to 0), or the darkest lunar detail (a low percentile of the
+  `disk`, e.g. terminator shadows). White is naturally a high percentile of the disk, e.g. 99.9 or
+  99.99 % (Highlights already reports p99.99 as `top`). Photoshop's *Auto* clips 0.1 % at each end.
+- A button sets the value once. If a block above Levels changes later, the levels do not follow.
+  The button can be clicked again. An "auto" mode that tracks upstream changes would be a larger
+  change, and would make saved chains depend on the data.
+- The same `prepare` could also give Levels a histogram like Curves, so the detected points can be
+  checked by eye.
+
+### Bug 25 — a luminance-only (grey) project still shows colour controls (Merge, export dialog)
+
+**Where:** the chain editor, *Merge → Colour strength*, in a project with no colour placed (this
+session: luminance only, the layer panel reads "Luminance only; the colour chain is kept.").
+
+**Actual:** the Merge section and its *Colour strength* slider are shown, though there is no colour
+to merge and the slider changes nothing. The editor always draws all four sections (luminance chain,
+colour chain, merge, final chain) whatever the project holds
+(`mosaic/ui/chains.js:354`–`361`).
+
+**Also in the export dialog** (screenshot `Schermafbeelding 2026-10-06 om 22.09.42.png` and the one sent
+after it), in the same luminance-only project:
+
+- the title is always *Export from both layers* (`mosaic/ui/index.html:63`);
+- *Colour coverage for this export* is shown, only disabled (`index.html:68`, `mosaic.js:584`). A
+  disabled select hardly looks different;
+- *Image* offers *Combined LRGB* and *Luminance layer*, which give the same picture without colour,
+  and *Colour layer*, greyed out (`index.html:69`, `mosaic.js:585`);
+- the default name is `Moon-LRGB` (`mosaic.js:582`).
+
+The workspace's own *Colour coverage* select (`index.html:51`) is in the same position.
+
+**Expected:** no colour slider or colour options when the image is grey. The export dialog for a
+luminance-only project offers the luminance image only, with a title and default name to match.
+
+**Cause:** the page knows whether colour is placed and shown (`m` and `p.view.rgb_visible`, used for
+the layer note at `mosaic/ui/mosaic.js:356`), but `editor.show(doc, analysis)` is never told.
+
+**Notes for the fix:**
+
+- Pass the colour state to `editor.show()`, and include it in the key that decides when the
+  editor redraws (`shownChain`, `mosaic.js:394`). Otherwise the editor won't redraw when colour is
+  placed later.
+- With no colour placed, hide *Merge*. The *Colour chain* section has nothing to act on either. The
+  layer note says "the colour chain is kept", so its blocks stay saved; they need not be shown, or can
+  be shown collapsed with that note.
+- With colour placed but the Colour layer switched off, the slider still has no visible effect.
+  Greying it out, with a hint to show the Colour layer, keeps it reachable.
+- On a grey image the *Colour* group in the final chain's *Add a block* menu (saturation, white
+  balance, RGB shift) does nothing either. DESIGN.md's rule — blocks that make no sense are "shown
+  greyed with the reason rather than hidden" — would apply there. Check with the user.
+- The export dialog already tests `state.project.match` (`mosaic.js:584`–`586`). Use it to hide the
+  coverage and *Image* rows, set the title, and drop "LRGB" from the default name, not just disable
+  options.
+
+### Bug 26 — the export file name drops the capture date and time, which LunarAtlas reads
+
+**Where:** the export dialog, *Output file*. Screenshot `Schermafbeelding 2026-10-06 om 22.09.42.png`.
+
+**Actual:** the default is `<project folder>/exports/Moon-LRGB.<ext>` (`mosaic/ui/mosaic.js:582`).
+The panels carry their capture time in SharpCap / WinJUPOS form (`2026-10-04-0846_6-Moon2_5_…`),
+but the export name does not. The TIFF carries no metadata either: the dialog says "Pixels only, with
+no observing site or source metadata."
+
+**Does it hurt LunarAtlas?** LunarAtlas looks for a capture time in three places
+(`capture_time()`, `moon_atlas/atlas_ephem.py:235`):
+
+1. a SharpCap stamp in the file name (`YYYY-MM-DD-HHMM_T`, `atlas_ephem.py:232`);
+2. a time given earlier with `--time`, kept in the sidecar;
+3. `<image>_layout.json`, or `mosaic_layout.json`, next to the image. LunarAtlas takes the middle of
+   the panel times found there (`_layout_time()`, `:281`).
+
+The built mosaic in the project folder, `derived/L.tif`, has `derived/L_layout.json` beside it, so
+LunarAtlas finds its time. The export, `exports/Moon-LRGB.tif`, has none of the three. For this
+export, a full Moon with its limb:
+
+- **Still works:** locating, from the limb fit. Night-side labels are hidden using the image's own
+  brightness (`light_levels()`), not the time (`moon_atlas/lunaratlas.py:539`).
+- **Lost:**
+  - the date in the info block (`lunaratlas.py:627`);
+  - the Sun direction for the globe view's lit disk (`moon_atlas/atlas_view.py:656`–`664`).
+- **In the LunarAtlas app:** a name without a stamp makes the page ask for the time. It pre-fills the
+  time from the camera's EXIF (`moon_atlas/viewer/app.js:154`–`156`), but the export has none, so it
+  must be typed by hand.
+- **Fails outright:** an export that is no longer a full disk, such as a crop or *Common covered
+  rectangle*. LunarAtlas treats it as a close-up, and a close-up without a time stops with "a close-up
+  needs its capture time" (`lunaratlas.py:123`–`126`, `moon_atlas/atlas_closeup.py:346`).
+
+**Expected:** the export keeps the capture time where LunarAtlas finds it.
+
+**Notes for the fix:** the simplest is a stamped default name, using the middle of the panel times
+as `_layout_time()` does. For this session that gives `2026-10-04-0855_0-Moon.tif` or similar. Every
+LunarAtlas path already reads that, and it is not "observing site or source metadata". A user who
+renames the file loses it, so a `<export>_layout.json`, or a small `_layout.json` with the panel
+names beside the export, would also cover a renamed file. Also not "LRGB" when there is no colour
+(Bug 25).
+
+### Bug 27 — a quoted or relative path creates the project inside the app's own folder
+
+**Where:** the start screen, *New project folder*. Found in the export dialog's Output file
+(screenshot after `22.09.42`):
+`/Volumes/Astro/LunarMosaic/'/Users/kristofvandebeek/Desktop/session C…`.
+
+**Actual:** the path was pasted with quotes, `'/Users/kristofvandebeek/Desktop/session
+04102026-stacked'` (the way VS Code and Claude Code paste a path with a space). `App.select()`
+takes it as is (`mosaic/app.py:132`). `Path(folder).expanduser().resolve()` treats a string starting
+with `'` as a *relative* path, resolves it against the server's working directory (the repository,
+where `lunarmosaic.py` was started), and `mkdir(parents=True)` creates the whole tree without a word.
+The session's project — 14 copied panels and the built luminance, 218 MB — now sits at
+`/Volumes/Astro/LunarMosaic/'/Users/kristofvandebeek/Desktop/session 04102026-stacked'/`, untracked
+in git (`?? '/`). A `git add -A` would commit it.
+
+A 0-byte `project.json.lock` also sits in the repository root (21:48, before the project was created at
+21:53). Probably from *Open project* with an empty box: `Path('')` resolves to the working directory,
+`select()` takes the lock there (`app.py:143`), and opening then fails with the lock file left behind.
+
+**Expected:** the project is created where the user meant. A path the app cannot use is refused with
+a clear message, before anything is written.
+
+**Notes for the fix:**
+
+- Strip one pair of matching surrounding quotes (`'…'` or `"…"`) and whitespace from every path the
+  page sends: `/api/new`, `/api/open`, `/api/inputs`, export output, PSF file.
+- Refuse relative paths and empty ones ("Use a full path, starting with / or ~"). The server's working
+  directory means nothing to the user.
+- Create the lock only after the folder is known to be a project, or remove it when opening fails.
+- Bug 14's folder chooser removes most of the typing, but typed paths stay possible.
+- Moving the stray project: `project.json` holds only relative paths, so the folder can be moved as a
+  whole. `derived/L_layout.json` lists the panels by absolute path, but LunarAtlas reads only their
+  names. Left in place for the user to decide.
+
+### Bug 28 — the export preview can be dragged, and its drag thumbnail is stretched
+
+**Where:** the export dialog, the preview image on the right.
+
+**Actual:** pressing and dragging the preview starts a browser image drag. The drag thumbnail is
+distorted.
+
+**Cause:** `#export-preview` (`mosaic/ui/index.html:71`) is laid out as `width:100%; height:180px;
+object-fit:contain` (`mosaic/ui/mosaic.css:5`). `object-fit` keeps the visible image in proportion,
+but the browser builds the drag thumbnail from the element's box, so the image is stretched to the
+box. The canvas images already have `draggable="false"` (`index.html:42`); this one does not. Dropped
+somewhere, it would also give a small preview PNG, not the export.
+
+**Expected:** the preview does not drag.
+
+**Notes for the fix:** `draggable="false"` on `#export-preview`. Check the other images for the same:
+the preview viewer's image and the preview strip thumbnails (`mosaic/ui/previews.js`), the layer
+thumbnails, and the point-picking images in the manual match dialog.
+
+### Bug 29 — selecting text tints the whole app brown; almost everything is selectable
+
+**Where:** everywhere. Screenshot of the workspace, 2026-10-06, after a select-all: the toolbars, the
+editor panel, the buttons, and the canvas with the Moon all sit under a brown tint.
+
+**Actual:**
+
+- **The colour** comes from the shared theme: `::selection { background: rgba(245, 167, 66, 0.35) }`
+  (`moon_atlas/viewer/theme.css:116`). The amber accent at 35 % over the dark navy background reads
+  as brown.
+- **The extent:** only the mosaic image and the block drag grips are `user-select: none`
+  (`mosaic/ui/mosaic.css:4`, `:54`). Toolbars, buttons, headings, labels, the status bar, the
+  `#detail` image and the stage are all selectable. Cmd+A, or a drag that starts beside a control,
+  selects the whole interface.
+
+**Expected:** the interface itself is not selectable, like a desktop app. Text worth copying stays
+selectable, in a colour that suits the dark theme.
+
+**Notes for the fix:**
+
+- `user-select: none` on the app shell (`body`, or the mast, `#workspace` and the panels). Turn it back
+  on with `user-select: text` for text worth copying: inputs (always selectable), the build log
+  (`pre`), `#job-result`, readouts and error messages.
+- A calmer selection colour in `mosaic.css`, for example the accent at about 20 %, or a neutral
+  blue-grey. Overriding it there leaves LunarAtlas's `theme.css`, which both apps share, alone.
+  Changing `theme.css` would change LunarAtlas too.
+
+### Bug 30 — the preview viewer cannot be moved (feature request)
+
+**Where:** the editing screen, the preview viewer (`#preview-viewer`, `mosaic/ui/index.html:55`).
+
+**Actual:** the viewer is pinned by CSS, to the left of the editor panel at the top
+(`.preview-viewer{right:calc(var(--editor-w) + 48px);top:20px;…}`, `mosaic/ui/mosaic.css:118`). Its
+title bar has no drag handling; the only pointer handlers are the stage's pan
+(`mosaic/ui/mosaic.js:574`) and rectangle drawing (`mosaic/ui/previews.js:64`). It covers part of the
+mosaic, which cannot be uncovered except by closing it.
+
+**Expected:** drag the viewer by its title bar to anywhere on the workspace.
+
+**Notes for the fix:**
+
+- Pointer events on `.viewer-head` with `setPointerCapture`, moving the panel with `left` / `top`
+  (dropping `right`). Keep it inside the workspace when the window is resized.
+- Stop the drag from reaching the stage, or it pans the mosaic underneath.
+- Resizing the viewer from a corner (`resize: both`, or a handle) fits naturally with Bug 20's zoom.
+- Remember the position per preview in the browser (`localStorage`), not in the project: it is a
+  matter of screen layout, not of the image.
+
+### Bug 31 — only one preview can be viewed at a time (feature request)
+
+**Where:** the editing screen, the preview strip and viewer.
+
+**Actual:** there is one viewer (`#preview-viewer`, `mosaic/ui/index.html:55`), and `Previews` keeps a
+single `selected` id (`mosaic/ui/previews.js:11`, `select()` at `:180`). Opening a second preview
+replaces the first, so two regions (a limb and the terminator, say) cannot be judged side by side
+after a change.
+
+**Expected:** several previews open at once, each in its own viewer.
+
+**Notes for the fix:**
+
+- Turn `selected` into a set of open ids and build one viewer per open preview from a template,
+  each with its own title, close button and image. `this.selected` is used 11 times in
+  `previews.js`, and `mosaic.js` wires the single close button (`:570`).
+- Depends on Bug 30: several viewers need to be movable, or they stack on top of one another. New
+  viewers can open offset from the last one.
+- Bug 19 then reads "render only the open previews", not "the selected one". Bug 20's zoom becomes
+  per viewer. Linking the zoom and scroll position of two viewers of the same size would let the
+  same detail be compared exactly; worth asking the user.
+
+### Bug 32 — a preview cannot switch between luminance, colour and combined (feature request)
+
+**Where:** the preview viewer, in a project with both luminance and colour placed. Not yet tested by
+the user; requested as an idea.
+
+**Actual:** a preview always shows the combined result. `Previews.load()` requests
+`/api/render?…&preview=<id>&depth=8` with no `stage` (`mosaic/ui/previews.js:146`), so the server
+uses `final` (`mosaic/app.py`, the `/api/render` handler). The canvas's view buttons
+(*Composite*, *Luminance chain only*, *Colour chain only*; `data-view`, `mosaic/ui/index.html:44`)
+change the main image only.
+
+**Expected:** a toggle in the viewer, *Combined* / *Luminance* / *Colour*, shown only when both
+layers are available.
+
+**Notes for the fix:**
+
+- The server needs no change: `/api/render` already takes `stage=final|luminance|colour`
+  (`chain.STAGES`, `mosaic/chain.py:32`) and renders it at 1:1, exactly.
+- Add the stage to the request and to the cache key (`` `${id}:${stamp}` `` in `load()`), or a
+  switch shows the previous mode's image.
+- Whether the preview follows the canvas's view buttons or has its own toggle is a choice. Its own
+  toggle, together with Bug 31, would allow the same region side by side in luminance and colour.
+  That needs a viewer per (preview, mode), not per preview.
+- Hide the toggle when no colour is placed, using the same colour state as Bug 25.
+- Render only the mode on screen, in line with Bug 19.
+
+### Bug 33 — exporting jumps back to step 2 (Build)
+
+**Where:** the export dialog, *Export image*. Screenshot `Schermafbeelding 2026-10-06 om 22.15.06.png`.
+
+**Actual:** the dialog closes and the app switches to *02 Build*, scrolled to the top of the page. The
+export runs there as a job (*Writing image · 100%*, with the output path in the log card at the
+bottom). Getting back to editing takes *Open workspace →* or *03 Match & edit*. The jump is in the
+code: `action('export', …)` followed by `showPage('build')` (`mosaic/ui/mosaic.js:593`), because the
+job card with its progress bar, log and *Cancel* button lives on the Build page
+(`mosaic/ui/index.html:36`).
+
+**Expected:** stay in the workspace. Show the export's progress there, and say where the file went
+when it is done.
+
+**Notes for the fix:**
+
+- The workspace already shows job progress in its status bar: `#status-job` reads
+  "`<title>` · N %" while a job runs (`mosaic.js:381`, `index.html:57`). Dropping `showPage('build')`
+  leaves that in place. A *Cancel* next to it is still needed: today the only one is on the Build
+  page.
+- When the job ends, the poll shows a message only on failure (`mosaic.js:510`). Add a success
+  message with the output path, and perhaps *Show in Finder*.
+- Staying in the workspace is safe for the chain: the export takes a deep copy of it when it starts
+  (`doc = p.chain_doc()`, `mosaic/app.py:1145`; `copy.deepcopy`, `mosaic/project.py:174`), so edits
+  made while it runs do not reach the file. `busy` already disables matching, north-up and a second
+  export (`mosaic.js:323`, `:360`–`:365`).
+- The path in this screenshot is the stray project inside the repository (Bug 27).
+
+### Bug 34 — the app icon in the header is a font character that does not read as a Moon
+
+**Where:** the top bar, left of *LunarMosaic*.
+
+**Actual:** the mark is the text character `◒`, U+25D2 CIRCLE WITH LOWER HALF BLACK
+(`<button class="brand" id="home">◒ <span>LunarMosaic</span>`, `mosaic/ui/index.html:5`), set at
+28 px in the accent colour (`.brand`, `mosaic/ui/mosaic.css:4`). It shows a circle with its lower half
+filled: closer to a gauge or a sunset than a Moon. IBM Plex Sans has no such glyph, so a fallback
+font draws it, and it looks different on each system and browser.
+
+The browser tab uses another icon again: `/favicon.svg` is LunarAtlas's drawn icon, a lit crescent on
+a navy rounded square (`moon_atlas/viewer/lunaratlas.svg`, served for both apps by
+`moon_atlas/atlas_view.py:943`). LunarAtlas uses that same SVG as its header mark
+(`moon_atlas/viewer/index.html:42`). So in LunarMosaic the header and the tab do not match, and a
+LunarMosaic tab looks like a LunarAtlas tab.
+
+**Expected:** a proper LunarMosaic mark, drawn, the same everywhere, and matching the tab icon.
+
+**Notes for the fix:**
+
+- Draw a LunarMosaic SVG in the style of `lunaratlas.svg`: the same navy square and lit Moon, but
+  with the disk divided into panels, for example, so the two read as companions (the start page says
+  "A LunarAtlas companion"). Use it as an `<img>` in `.brand`, as LunarAtlas does, and serve it as
+  LunarMosaic's own `/favicon.svg`.
+- Decide with the user: a new mark, or simply LunarAtlas's icon in the header too.
+- DESIGN.md does not mention the brand mark. Record the choice there.
+
+### Bug 40 — *Open project →* sits jammed under the path box, smaller than the buttons around it
+
+**Where:** the start page, *Continue your work* card. Screenshot `Schermafbeelding 2026-10-11 om 15.49.25.png`
+(the circled area).
+
+**Actual:** *Open project →* touches the bottom of the path box with almost no gap, and it is drawn in the
+small editor-button style (micro type, 7 × 10 px padding), so it looks smaller and less important than the
+*Browse…* beside the box and the *Create project* button in the next card. Two rules combine:
+`.path-row input{margin:0}` removes the input's usual 16 px bottom margin, and the button sits in a
+`.button-row`, whose `.btn` is sized for the workspace editor (`.button-row .btn{padding:7px 10px;font-size:var(--type-micro)}`,
+`mosaic/ui/mosaic.css:4`). Markup: `mosaic/ui/index.html:12`.
+
+**Expected:** the same spacing as the *Start a project* card (field, gap, primary button), with *Open project →*
+the card's primary action at the size of *Create project*.
+
+**Notes for the fix:**
+
+- Give `.path-row` the bottom margin its input lost (e.g. `.path-row{margin:7px 0 16px}`), which also fixes the
+  other path rows (panel folder, export output) if they show the same crowding.
+- Make the start-page button row use full-size buttons, e.g. scope the compact rule to the editor
+  (`.editor .button-row .btn`) or give `#open-project` the primary class like *Create project*.
+- The *Recent projects* list in the same screenshot still shows the stray project inside the repository
+  (Bug 27's leftover, `/Volumes/Astro/LunarMosaic/'/Users/…/session 04102026-stacked'`).
+
+### Bug 41 — Levels never shows its histogram (nor its "set from image" buttons)
+
+**Where:** the Levels block in the chain editor. Screenshot `histogram never comes.png`.
+
+**Actual:** the graph shows only the transfer line, and the hint keeps saying "The histogram appears once the
+statistics are ready." It never does. The *Set black from* / *Set white from* buttons added for Bug 24 never
+appear either.
+
+**Cause:** Levels' prepare step does compute them — `histogram`, `sky_level`, `shadow_level`,
+`highlight_level` (`_levels_prepare`, `mosaic/blocks.py:245`) — and they are stored in `stats.blocks[id]`
+(`mosaic/chain.py:479`). But `/api/analysis` forwards only whitelisted keys per block type, and the whitelist
+has `curves=('histogram',)` and no `levels` entry at all (`App.analysis`, `mosaic/app.py:962`). So the editor's
+`read` for Levels never carries the histogram (`levelsEditor`, `mosaic/ui/chains.js:236`) nor the levels
+(`chains.js:499`–`503`).
+
+**Expected:** the histogram of the image arriving at the block appears once statistics finish, with the
+set-from-image buttons beneath black and white.
+
+**Notes for the fix:**
+
+- Add `levels=('histogram', 'sky_level', 'shadow_level', 'highlight_level')` to the `keys` dict in
+  `App.analysis`.
+- Add a regression check that `/api/analysis` returns a histogram for a Levels block; the Bug 24 fix seems to
+  have been tested against the block function, not through the API.
+- The hint's "once the statistics are ready" never says if they failed or never come; worth distinguishing
+  "computing" from "unavailable".
+
+### Bug 42 — export canvas "Moon centred" centres the mosaic's bounding box, not the lunar disk
+
+**Where:** the export dialog, *Canvas* 16:9 landscape · Moon centred, *Moon position* Centre. Screenshot
+`not really centered (centered would be full moon disk in center).png`.
+
+**Actual:** for a crescent, the lit crescent sits right of centre and the full disk's centre is well to the
+right of the frame's centre. `Scene.canvas_geometry` (`mosaic/lrgb.py:455`) pads the export view's bounding
+box: `left = round(spare * {'left': .1, 'centre': .5, 'right': .9}[position])`, `top = (oh-h)//2`
+(`lrgb.py:486`–`487`). The bounding box is the mosaic, which for a crescent covers only the lit part of the
+disk, so "centre" centres the crescent's box, and the canvas size (`units = max(ceil(w/rw), ceil(h/rh))`) is
+sized to that box too.
+
+**Expected:** "Moon centred" puts the centre of the whole lunar disk (the fitted limb circle) at the centre of
+the canvas, as if the Moon were full; the dark limb side gets the same room as the lit side.
+
+**Notes for the fix:**
+
+- A limb fit already exists: `fit_limb(gray, tol, arc=True)` in `moon_atlas/atlas_geo.py:400` (RANSAC circle
+  through the sunlit limb, terminator-proof, works on a partial arc). Run it once on the luminance proxy,
+  store the disk centre and radius on the scene, and map the centre through the export matrix.
+- Size the canvas so the whole disk circle (plus the existing 10 % breathing room) fits, then place the disk
+  centre at the canvas centre; the image may then need padding on one side only, and if the disk would leave
+  the frame the canvas grows rather than cropping.
+- Decide what *Left* / *Right* mean with a disk centre: probably the disk centre at a third / two thirds of the
+  width, rather than the 10 %/90 % slack split.
+- Fall back to today's bounding-box behaviour, with a note in the dialog, when the limb fit fails (e.g. a
+  mosaic of the terminator only).
+- The dialog's preview and size readout use the same `canvas_geometry`, so they follow automatically.
+
+### Bug 43 — export refuses to replace an existing file, with no way to say yes
+
+**Where:** the export dialog, *Export image*, when the output file is already there (e.g. exporting again after
+a change). Reported with the same export-dialog screenshot as Bug 42.
+
+**Actual:** "The export file already exists. Choose another name." (`Scene.export`, `mosaic/lrgb.py`). Export
+deliberately never replaced a file (`os.link` publication), so re-exporting meant renaming every time.
+
+**Expected:** replace the file after an explicit yes.
+
+### Fix notes — 2026-10-11
+
+Fixed in place on `impl/phase-8`, not pushed.
+
+- **40.** `.path-row` now carries the 7/16 px margins its input gives up, so every path box has the usual gap
+  below it. The start page's *Open project →* is out of the compact editor `.button-row` (new `.open-actions`)
+  and is a primary button, the same size as *Create project*. The stray in-repo project in *Recent projects*
+  is still there (Bug 27); it is data, not code.
+- **41.** `App.analysis` forwards `levels=('histogram', 'sky_level', 'shadow_level', 'highlight_level')`, so
+  the Levels graph gets its histogram and the Bug 24 set-from-image buttons finally appear. New check
+  `test_levels_readouts_reach_the_editor` goes through `analysis()`, not the block function.
+- **42.** `Scene.disk()` runs LunarAtlas's `fit_limb(arc=True)` once on a 1800 px preview and keeps the disk
+  (centre, radius in canvas px) when the limb arc spans ≥ 90°, ≥ 20 % of the lit outline lies on the circle,
+  and the radius is ≤ the mosaic's longer side. (The plain-texture test fixture yields a sparse 4 % "circle":
+  without the share test it inflated a square export to 866 px.) For a ratio canvas, `canvas_geometry` maps the
+  disk centre through the export matrix and sizes the frame so the whole disk and every mosaic pixel fit, with
+  the disk centre at ½ (Centre) or ⅓ / ⅔ (now labelled *Left third* / *Right third*) of the width and ½ of the
+  height. Without a fit it falls back to the old box placement, and the dialog summary says so
+  (`moon_placed` in `/api/export-preview`). On Moon_04102026 the fit takes 0.2 s and puts the disk centre at
+  0.500 × 0.500 of a 10,752 × 6,048 frame. New check `test_export_canvas_centres_the_whole_disk` (a cropped
+  synthetic crescent).
+- **43.** `Scene.export(…, overwrite=False)`: an existing file raises `ExportExists` (a `ValueError`), which
+  `/api/export` checks before starting the job and reports with `exists: true`. The dialog then shows a
+  *"<name> already exists. Replace it."* checkbox; ticking it and exporting again sends `overwrite: true`.
+  Editing the path hides the row again. The replacement is written to the temp file first and swapped in with
+  `os.replace`, so a failed or cancelled export leaves the old file intact. A folder as output is refused.
+  New check `test_export_replaces_a_file_only_when_asked`. The macOS *Browse…* save chooser asks its own
+  Replace question, so a browsed-to existing file is confirmed twice.
+
 ## Phase 0 triage — 2026-10-05
 
 Checked the committed baseline `3c3fba3` on `impl/phase-0`. This section supersedes the

@@ -134,18 +134,21 @@ def fit_pose(P, X, size):
     RMS is within 10 % of the best; refit it on all tiles. Returns (name, params, held-out RMS, all held-out
     residuals, per-model RMS) or None with too few tiles."""
     p = mst.centred(P, size)
-    held = np.arange(len(p)) % 4 == 3
-    if not held.any():
+    splits = [np.arange(len(p)) % 4 == k for k in range(4)]
+    splits = [held for held in splits if held.any()]
+    if not splits:
         return None
     scores = {}
     for name, need in MODELS:
-        if (~held).sum() < need:
+        if any((~held).sum() < need for held in splits):
             continue
         model = make_model(name, size)
-        target = affine_target(model, p[~held], X[~held], size) if name == 'poly3' else None
-        th = solve(model, p[~held], X[~held], target)
-        e = np.hypot(*(model.apply(th, p[held]) - X[held]).T)
-        scores[name] = (float(np.sqrt(np.mean(e ** 2))), e)
+        errors = []
+        for held in splits:
+            target = affine_target(model, p[~held], X[~held], size) if name == 'poly3' else None
+            th = solve(model, p[~held], X[~held], target)
+            errors.append(np.hypot(*(model.apply(th, p[held]) - X[held]).T))
+        scores[name] = (float(np.sqrt(np.mean(np.concatenate([e*e for e in errors])))), np.concatenate(errors))
     if not scores:
         return None
     best = min(v[0] for v in scores.values())
@@ -378,10 +381,17 @@ def overlap_ratio(a, b, k):
             s[ok] = sample(v['rgb'], q[ok])
         vals.append((s, ok))
     (sa, oa), (sb, ob) = vals
-    use = oa & ob & (sa.min(axis=1) > 0.02) & (sb.min(axis=1) > 0.02)
+    brightness = np.minimum(sa.min(axis=1), sb.min(axis=1))
+    use = oa & ob & (brightness > 0.05)
     if use.sum() < 200:
         return None
-    return np.median(sb[use] / sa[use], axis=0)
+    ratios = sb[use] / np.maximum(sa[use], 1e-3)
+    weights = brightness[use]
+    out = []
+    for ch in range(3):
+        order = np.argsort(ratios[:, ch])
+        out.append(ratios[order, ch][np.searchsorted(np.cumsum(weights[order]), weights.sum() / 2)])
+    return np.array(out)
 
 
 def photometry(panels, k, log):

@@ -3,6 +3,7 @@ import copy
 import hashlib
 import json
 from pathlib import Path
+import shutil
 import sys
 import tempfile
 import threading
@@ -19,15 +20,16 @@ import chain
 from project import Project, DEFAULT_EDITS, edits_to_chain
 import lrgb
 from lrgb import Image, manual_match, largest_rectangle
+import app as app_module
 from app import Application, start_server
 from alignment import measure
 from recent import RecentProjects
 import orient
 from atlas_geo import Geometry, NoUsableLimb, similarity as atlas_similarity
 if __package__:
-    from .synthetic import detail
+    from .synthetic import detail, lunar_disk
 else:
-    from synthetic import detail
+    from synthetic import detail, lunar_disk
 
 
 # The tests below are phrased in the old flat adjustments, which a schema-3 project migrates from (Appendix D):
@@ -218,7 +220,7 @@ class Workflow(unittest.TestCase):
         target = cv2.warpAffine(self.l, expected[:2], (1500,1450))
         tifffile.imwrite(self.lp, np.round(target*65535).astype(np.uint16))
         self.assertEqual(self.app.build(['L','RGB']), {'L':'built','RGB':'built'})
-        report = json.loads(self.app.project.path('derived/colour_place.json').read_text())
+        report = json.loads(self.app.project.path(self.app.project.stream('colour')['report']).read_text())
         panel = next(iter(report['panels'].values()))
         self.assertEqual(panel['state'], 'placed')
         import colour_place
@@ -331,8 +333,8 @@ class Workflow(unittest.TestCase):
             self.assertTrue(info['preview'].startswith('data:image/png;base64,'))
             # the JPEG ceiling the dialog pre-flights with is the one export() enforces
             self.assertEqual((info['jpeg_max_side'],info['jpeg_max_pixels']),(lrgb.JPEG_MAX_SIDE,lrgb.JPEG_MAX_PIXELS))
-            geometry,layer,factor=self.app.export_options(p.data['geometry'],p.layers,dict(coverage='common',factor=.5,layer='luminance'))
-            output=self.root/'preview-match.tif';scene.export(output,p.chain_doc(),geometry,p.layers,factor,layer)
+            geometry,layer,factor,canvas,position,padding=self.app.export_options(p.data['geometry'],p.layers,dict(coverage='common',factor=.5,layer='luminance'))
+            output=self.root/'preview-match.tif';scene.export(output,p.chain_doc(),geometry,p.layers,factor,layer,canvas=canvas,position=position,padding=padding)
             a=tifffile.imread(output)
             self.assertEqual(a.shape[:2],(info['height'],info['width']))
             self.assertEqual(info['raw_bytes'],a.nbytes)
@@ -357,6 +359,67 @@ class Workflow(unittest.TestCase):
         self.assertEqual(shapes[0],shapes[1]);self.assertEqual(shapes[1],shapes[2])
         export(scene,self.root/'small.jpg',edits,factor=.5)
         self.assertEqual(Image(self.root/'small.jpg').raw.shape,shapes[0])
+
+    def test_export_canvas_presets_pad_without_resampling_the_moon(self):
+        scene=self.built();edits=dict(DEFAULT_EDITS,rotation=0)
+        native=self.root/'native.tif';export(scene,native,edits)
+        image=tifffile.imread(native)
+        square=self.root/'square.tif';export(scene,square,edits,canvas='square')
+        padded=tifffile.imread(square); side=max(image.shape[:2])
+        self.assertEqual(padded.shape[:2],(side,side))
+        top,left=(side-image.shape[0])//2,(side-image.shape[1])//2
+        np.testing.assert_array_equal(padded[top:top+image.shape[0],left:left+image.shape[1]],image)
+        wide=self.root/'wide.tif';export(scene,wide,edits,canvas='16:9')
+        wide_image=tifffile.imread(wide)
+        self.assertEqual(wide_image.shape[1]*9,wide_image.shape[0]*16)
+        # The extension is a measured sky/background colour, not the renderer's old opaque black.
+        self.assertGreater(float(wide_image[0].mean()),0)
+        left=self.root/'left.tif';right=self.root/'right.tif'
+        export(scene,left,edits,canvas='16:9',position='left');export(scene,right,edits,canvas='16:9',position='right')
+        left_image,right_image=tifffile.imread(left),tifffile.imread(right)
+        self.assertLess(np.argmax(left_image.mean(axis=(0,2))),np.argmax(right_image.mean(axis=(0,2))))
+        custom=self.root/'custom.tif';export(scene,custom,edits,canvas='custom',padding=dict(left=17,right=31,top=11,bottom=23))
+        self.assertEqual(tifffile.imread(custom).shape[:2],(image.shape[0]+34,image.shape[1]+48))
+        with self.assertRaises(ValueError):self.app.export_options(self.app.project.data['geometry'],self.app.project.layers,dict(canvas='banana'))
+
+    def test_levels_readouts_reach_the_editor(self):
+        # BUGS.md bug 41: /api/analysis dropped Levels' histogram and its set-from-image levels
+        self.built();p=self.app.project
+        doc=p.chain_doc();doc['chains']['luminance'].append(chain.entry('levels'));p.set_chain(doc)
+        block=p.data['chain']['chains']['luminance'][-1];self.assertEqual(block['type'],'levels')
+        info=self.app.analysis()['blocks'][block['id']]
+        self.assertEqual(len(info['histogram']),256)
+        self.assertIn('highlight_level',info);self.assertIn('shadow_level',info)
+
+    def test_export_canvas_centres_the_whole_disk(self):
+        # BUGS.md bug 42: a crescent mosaic covers only the lit side; "Moon centred" centres the fitted disk
+        moon=lunar_disk(640,mono=True,crescent=True)
+        x0=int(np.flatnonzero(moon['lit'].any(0))[0])-8
+        tifffile.imwrite(self.lp,np.ascontiguousarray(moon['image'][:,x0:]))
+        self.app.project.set('RGB')['inputs']=[];self.app.project.save()
+        self.assertEqual(self.app.build(['L']),{'L':'built'})
+        scene=self.app.get_scene()
+        self.assertIsNotNone(scene.disk())
+        cx,cy,r=scene.disk();self.assertAlmostEqual(r,moon['radius_px'],delta=4)
+        geometry=geo(dict(DEFAULT_EDITS,rotation=0))
+        for position,f in (('centre',.5),('left',1/3),('right',2/3)):
+            m,(ow,oh),_,(left,top,w,h)=scene.canvas_geometry(geometry,canvas='16:9',position=position)
+            px,py=(m@[cx,cy,1])[:2]
+            self.assertEqual(ow*9,oh*16);self.assertLessEqual(left+w,ow);self.assertGreaterEqual(left,0)
+            self.assertLess(abs(px-(ow*f-.5)),1.01,position);self.assertLess(abs(py-(oh/2-.5)),1.01,position)
+            self.assertGreaterEqual(min(px,ow-px,py,oh-py),r-1,position)     # the whole disk is in the frame
+        # without a limb the mosaic's own box is centred, as before
+        scene._disk=None
+        m,(ow,oh),_,(left,top,w,h)=scene.canvas_geometry(geometry,canvas='16:9')
+        self.assertLessEqual(abs(2*left-(ow-w)),1)
+
+    def test_export_replaces_a_file_only_when_asked(self):
+        scene=self.built();edits=dict(DEFAULT_EDITS,rotation=0);out=self.root/'again.tif'
+        export(scene,out,edits);first=out.stat().st_ino
+        with self.assertRaises(lrgb.ExportExists):export(scene,out,edits,factor=.5)
+        export(scene,out,edits,factor=.5,overwrite=True)
+        self.assertEqual(tifffile.imread(out).shape[0],320);self.assertNotEqual(out.stat().st_ino,first)
+        with self.assertRaisesRegex(ValueError,'folder'):export(scene,self.root,edits,overwrite=True)
 
     def test_upload_validates_mono_and_survives_project_move(self):
         srv=start_server(0,app=self.app,token='upload-token')
@@ -384,6 +447,59 @@ class Workflow(unittest.TestCase):
         finally:
             srv.shutdown();srv.server_close();t.join()
 
+    def test_upload_does_not_hold_the_application_lock_while_reading(self):
+        """A slow browser body must not block status, cancellation, or another request."""
+        self.app.project.set('L')['inputs']=[]
+        self.app.project.save()
+        raw=self.lp.read_bytes(); started=threading.Event(); release=threading.Event()
+        class SlowReader:
+            def __init__(self, data): self.data=data; self.first=True
+            def read(self, n):
+                if self.first:
+                    self.first=False; started.set(); release.wait(3)
+                result,self.data=self.data[:n],self.data[n:]
+                return result
+        class Handler:
+            def __init__(self, outer):
+                self.path=f'/api/upload?id={outer.app.project.data["id"]}&set=L&name=panel.tif'
+                self.rfile=SlowReader(raw); self.reply=None
+            def length(self, limit):
+                if len(raw)>limit: raise ValueError('too large')
+                return len(raw)
+            def json(self, value, status=200): self.reply=(value,status)
+        h=Handler(self)
+        worker=threading.Thread(target=lambda: self.app.post(h,'/api/upload'))
+        worker.start();self.assertTrue(started.wait(2))
+        acquired=self.app.lock.acquire(timeout=.3)
+        if acquired:self.app.lock.release()
+        self.assertTrue(acquired, 'the upload body should be read without the application lock')
+        release.set();worker.join(5)
+        self.assertFalse(worker.is_alive());self.assertEqual(h.reply[1],200)
+        self.assertEqual(len(self.app.project.set('L')['inputs']),1)
+
+    def test_failed_colour_publication_keeps_the_previous_canvas_report_pair(self):
+        self.built(); p=self.app.project
+        old=copy.deepcopy(p.stream('colour'))
+        old_canvas=p.path(old['mosaic']).read_bytes();old_report=p.path(old['report']).read_bytes()
+        partial=p.path('derived/.colour_canvas.partial.tif');partial_report=p.path('derived/.colour_place.partial.json')
+        def fake_place(command, progress):
+            shutil.copyfile(p.path(old['mosaic']),partial)
+            shutil.copyfile(p.path(old['report']),partial_report)
+            return 0,''
+        real_replace=app_module.os.replace
+        def fail_report(source,destination):
+            if Path(source)==partial_report: raise OSError('simulated report publication failure')
+            return real_replace(source,destination)
+        with patch.object(self.app,'run_process',fake_place),patch.object(app_module.os,'replace',fail_report):
+            with self.assertRaises(OSError):self.app.place_colour()
+        current=p.stream('colour')
+        self.assertEqual((current['mosaic'],current['report']),(old['mosaic'],old['report']))
+        self.assertEqual(p.path(current['mosaic']).read_bytes(),old_canvas)
+        self.assertEqual(p.path(current['report']).read_bytes(),old_report)
+        self.assertEqual(current['state'],'failed')
+        self.assertFalse(partial.exists());self.assertFalse(partial_report.exists())
+        self.assertEqual(list((p.folder/'derived').glob('colour_canvas.*.tif')),[p.path(old['mosaic'])])
+
     def test_second_process_lease_and_interrupted_recovery(self):
         other=Application()
         with self.assertRaises(ValueError):other.select(self.app.project.folder)
@@ -395,7 +511,7 @@ class Workflow(unittest.TestCase):
     def test_missing_colour_reopens_luminance_without_stale_common_crop(self):
         self.built();p=self.app.project
         p.set_geometry(dict(coverage='common'));p.set_view(dict(l_visible=False));p.save();self.app.close()
-        p.path('derived/colour_canvas.tif').rename(p.path('derived/colour_canvas.moved.tif'))
+        p.path(p.stream('colour')['mosaic']).rename(p.path('derived/colour_canvas.moved.tif'))
         self.app.select(p.folder)
         restored=self.app.project
         self.assertEqual(restored.stream('colour')['state'],'missing')
@@ -426,7 +542,12 @@ class Workflow(unittest.TestCase):
             self.assertEqual(caught.exception.code,409)
             with request(f'api/viewport?id={p["id"]}&x=20&y=30&w=400&h=300&scale=1') as r:
                 image=cv2.imdecode(np.frombuffer(r.read(),np.uint8),cv2.IMREAD_UNCHANGED)
-                self.assertEqual(image.shape,(300,400,3))
+                self.assertEqual(image.shape,(300,400,4))
+            # BUGS.md 38: outside the canvas the workspace is transparent, so the page's own background shows
+            with request(f'api/viewport?id={p["id"]}&x=-50&y=0&w=200&h=100&scale=1') as r:
+                image=cv2.imdecode(np.frombuffer(r.read(),np.uint8),cv2.IMREAD_UNCHANGED)
+                self.assertEqual(int(image[:,:40,3].max()),0)
+                self.assertGreater(int(image[:,60:,3].min()),0)
             with request(f'api/layer-thumbnail?id={p["id"]}&set=L') as r:
                 image=cv2.imdecode(np.frombuffer(r.read(),np.uint8),cv2.IMREAD_UNCHANGED)
                 self.assertLessEqual(max(image.shape[:2]),96)

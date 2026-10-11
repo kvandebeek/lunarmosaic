@@ -55,10 +55,10 @@ export class Autosave {
       const newer = this.pending !== null;
       if (!newer) this.pending = doc;
       this.failed = e && e.message ? e.message : String(e);
-      this.retrying = !(e && e.retry === false) || newer;
+      this.retrying = !(e && e.retry === false) && !newer;
       this.inflight = null;
       this.report();
-      if (this.retrying) this.arm(newer ? this.delay : this.retry);
+      if (this.retrying) this.arm(this.retry);
       throw e;
     }
     this.inflight = null;

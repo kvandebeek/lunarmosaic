@@ -127,6 +127,9 @@ def margin(doc):
     """The halo a region needs so that its core matches a whole-image render (+3 px of safety)."""
     return sum(B.BLOCKS[e['type']].margin(e['params']) for p in PATHS for e in enabled(doc, p)) + 3
 
+def margin_breakdown(doc):
+    return {p: [(e['type'], B.BLOCKS[e['type']].margin(e['params'])) for e in enabled(doc, p)] for p in PATHS}
+
 
 def default_chain(args, mono):
     """lunar_finish's flags as a chain (plan Appendix E): every block in the final chain, in the old order."""
@@ -451,7 +454,7 @@ def _colour(source, colour, xl, cl, *region):
     return (None, None) if colour is None else colour.read(*region)
 
 
-def prepare(source, doc, q=STATS_Q, colour=SAME, check=None, base=None, cache=None, tag=''):
+def prepare(source, doc, q=STATS_Q, colour=SAME, check=None, base=None, cache=None, tag='', progress=None):
     """D1: every global statistic, once — on the proxy with the detail blocks skipped, then on the probe (a
     full-resolution crop at the disk's centre of mass) for the detail blocks' own statistics and the readouts.
     check() is called before every block; it raises Stale to abandon the pass. `base` (Base) may be reused; with
@@ -516,6 +519,8 @@ def prepare(source, doc, q=STATS_Q, colour=SAME, check=None, base=None, cache=No
         def hook(e, blk, x, dom):
             if check:
                 check()
+            if progress:
+                progress(kind, e)
             stats.blocks.setdefault(e['id'], {}).update(blk.prepare(kind, x, e['params'], ctx))
             if kind == 'probe' and blk.detail:
                 before[e['id']] = np.clip(F.lab_to_rgb(x), 0, 1) if dom == 'lab' else x.copy()
@@ -545,7 +550,8 @@ def prepare(source, doc, q=STATS_Q, colour=SAME, check=None, base=None, cache=No
     return stats
 
 
-def render(source, stats, doc, y0, x0, h, w, snapshot=None, colour=SAME, stage='final', step=1, coverage=None):
+def render(source, stats, doc, y0, x0, h, w, snapshot=None, colour=SAME, stage='final', step=1, coverage=None,
+           hook=None):
     """The finished pixels of a canvas region, computed with a halo: rows y0, y0 + step, … (h of them), columns
     likewise, so step > 1 is a decimated, approximate render with every block at scale 1/step. `stage` stops after
     the luminance chain (shown grey) or the colour chain. `coverage`, a dict, receives the core's luminance and
@@ -573,15 +579,15 @@ def render(source, stats, doc, y0, x0, h, w, snapshot=None, colour=SAME, stage='
     if stage == 'colour' and xc is None:
         stage = 'luminance'                           # nothing to show but the grey luminance
     if stage == 'luminance':
-        return merge(run_chain(lum_e, xl, ctx, protect=Protection(xl, ctx, on and bool(lum_e))), None)[core]
+        return merge(run_chain(lum_e, xl, ctx, protect=Protection(xl, ctx, on and bool(lum_e)), hook=hook), None)[core]
     if stage == 'colour':
-        return run_chain(col_e, xc, ctx, protect=Protection(xc, ctx, on and bool(col_e)))[core]
+        return run_chain(col_e, xc, ctx, protect=Protection(xc, ctx, on and bool(col_e)), hook=hook)[core]
     x = _streams(lum_e, col_e, xl, xc, cl, cc, ctx, on, doc['chains'].get('merge', {}).get('strength', 1.0),
-                 colour is SAME)
+                 colour is SAME, hook=hook)
     prot = Protection(x, ctx, on and bool(fin_e or snapshot))
     snap = None
     if snapshot:
         pc = None if prot.p is None else prot.p[core]
         snapshot('input', None, x[core], 'rgb', (pc, x[core]), None)
         snap = lambda e, arr, dom, step: snapshot(e['id'], e, arr[core], dom, (pc, x[core]), step)
-    return run_chain(fin_e, x, ctx, protect=prot, snapshot=snap)[core]
+    return run_chain(fin_e, x, ctx, protect=prot, snapshot=snap, hook=hook)[core]

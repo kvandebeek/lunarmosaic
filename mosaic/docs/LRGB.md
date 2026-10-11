@@ -54,6 +54,10 @@ online service. [DESIGN.md](DESIGN.md) is the design record behind this guide.
    the orientation from the limb or, for a close-up, from terrain and the panels' capture time, with LunarAtlas's
    bundled reference maps. The `resolution` view tints each region by the luminance set that supplied it, with a
    legend of tiers, scales and shares of the disk.
+   After building, **Open in LunarAtlas** writes a new TIFF beside the original luminance panels (or in the project
+   folder when the sources have no common folder) and opens the bundled LunarAtlas viewer. LunarAtlas keeps its
+   annotation sidecar and annotated exports beside that handoff image; source panels and the LunarMosaic project
+   remain unchanged. Existing handoff files are never replaced.
 8. **Export** a 16-bit TIFF or PNG, or an 8-bit JPEG (quality 92), at native, half or quarter size; the combined
    image or one layer on the same canvas. Every block runs at full resolution. The chain can be saved as a file —
    for another project, or for `lunar_finish.py --chain` — and loaded into a project, which keeps its own
@@ -73,8 +77,9 @@ preview rectangles) and the migration notes. Saves are atomic and a process leas
 stale browser revision cannot overwrite newer edits. No credentials are stored.
 
 `derived/L.tif` is the luminance mosaic, with the builder's layout, label, contribution and set reports beside it.
-`derived/colour_canvas.tif` is the placed colour (16-bit RGBA, alpha = coverage) and `derived/colour_place.json`
-its report. Original files are never written. Direct source paths must still exist to rebuild; finished mosaics
+Each successful colour placement writes an immutable generation-specific `derived/colour_canvas.<generation>.tif`
+(16-bit RGBA, alpha = coverage) and matching `colour_place.<generation>.json`; `project.json` atomically selects
+the complete pair. Original files are never written. Direct source paths must still exist to rebuild; finished mosaics
 can be edited and exported after the panels have moved. Completed builds are reused on reopening; an interrupted
 build restarts from its first step (there is no resume from intermediate stages yet).
 

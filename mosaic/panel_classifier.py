@@ -156,7 +156,11 @@ def solve_scores(n, comps, rng, n_boot=200, key="logr"):
     while len(boot) < n_boot and tries < 10 * n_boot:
         tries += 1
         idx = rng.integers(0, len(comps), len(comps))
-        if len(components(n, [(comps[k]["a"], comps[k]["b"]) for k in idx])) == 1:
+        edges = [(comps[k]["a"], comps[k]["b"]) for k in idx]
+        degree = np.zeros(n, dtype=int)
+        for a, b in edges:
+            degree[a] += 1; degree[b] += 1
+        if len(components(n, edges)) == 1 and np.all(degree > 0):
             boot.append(solve(idx))
     sd = np.array(boot).std(axis=0) if len(boot) > 1 else np.full(n, np.nan)
     return s, sd, float(np.sqrt(np.mean(resid ** 2)))

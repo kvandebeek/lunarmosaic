@@ -893,6 +893,8 @@ class Handler(BaseHTTPRequestHandler):
         if not self.authed():
             return self.no_key(p)
         app, s = self.srv.app, self.srv.session
+        if app is not None:
+            app.touch_request()
         if app is not None and app.get(self, p):
             return
         if self.static(p):                     # the look (theme, fonts, icon): the launcher's pages use it too
@@ -993,6 +995,8 @@ class Handler(BaseHTTPRequestHandler):
         if not self.local() or not self.authed():
             return self.send_error(403)
         app, s = self.srv.app, self.srv.session
+        if app is not None:
+            app.touch_request()
         if app is not None and app.post(self, p):
             return
         if s is None:

@@ -11,6 +11,7 @@ moon_atlas/data/*
 
 # comparison crops and other large working images
 source_images/
+Cline/
 
 # internal working notes, not part of the published docs
 mosaic/docs/mosaic_tool_spec.md

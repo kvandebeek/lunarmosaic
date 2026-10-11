@@ -126,7 +126,8 @@ class Migration(unittest.TestCase):
             self.assertEqual(d['geometry'], dict(rotation=12.0, mirror=True, coverage='common'))
             self.assertEqual(d['view'], dict(l_visible=False, rgb_visible=False))
             self.assertEqual([(s['id'], s['stream']) for s in d['sets']], [('L', 'luminance'), ('RGB', 'colour')])
-            self.assertEqual((d['luminance']['mosaic'], d['colour']['mosaic']), ('derived/L.tif', 'derived/colour_canvas.tif'))
+            self.assertEqual(d['luminance']['mosaic'], 'derived/L.tif')
+            self.assertRegex(d['colour']['mosaic'], r'^derived/colour_canvas\.[0-9a-f]{32}\.tif$')
             self.assertTrue(all('state' not in s and 'mosaic' not in s for s in d['sets']))     # build state is per stream
             ch = d['chain']['chains']
             self.assertTrue(d['chain']['protect_space'])
@@ -172,7 +173,7 @@ class Migration(unittest.TestCase):
             (folder/'project.json').write_text(json.dumps(data), 'utf-8')
             q = Project.open(folder)
             self.assertEqual((q.stream('luminance')['state'], q.stream('luminance')['mosaic']), ('built', 'derived/L.tif'))
-            self.assertEqual(q.stream('colour')['mosaic'], 'derived/colour_canvas.tif')
+            self.assertRegex(q.stream('colour')['mosaic'], r'^derived/colour_canvas\.[0-9a-f]{32}\.tif$')
             self.assertEqual(q.match, colour['legacy_match'])
             self.assertTrue(all('state' not in x for x in q.data['sets']))
         finally:
@@ -319,6 +320,15 @@ class Routes(unittest.TestCase):
             self.assertEqual(readouts[doc['chains']['luminance'][0]['id']]['gains'], [4.0, 2.0])
             self.assertEqual(len(readouts[doc['chains']['final'][0]['id']]['histogram']), 256)
             self.assertEqual(len(readouts[doc['chains']['colour'][0]['id']]['g']), 3)
+            # BUGS.md 18: a render exposes real work status, separate from the long-running job state.
+            with request(f'api/preview?id={pid}&rid=previewstatus1') as response:
+                self.assertEqual(response.status, 200)
+                response.read()
+            status = get(f'api/render-status?id={pid}&rid=previewstatus1')['status']
+            self.assertEqual(status['state'], 'done')
+            self.assertEqual(status['done'], status['total'])
+            self.assertGreater(status['total'], 1)
+            self.assertIn('encoding image', status['message'])
             # previews in view px follow a rotation, keeping their size
             post('api/previews', op='add', preview=dict(name='Copernicus', x=300, y=200, w=256, h=192))
             post('api/previews', op='add', preview=dict(x=600, y=500, w=128, h=128))

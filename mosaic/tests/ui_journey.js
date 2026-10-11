@@ -238,7 +238,7 @@ async function main() {
   const gains = await js(`[...document.querySelectorAll('section.chain[data-path="luminance"] .gain')].map(g => g.textContent)`);
   check(gains.length === 4 && gains.every(g => g === '×1.0'), 'the PixInsight gain beside every wavelet bias');
   check(/never does/.test(await js(`J.text('section.chain[data-path="colour"] .block-body')`)), 'the white balance brightness sentence');
-  await js(`(() => { const i = document.querySelector('section.chain[data-path="luminance"] .block-body input[type=number]');
+  await js(`(() => { const i = document.querySelector('section.chain[data-path="luminance"] .block-body input.numeric-input');
     i.value = '0.5'; i.dispatchEvent(new Event('change', {bubbles: true})); return true; })()`);
   await until(`J.state().then(s => s.project.chain.chains.luminance[0].params.biases[0] === 0.5)`, 'the wavelet bias to be saved');
   check(await js(`document.querySelector('section.chain[data-path="luminance"] .gain').textContent`) === '×6.0', 'bias 0.5 shows gain ×6.0');
@@ -253,20 +253,40 @@ async function main() {
   await drag(L + W * .28, T + H * .40, L + W * .44, T + H * .55);
   await until(`J.state().then(s => s.project.chain.previews.length === 1)`, 'the first preview to be saved');
   await thumbs(1);
-  await until(`J.shown('#preview-viewer') && J.loaded(document.querySelector('#preview-viewer img'))`, 'the preview at 1:1');
+  await until(`J.shown('.preview-viewer') && J.loaded(document.querySelector('.preview-viewer img'))`, 'the preview at 1:1');
   const p1 = (await serverChain()).previews[0];
-  const natural = await js(`[document.querySelector('#preview-viewer img').naturalWidth, document.querySelector('#preview-viewer img').naturalHeight]`);
+  const natural = await js(`[document.querySelector('.preview-viewer img').naturalWidth, document.querySelector('.preview-viewer img').naturalHeight]`);
   check(natural[0] === p1.w && natural[1] === p1.h, `the viewer shows the preview at 1:1 (${natural.join(' × ')} px)`);
   await js(`J.click('#preview-tool')`);
   await until(`J.el('#stage').classList.contains('drawing')`, 'the preview tool again');
   await drag(L + W * .55, T + H * .25, L + W * .72, T + H * .38);
   await until(`J.state().then(s => s.project.chain.previews.length === 2)`, 'the second preview to be saved');
+  await until(`document.querySelectorAll('.preview-viewer').length === 2`, 'two independent preview viewers');
+  const viewerMove = await js(`(() => { const head = document.querySelector('.preview-viewer .viewer-head').getBoundingClientRect(); const panel = document.querySelector('.preview-viewer'); const before = panel.getBoundingClientRect(); return [head.left + 18, head.top + 10, before.left, before.top]; })()`);
+  await drag(viewerMove[0], viewerMove[1], viewerMove[0] + 38, viewerMove[1] + 24);
+  const movedViewer = await js(`(() => { const r = document.querySelector('.preview-viewer').getBoundingClientRect(); return [r.left, r.top]; })()`);
+  check(Math.hypot(movedViewer[0] - viewerMove[2], movedViewer[1] - viewerMove[3]) > 20, 'a preview viewer moves by its title bar');
+  await js(`J.click('.preview-viewer [data-mode="luminance"]')`);
+  await until(`document.querySelector('.preview-viewer [data-mode="luminance"]').classList.contains('active') && J.loaded(document.querySelector('.preview-viewer img'))`, 'the luminance-only preview mode');
+  // BUGS.md 35: a zoomed preview pans by dragging its image
+  await js(`(() => { for (let i = 0; i < 4; i++) J.click('.preview-viewer [data-action="zoom-in"]'); return true; })()`);
+  const pan = await js(`(() => { const b = document.querySelector('.preview-viewer .viewer-body'), r = b.getBoundingClientRect();
+    return [r.left + r.width / 2, r.top + r.height / 2, b.scrollLeft, b.scrollTop, b.scrollWidth > b.clientWidth && b.scrollHeight > b.clientHeight]; })()`);
+  check(pan[4], 'the zoomed preview is larger than its viewer');
+  await drag(pan[0], pan[1], pan[0] - 80, pan[1] - 50);
+  const panned = await js(`(() => { const b = document.querySelector('.preview-viewer .viewer-body'); return [b.scrollLeft, b.scrollTop]; })()`);
+  check(panned[0] - pan[2] > 40 && panned[1] - pan[3] > 25, `dragging a zoomed preview pans it (${pan[2]},${pan[3]} → ${panned[0]},${panned[1]})`);
+  await js(`J.click('.preview-viewer [data-action="zoom-reset"]')`);
+  // BUGS.md 38: the canvas background is black by default, chosen by the user, and kept across a reload
+  check(await js(`getComputedStyle(J.el('#stage')).backgroundColor`) === 'rgb(0, 0, 0)', 'the canvas background is black by default');
+  await js(`(() => { const i = J.el('#canvas-bg'); i.value = '#336699'; i.dispatchEvent(new Event('input', {bubbles: true})); return true; })()`);
+  check(await js(`getComputedStyle(J.el('#stage')).backgroundColor`) === 'rgb(51, 102, 153)', 'the canvas background follows the chosen colour');
   const before = await thumbs(2);
   check(await js(`document.querySelectorAll('#overlay .preview-rect').length`) === 2, 'both rectangles drawn on the mosaic');
   await shot('04-chains-and-previews');
 
   begin('change a parameter: every preview renders again');
-  await js(`(() => { const i = document.querySelector('section.chain[data-path="luminance"] .block-body input[type=number]');
+  await js(`(() => { const i = document.querySelector('section.chain[data-path="luminance"] .block-body input.numeric-input');
     i.value = '1.5'; i.dispatchEvent(new Event('change', {bubbles: true})); return true; })()`);
   await until(`J.state().then(s => s.project.chain.chains.luminance[0].params.biases[0] === 1.5)`, 'the stronger bias to be saved');
   const after = await thumbs(2, before);
@@ -276,6 +296,10 @@ async function main() {
   const id = await js(`J.state().then(s => s.project.id)`);
   const A = (await js(`J.get('geometry?id=${id}')`)).full.matrix;
   const old = (await serverChain()).previews;
+  check(await js(`J.el('#rotation').type === 'text' && [...document.querySelectorAll('.numeric-input')].every(i => i.type === 'text')`), 'numeric boxes use point-formatted text fields');
+  await js(`J.set('#rotation', '-6,5', true)`);
+  await until(`J.state().then(s => s.project.geometry.rotation === -6.5)`, 'a decimal comma is accepted and normalised');
+  check(await js(`J.el('#rotation').value`) === '-6.5', 'the rotation is shown with a decimal point');
   await js(`J.set('#rotation', '90', true)`);
   await until(`J.state().then(s => s.project.geometry.rotation === 90)`, 'the rotation to be saved');
   const geo = await js(`J.get('geometry?id=${id}')`);
@@ -335,6 +359,8 @@ async function main() {
   const differs = Object.keys(JSON.parse(was)).filter(k => JSON.stringify(JSON.parse(was)[k]) !== JSON.stringify(JSON.parse(now)[k]));
   check(!differs.length, 'chain, geometry, view, editor, previews and chip unchanged by the reload' +
         differs.map(k => `\n    ${k}: ${JSON.stringify(JSON.parse(was)[k])}\n    -> ${JSON.stringify(JSON.parse(now)[k])}`).join(''));
+  check(await js(`getComputedStyle(J.el('#stage')).backgroundColor`) === 'rgb(51, 102, 153)' && await js(`J.el('#canvas-bg').value`) === '#336699',
+        'the chosen canvas background survives the reload');
 
   begin('load a chain file, then export a TIFF');
   const file = await js(`J.get('chain-file?id=${id}')`);
@@ -352,7 +378,7 @@ async function main() {
   await until(`J.blocks().final[0] === 'Contrast | +0.20'`, 'the editor to show the loaded chain');
   await until(`!J.el('#export-run').disabled`, 'the export preview of the loaded chain', 120000);
   await js(`J.set('#export-path', ${JSON.stringify(cfg.export)}); J.click('#export-run')`);
-  await until(`J.shown('#build-page')`, 'the export to start');
+  await until(`J.shown('#workspace') && !J.shown('#build-page') && J.el('#cancel-export').hidden === false`, 'the export to start in the workspace');
   await job('the export', 600000);
   check(fs.existsSync(cfg.export) && fs.statSync(cfg.export).size > 1e6, `the TIFF was written (${path.basename(cfg.export)})`);
 

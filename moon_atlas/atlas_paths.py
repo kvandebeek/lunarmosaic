@@ -48,7 +48,7 @@ def is_export_name(name):
     global _ATLAS_RE
     if _ATLAS_RE is None:
         import re
-        _ATLAS_RE = re.compile(r'_atlas(_|$)')
+        _ATLAS_RE = re.compile(r'(?:_atlas(?:_|$)|-LunarMosaic(?: \(\d+\))?$)', re.I)
     stem = os.path.splitext(name)[0]
     return bool(_ATLAS_RE.search(stem))
 

@@ -639,7 +639,7 @@ def show_layout(pv, main, pairs, ref, theta, idx, sizes, proxies, f, offset, can
             record=hold(f_resid) if pv.outputs else None, key="2", replace=False)     # window: keys 1 / 2 switch views
 
 
-def north_up(main, theta, idx, sizes, proxies, f, geometry, log):
+def north_up(main, theta, idx, sizes, proxies, f, geometry, log, when=None):
     """Canvas map M (2 × 2) that turns the mosaic to lunar north up, east right (the IAU view, never mirrored),
     measured by moon_atlas on a small preview composite. None (with a reason) when the Moon cannot be located."""
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "moon_atlas"))
@@ -651,8 +651,22 @@ def north_up(main, theta, idx, sizes, proxies, f, geometry, log):
     fs = min(1.0, 2400 / max(cv0))
     grey = canvas_preview(main, P0, sizes, proxies, f, cv0, fs)
     try:
-        geo, q = atlas_geo.locate(grey, log=lambda *a: None)
-    except (SystemExit, atlas_geo.NoUsableLimb) as e:
+        geo, q = atlas_geo.locate(grey, log=lambda *a: None, when=when)
+    except atlas_geo.NoUsableLimb as e:
+        if when is None:
+            return None, str(e)
+        # Match the app's close-up behavior: a timestamped close-up can be oriented from terrain even without a limb.
+        try:
+            import atlas_closeup
+            import tempfile
+            with tempfile.TemporaryDirectory(prefix='.north-builder-') as folder:
+                preview = os.path.join(folder, 'preview.tif')
+                if not cv2.imwrite(preview, np.clip(grey * 65535, 0, 65535).astype(np.uint16)):
+                    return None, 'could not write the orientation preview'
+                geo, q = atlas_closeup.locate_closeup(preview, log=lambda *a: None, when=when, any_scale=True)
+        except (SystemExit, atlas_geo.NoUsableLimb, OSError, ValueError) as closeup_error:
+            return None, str(closeup_error)
+    except SystemExit as e:
         return None, str(e)
     M, rot, mirror = atlas_geo.north_up_matrix(geo)
     return M, dict(north_was_deg=round(geo.north_angle, 2), was_mirrored=mirror, rotation_deg=round(rot, 2),
@@ -1343,7 +1357,16 @@ def run_stages_4_to_8(args, pr, pv, stg, main, pairs, ref, theta, idx, sizes, da
     orientation = {"turned": False}
     if args.north_up:
         pv.checkpoint()
-        M, info = north_up(main, theta_f, idx_f, sizes, proxies, f, geometry, pr.info)
+        from atlas_ephem import capture_time
+        from datetime import datetime, timezone
+        capture_times = [capture_time(data[n]["path"]) for n in main]
+        capture_times = [t for t in capture_times if t is not None]
+        if capture_times and (max(capture_times) - min(capture_times)).total_seconds() > 12 * 3600:
+            pr.warn("orientation skipped: panels span more than 12 hours; use one session or orient the finished mosaic")
+            M, info = None, "ambiguous capture time across panel sessions"
+        else:
+            when = datetime.fromtimestamp(float(np.median([t.timestamp() for t in capture_times])), timezone.utc) if capture_times else None
+            M, info = north_up(main, theta_f, idx_f, sizes, proxies, f, geometry, pr.info, when=when)
         if M is None:
             pr.warn(f"orientation kept as captured: the Moon could not be located on the preview ({info})")
             orientation["reason"] = info

@@ -1,6 +1,6 @@
 // LunarMosaic: import panel sets, build, place colour, edit the chains, preview at 1:1, export (plan phase 7).
 import {Autosave} from './save.js';
-import {ChainEditor, h} from './chains.js';
+import {ChainEditor, decimalText, decimalValue, h, spinner} from './chains.js';
 import {Previews} from './previews.js';
 
 const $ = (s, root = document) => root.querySelector(s);
@@ -10,6 +10,41 @@ let scale = 1, offset = {x: 0, y: 0}, fitted = true, geometry = null, previewVer
 let polling = false, importing = false, loadedProject = null, editor = null, previews = null;
 let analysis = {}, analysisTimer = null, analysisTicket = 0, analysisVersion = 0, shownChain = '';
 let buildCanvas = null, estimateVersion = 0, estimateRevision = null, recentVersion = 0, exportVersion = 0, refreshTimer = null;
+let colourStale = false;   // bugs-codex.md CODEX-04: a failed re-placement's previous colour result
+let mainStale = false;     // BUGS.md bug 19: the mosaic/detail view skipped a refresh while a preview covered it
+let histogram = null;
+// BUGS.md bug 18: every render gets a server-visible id.  The status endpoint reports the real current block
+// and completed render work, while this small client tracker owns the toolbar indicator.
+const renderJobs = new Map();
+const updateRenderStatus = () => {
+  const current = [...renderJobs.values()].at(-1);
+  $('#canvas-busy').hidden = !current;
+  $('#canvas-render-status').hidden = !current;
+  $('#canvas-render-progress').hidden = !current || !current.total;
+  if (!current) return;
+  $('#canvas-render-status').textContent = current.message || `${current.label}…`;
+  if (current.total) $('#canvas-render-progress').value = current.done / current.total;
+};
+function trackRender(label) {
+  const rid = `r${Date.now().toString(36)}${crypto.getRandomValues(new Uint32Array(1))[0].toString(36)}`;
+  const job = {rid, label, message: `${label}…`, done: 0, total: 0, active: true};
+  renderJobs.set(rid, job); updateRenderStatus();
+  const pollStatus = async () => {
+    while (job.active) {
+      try {
+        const s = await api(`render-status?id=${encodeURIComponent(state.project?.id || '')}&rid=${encodeURIComponent(rid)}`);
+        if (s.status) {
+          job.message = s.status.message || job.message;
+          job.done = s.status.done || 0; job.total = s.status.total || 0;
+          updateRenderStatus();
+        }
+      } catch (_) { /* a superseded request or close needs no extra toast */ }
+      await new Promise(resolve => setTimeout(resolve, 160));
+    }
+  };
+  pollStatus();
+  return {rid, finish: () => { job.active = false; renderJobs.delete(rid); updateRenderStatus(); }};
+}
 const BUILDER = ['Check panels', 'Find coarse features', 'Discover overlaps', 'Solve panel layout', 'Refine alignment',
                  'Match brightness', 'Select the best-resolving regions', 'Blend seams', 'Finish & save'];
 const PLACING = ['Find each panel on the luminance', 'Fit its pose on held-out tiles', 'Match brightness and colour',
@@ -21,11 +56,20 @@ function message(text) {
   clearTimeout(toastTimer); toastTimer = setTimeout(() => { $('#toast').hidden = true; }, 8000);
 }
 
+// bugs-codex.md CODEX-03/CODEX-02: a toast with its own Undo button, for a delete or a chain import
+function undoToast(text, undo) {
+  const toast = $('#toast');
+  toast.replaceChildren(document.createTextNode(text + ' '),
+    h('button', {class: 'btn small', type: 'button', onclick: () => { toast.hidden = true; undo(); }}, 'Undo'));
+  toast.hidden = false;
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => { toast.hidden = true; }, 8000);
+}
+
 async function api(path, data) {
   const options = data === undefined ? {} : {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data)};
   const r = await fetch('/api/' + path, options);
   const o = await r.json().catch(() => ({}));
-  if (!r.ok) { const e = new Error(o.error || 'The operation failed.'); e.status = r.status; e.conflict = !!o.conflict; throw e; }
+  if (!r.ok) { const e = new Error(o.error || 'The operation failed.'); e.status = r.status; e.conflict = !!o.conflict; e.exists = !!o.exists; throw e; }
   return o;
 }
 const payload = (data = {}) => ({id: state.project?.id, ...data});
@@ -46,6 +90,19 @@ function mutate(path, data = {}) {
   });
   queue = run.catch(() => {});
   return run;
+}
+
+// BUGS.md bug 14: a path box with no way to browse for one. 'save' asks for a not-yet-existing name (a new
+// project folder, an export file); 'folder' and 'file' ask for something that already exists. macOS only; a
+// box can still always be typed into.
+async function browse(kind, input, name) {
+  try {
+    const q = new URLSearchParams({kind, start: input.value.trim()});
+    if (name) q.set('name', name);
+    const r = await api('choose?' + q);
+    if (!r.supported) { message('No file chooser is available here (macOS only). Type the path instead.'); return; }
+    if (r.path) { input.value = r.path; input.dispatchEvent(new Event('change', {bubbles: true})); input.focus(); }
+  } catch (e) { message(e.message); }
 }
 
 async function action(name, data = {}) {
@@ -72,10 +129,13 @@ const colourSet = p => p.sets.find(s => s.id === 'RGB');
 const built = (p, name) => !!p?.[name]?.mosaic;
 
 function showPage(next) {
+  // muse-bugs.md MUSE-01: *03 Match & edit* has nothing to show before the luminance mosaic exists
+  if (next === 'edit' && state.project && !built(state.project, 'luminance')) { message('Build the luminance mosaic first.'); next = landingPage(); }
   page = next;
   document.body.scrollTop = 0; document.documentElement.scrollTop = 0;
   showVisibility();
-  $$('.mast nav button').forEach(b => { b.classList.toggle('active', b.dataset.page === page); b.disabled = !state.project; });
+  $$('.mast nav button').forEach(b => { b.classList.toggle('active', b.dataset.page === page);
+    b.disabled = !state.project || (b.dataset.page === 'edit' && !built(state.project, 'luminance')); });
   if (page === 'edit' && built(state.project, 'luminance')) { refreshPreview(); loadAnalysis(); }
   if (page === 'import') loadEstimate();
   if (page === 'projects' || !state.project) loadRecent();
@@ -86,6 +146,7 @@ function showVisibility() {
   document.body.classList.toggle('editing', editing);
   $('#setup').hidden = editing; $('#workspace').hidden = !editing;
   $('#welcome').hidden = !!state.project && page !== 'projects'; $('#close-project').hidden = !state.project;
+  $('.hero').hidden = !!state.project && page !== 'projects';
   $('#import-page').hidden = !state.project || page !== 'import'; $('#build-page').hidden = !state.project || page !== 'build';
   if (state.project && page !== 'projects') $('#recent-projects').hidden = true;
 }
@@ -124,7 +185,13 @@ async function loadRecent() {
 // ---------------------------------------------------------------- import: streams of sets
 
 const setCards = new Map();
-const opticsOf = card => ({pixel_um: $('.pixel', card).value, focal_mm: $('.focal', card).value, barlow: $('.barlow', card).value, aperture_mm: $('.aperture', card).value});
+const opticsOf = card => Object.fromEntries(['pixel_um', 'focal_mm', 'barlow', 'aperture_mm'].map((key, i) => {
+  const raw = [$('.pixel', card), $('.focal', card), $('.barlow', card), $('.aperture', card)][i].value;
+  const value = decimalValue(raw);
+  // Keep invalid text intact for the API's written validation instead of JSON.stringify turning NaN into null
+  // and silently removing a previously entered optical value.
+  return [key, raw.trim() === '' ? '' : Number.isFinite(value) ? value : raw];
+}));
 const arcsec = o => o.pixel_um && o.focal_mm ? 206.265 * o.pixel_um / (o.focal_mm * (o.barlow || 1)) : null;
 const setName = (p, id) => p.sets.find(x => x.id === id)?.label || id;
 
@@ -136,15 +203,18 @@ function setCard(s) {
     h('label', {class: 'drop', tabindex: 0}, h('span', {class: 'drop-icon', text: '＋'}), h('strong', {text: 'Choose a folder of panels'}),
       h('span', {text: 'TIFF, PNG or JPEG · originals stay untouched'}), h('input', {type: 'file', webkitdirectory: true, multiple: true, hidden: true, class: 'folder-upload'})),
     h('div', {class: 'divider', text: 'or use a local folder directly'}),
-    h('div', {class: 'path-row'}, h('input', {class: 'source-path', placeholder: '/path/to/panels', 'aria-label': 'Panel folder'}), h('button', {class: 'btn scan', type: 'button'}, 'Use folder')),
+    h('div', {class: 'path-row'}, h('input', {class: 'source-path', placeholder: '/path/to/panels', 'aria-label': 'Panel folder'}),
+      h('button', {class: 'btn browse', type: 'button'}, 'Browse…'), h('button', {class: 'btn scan', type: 'button'}, 'Use folder')),
     h('details', {class: 'optics', open: true}, h('summary', {}, 'Camera & optics ', h('span', {text: 'needed when sets differ in scale'})),
-      h('div', {class: 'optics-grid'}, ...[['pixel', 'Pixel size · µm', '2.9'], ['focal', 'Focal length · mm', '1200'], ['barlow', 'Barlow', '1'], ['aperture', 'Aperture · mm', '250']]
-        .map(([c, l, ph]) => h('label', {}, l, h('input', {class: c, type: 'number', min: 0, step: 'any', placeholder: ph}))))),
+      h('div', {class: 'optics-grid'}, ...[['pixel', 'Pixel size · µm', '2.9', 0.1], ['focal', 'Focal length · mm', '1200', 1], ['barlow', 'Barlow', '1', 0.1], ['aperture', 'Aperture · mm', '250', 1]]
+        .map(([c, l, ph, step]) => { const inp = h('input', {class: `${c} numeric-input`, type: 'text', inputmode: 'decimal', 'data-min': 0, placeholder: ph, 'aria-label': l});
+          return h('label', {}, l, h('span', {class: 'param-inputs'}, inp, spinner(inp, {step, min: 0}))); }))),
     h('p', {class: 'scale hint'}), h('div', {class: 'scale-actions button-row'}),
     h('div', {class: 'set-summary'}), h('div', {class: 'set-error'}),
     h('details', {class: 'files'}, h('summary', {text: 'Panel list'}), h('ul', {})));
   $('.set-label', card).onchange = () => mutate('sets', {op: 'update', set: {id: key, label: $('.set-label', card).value}}).catch(e => message(e.message));
   $('.remove-set', card)?.addEventListener('click', () => mutate('sets', {op: 'delete', set: {id: key}}).catch(e => message(e.message)));
+  $('.browse', card).onclick = () => browse('folder', $('.source-path', card));
   $('.scan', card).onclick = () => action('inputs', {set: key, paths: [$('.source-path', card).value], optics: opticsOf(card)});
   $('.folder-upload', card).onchange = e => importFiles(key, [...e.target.files]);
   $$('.optics input', card).forEach(el => { el.onchange = () => {
@@ -153,10 +223,11 @@ function setCard(s) {
     else mutate('sets', {op: 'update', set: {id: key, optics: opticsOf(card)}}).catch(e => message(e.message));
   }; });
   const drop = $('.drop', card);
-  drop.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $('.folder-upload', card).click(); } };
-  drop.ondragover = e => { e.preventDefault(); drop.classList.add('drag'); };
+  const locked = () => card.dataset.locked === 'true';          // muse-bugs.md MUSE-02: drag bypassed the lock
+  drop.onkeydown = e => { if (locked()) return; if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $('.folder-upload', card).click(); } };
+  drop.ondragover = e => { if (locked()) return; e.preventDefault(); drop.classList.add('drag'); };
   drop.ondragleave = () => drop.classList.remove('drag');
-  drop.ondrop = e => { e.preventDefault(); drop.classList.remove('drag'); importFiles(key, [...e.dataTransfer.files]); };
+  drop.ondrop = e => { if (locked()) return; e.preventDefault(); drop.classList.remove('drag'); importFiles(key, [...e.dataTransfer.files]); };
   return card;
 }
 
@@ -174,8 +245,8 @@ function renderSets(p, busy) {
     if (fresh || loadedProject !== p.id || !card.contains(document.activeElement)) {
       $('.set-label', card).value = s.label || s.id;
       const o = s.optics || {};
-      $('.pixel', card).value = o.pixel_um || ''; $('.focal', card).value = o.focal_mm || '';
-      $('.barlow', card).value = o.barlow || ''; $('.aperture', card).value = o.aperture_mm || '';
+      $('.pixel', card).value = o.pixel_um ? decimalText(o.pixel_um) : ''; $('.focal', card).value = o.focal_mm ? decimalText(o.focal_mm) : '';
+      $('.barlow', card).value = o.barlow ? decimalText(o.barlow) : ''; $('.aperture', card).value = o.aperture_mm ? decimalText(o.aperture_mm) : '';
     }
     $('.state', card).textContent = stream.mosaic ? 'built' : s.inputs.length ? 'ready' : s.stream === 'colour' ? 'optional' : 'empty';
     const hd = s.headers;
@@ -195,6 +266,8 @@ function renderSets(p, busy) {
       : s.stream === 'luminance' ? 'A single set needs no optics.' : 'Optional: the optics speed up placing colour.';
     if (!a && !est && s.stream === 'luminance' && mixed) actions.append(h('button', {class: 'btn small', type: 'button', onclick: () => action('sets', {op: 'estimate'})}, 'Measure the scale'));
     const locked = busy || !!stream.mosaic || importing || (s.stream === 'luminance' && both);
+    card.dataset.locked = locked ? 'true' : 'false';
+    $('.drop', card).classList.toggle('locked', locked);
     $$('input,button', card).forEach(el => { el.disabled = locked; });
   }
   $('#colour-both').checked = both;
@@ -302,8 +375,11 @@ function renderBuild(p, job, busy) {
   const recovery = ['luminance', 'colour'].filter(n => ['interrupted', 'failed', 'missing'].includes(p[n].state));
   $('#recovery').hidden = !recovery.length;
   $('#recovery-summary').textContent = recovery.map(n => `${n === 'luminance' ? 'Luminance' : 'Colour'}: ${p[n].state}${p[n].last_stage ? ` during stage ${p[n].last_stage}` : ''}.`).join(' ') + ' Completed mosaics are kept.';
-  $('#job-title').textContent = job.state === 'idle' ? 'Ready to build' : job.title || job.action;
+  $('#job-title').textContent = job.state === 'idle' ? 'Ready to build'
+    : job.state === 'cancelled' ? `${job.action || 'Operation'} cancelled${job.stage ? ` · stopped during stage ${job.stage} of 9` : ''}.`
+    : job.title || job.action;
   $('#job-progress').value = job.progress || 0;
+  $('#job-progress').classList.toggle('cancelled', job.state === 'cancelled');
   $('#job-log').textContent = (job.log || []).join('\n');
   $('#cancel-job').hidden = !busy;
   $('#job-result').textContent = job.error || job.result?.path || (job.state === 'done' && job.result && typeof job.result === 'object'
@@ -321,6 +397,7 @@ function render() {
   const p = state.project, job = state.job, busy = job.state === 'running';
   if (!chainSave.busy) chainSave.onState({saving: false, failed: chainSave.failed, retrying: chainSave.retrying});
   $('#export-open').disabled = !built(p, 'luminance') || busy;
+  $('#atlas-open').disabled = !built(p, 'luminance') || busy;
   if (!p) { loadedProject = null; showVisibility(); return; }
   $('#project-title').textContent = p.name; $('#project-location').textContent = p.folder;
   $('#canvas-project').textContent = p.name.toUpperCase();
@@ -339,8 +416,13 @@ function render() {
 
 function renderWorkspace(p, job, busy) {
   const ls = p.luminance, cs = p.colour, m = p.match;
+  // bugs-codex.md CODEX-04: a failed re-placement leaves the previous colour canvas and match in place
+  const stale = !!cs.mosaic && (cs.state === 'failed' || cs.state === 'interrupted');
+  colourStale = stale;
   $('#l-layer-state').textContent = ls.mosaic ? `${ls.width.toLocaleString('en-US')} × ${ls.height.toLocaleString('en-US')}` : 'Not built';
-  $('#rgb-layer-state').textContent = cs.mosaic ? (m?.method === 'both' ? 'From the same mosaic' : cs.summary ? `Placed · ${cs.summary.placed} panels` : 'Matched') : 'Add a colour set';
+  $('#rgb-layer-state').textContent = (cs.mosaic ? (m?.method === 'both' ? 'From the same mosaic' : cs.summary ? `Placed · ${cs.summary.placed} panels` : 'Matched') : 'Add a colour set')
+    + (stale ? ' · ⚠ the last placement attempt failed; showing the previous result' : '');
+  $('#rgb-layer-state').classList.toggle('stale', stale);
   for (const [key, name] of [['L', 'luminance'], ['RGB', 'colour']]) {
     const img = $(`[data-thumbnail="${key}"]`), badge = img.parentElement, s = p[name], stamp = `${p.id}:${s.mosaic}:${s.started || 0}`;
     if (!s.mosaic) { img.hidden = true; $('span', badge).hidden = false; img.dataset.stamp = ''; }
@@ -364,9 +446,14 @@ function renderWorkspace(p, job, busy) {
   $('#check-match').disabled = !m || busy || m.method === 'both';
   $('#north-up').disabled = !ls.mosaic || busy;
   $('#coverage').disabled = !m;
+  // muse-bugs.md MUSE-06: these show nothing meaningful before colour is placed
+  const COLOUR_VIEWS = new Set(['colour', 'overlay', 'coverage', 'errors']);
+  $$('[data-view]').forEach(b => { b.disabled = !m && COLOUR_VIEWS.has(b.dataset.view); });
+  $('#show-error-map').disabled = !m;
   const checks = m?.diagnostics;
   $('#match-chip').textContent = !m ? 'Colour not placed' : m.method === 'both' ? 'Colour from the same mosaic'
     : `${cs.summary?.text || `Match ${m.median.toFixed(2)} px · worst ${m.worst.toFixed(2)} px`}${checks?.measured ? ` · checked ${checks.median.toFixed(2)} px` : ''}`;
+  $('#match-chip').classList.toggle('stale', stale);
   $('#match-description').textContent = !m ? (colourSet(p).inputs.length ? 'Colour is placed once luminance is built.' : 'Add colour panels to colour the mosaic.')
     : m.method === 'placement' ? `${m.inliers} of ${m.candidates} colour panels placed at ${m.scale.toFixed(3)}× the canvas pixel.`
     : m.method === 'both' ? 'The colour set is the luminance too.'
@@ -374,11 +461,12 @@ function renderWorkspace(p, job, busy) {
   $('#match-explanation').textContent = !m ? 'Build both streams to measure how the colour sits on the luminance.' : m.method === 'both' ? 'Nothing is placed: one mosaic gives both.'
     : `Each colour panel was found on the luminance and fitted with the simplest pose its own tiles support; every fourth tile was held out to measure the fit. ${m.warning || ''}${checks?.measured ? ` An independent check of ${checks.measured} patches measured a median offset of ${checks.median.toFixed(2)} px, worst ${checks.worst.toFixed(2)} px.` : ''}`;
   $('#coverage').value = p.geometry.coverage; $('#mirror').checked = p.geometry.mirror;
-  if (document.activeElement !== $('#rotation')) $('#rotation').value = p.geometry.rotation;
+  if (document.activeElement !== $('#rotation')) $('#rotation').value = decimalText(Math.round(p.geometry.rotation * 100) / 100);
   const orient = p.orientation;
   $('#orientation-info').textContent = orient ? `${orient.matches} terrain matches · ${orient.rms_px.toFixed(2)} px RMS. ${Math.abs(p.geometry.rotation - orient.rotation) < .001 && p.geometry.mirror === orient.mirror ? 'Lunar north is up.' : 'The view was turned since.'}`
     : 'Both layers turn together. Uses lunar reference maps, downloaded if needed.';
   $('#status-job').textContent = busy ? `${job.title || job.action} · ${Math.round((job.progress || 0) * 100)} %` : job.state === 'failed' ? job.error || '' : '';
+  $('#cancel-export').hidden = !busy;
   // the migration notes, shown once
   const notes = p.notes || [];
   $('#notes').hidden = !notes.length;
@@ -389,9 +477,9 @@ function renderWorkspace(p, job, busy) {
   }
   // the editor shows our working chain while a save is pending, the server's otherwise; never while typing in it
   chainSave.adopt({format: 'lunarmosaic-chain', version: 1, ...p.chain});
-  const doc = chainSave.working, key = JSON.stringify(doc) + ':' + analysisVersion, active = document.activeElement;
+  const doc = chainSave.working, key = JSON.stringify(doc) + ':' + analysisVersion + ':' + !!m, active = document.activeElement;
   const typing = $('#chains').contains(active) && /INPUT|SELECT|TEXTAREA/.test(active.tagName);
-  if (editor && key !== shownChain && !typing) { shownChain = key; editor.show(doc, analysis); }
+  if (editor && key !== shownChain && !typing) { shownChain = key; editor.show(doc, analysis, {hasColour: !!m}); }
   // what a preview's pixels depend on: not the revision, which a rename or a build note also moves
   if (previews && ls.mosaic) previews.render(hash(JSON.stringify([p.chain.protect_space, p.chain.chains, p.geometry,
     ls.mosaic, ls.started || 0, cs.mosaic, cs.revision || 0])));
@@ -399,7 +487,11 @@ function renderWorkspace(p, job, busy) {
 
 // ---------------------------------------------------------------- the canvas
 
-function scheduleRefresh() { clearTimeout(refreshTimer); refreshTimer = setTimeout(() => refreshPreview(false), 150); }
+function scheduleRefresh() {
+  // bug 19: a preview rectangle covers the canvas while it's open, so recomputing what's hidden behind it can wait
+  if (previews?.hasOpen) { mainStale = true; return; }
+  clearTimeout(refreshTimer); refreshTimer = setTimeout(() => refreshPreview(false), 150);
+}
 
 function loadAnalysis() {
   if (page !== 'edit' || !built(state.project, 'luminance')) return;
@@ -425,22 +517,70 @@ function legend() {
     : [h('li', {class: 'hint', text: 'This mosaic has no set report: it was built from one set.'})]));
 }
 
+// This is deliberately calculated from the same rendered 8-bit previews shown on screen.  It is a live
+// exposure/colour diagnostic, not a claim about the 16-bit source distribution used by export.
+class Histogram {
+  constructor(root) {
+    this.root = root; this.stamp = ''; this.tickets = new Map();
+    root.addEventListener('toggle', () => { if (root.open) this.render(this.stamp); });
+  }
+  render(stamp) {
+    this.stamp = stamp;
+    if (!this.root.open || !state.project) return;
+    const colour = !!state.project.match;
+    $('#histogram-colour-row').hidden = !colour;
+    this.load('luminance', 'luminance', stamp);
+    if (colour) this.load('colour', 'colour', stamp);
+  }
+  async load(name, viewName, stamp) {
+    const ticket = (this.tickets.get(name) || 0) + 1, stats = $(`#histogram-${name}-stats`);
+    this.tickets.set(name, ticket);
+    stats.textContent = 'Updating…';
+    try {
+      const q = new URLSearchParams({id: state.project.id, view: viewName, v: state.project.revision});
+      const response = await fetch('/api/preview?' + q);
+      if (!response.ok) throw new Error('Histogram preview unavailable.');
+      const bitmap = await createImageBitmap(await response.blob());
+      if (ticket !== this.tickets.get(name) || !this.root.open || stamp !== this.stamp) { bitmap.close(); return; }
+      const max = 512, ratio = Math.min(1, max / Math.max(bitmap.width, bitmap.height));
+      const canvas = document.createElement('canvas'); canvas.width = Math.max(1, Math.round(bitmap.width * ratio)); canvas.height = Math.max(1, Math.round(bitmap.height * ratio));
+      const context = canvas.getContext('2d', {willReadFrequently: true}); context.drawImage(bitmap, 0, 0, canvas.width, canvas.height); bitmap.close();
+      const bins = [new Uint32Array(256), new Uint32Array(256), new Uint32Array(256)], data = context.getImageData(0, 0, canvas.width, canvas.height).data;
+      let pixels = 0;
+      for (let i = 0; i < data.length; i += 4) { if (!data[i + 3]) continue; bins[0][data[i]]++; bins[1][data[i + 1]]++; bins[2][data[i + 2]]++; pixels++; }
+      this.draw($(`#histogram-${name}`), bins, name === 'luminance');
+      const percentile = p => { let total = 0; for (let i = 0; i < 256; i++) total += bins[0][i]; const target = total * p; let seen = 0; for (let i = 0; i < 256; i++) { seen += bins[0][i]; if (seen >= target) return i; } return 255; };
+      stats.textContent = pixels ? `black ${percentile(.01)} · mid ${percentile(.5)} · white ${percentile(.99)}` : 'No visible pixels';
+    } catch (_) { if (ticket === this.tickets.get(name)) stats.textContent = 'Preview unavailable'; }
+  }
+  draw(canvas, bins, luminance) {
+    const context = canvas.getContext('2d'), {width, height} = canvas; context.clearRect(0, 0, width, height);
+    const peak = Math.max(1, ...bins.flatMap(bin => [...bin]));
+    const colours = luminance ? ['#d9dce4'] : ['#ee6d6d', '#73d68a', '#6ba9ff'];
+    bins.forEach((bin, channel) => { context.beginPath(); context.strokeStyle = colours[channel] || colours[0]; context.lineWidth = 1.5; for (let x = 0; x < 256; x++) { const px = x / 255 * (width - 1), y = height - 2 - Math.log1p(bin[x]) / Math.log1p(peak) * (height - 5); x ? context.lineTo(px, y) : context.moveTo(px, y); } context.stroke(); });
+  }
+}
+
 async function refreshPreview(reset = true) {
   if (page !== 'edit' || !built(state.project, 'luminance')) return;
+  mainStale = false;
   const ticket = ++previewVersion, id = state.project.id;
+  const render = trackRender('Canvas');
   try {
     const info = await api('geometry?id=' + encodeURIComponent(id)); if (ticket !== previewVersion) return;
     geometry = info;
     legend();
     $('#status-dimensions').textContent = `${info.width.toLocaleString('en-US')} × ${info.height.toLocaleString('en-US')} · ${view}`;
     $('#coverage-info').textContent = info.matched ? `${info.missing_colour.toFixed(1)} % of the luminance has no colour.` : 'No colour placed.';
-    const response = await fetch(`/api/preview?id=${id}&view=${view}&v=${state.project.revision}`);
+    const response = await fetch(`/api/preview?id=${id}&view=${view}&v=${state.project.revision}&rid=${encodeURIComponent(render.rid)}`);
     if (!response.ok) { const e = await response.json().catch(() => ({})); throw new Error(e.error || 'The preview failed.'); }
     const url = URL.createObjectURL(await response.blob()); if (ticket !== previewVersion) { URL.revokeObjectURL(url); return; }
     const im = $('#mosaic'), old = im.dataset.url;
     im.onload = () => { if (old) URL.revokeObjectURL(old); im.dataset.url = url; $('#empty-canvas').hidden = true; if (reset || fitted) fit(); else positionImage(); };
     im.src = url;
+    histogram?.render(`${state.project.revision}:${view}`);
   } catch (e) { message(e.message); }
+  finally { render.finish(); }
 }
 
 function fit() {
@@ -464,9 +604,12 @@ function positionImage() {
 }
 
 async function loadDetail() {
-  if (page !== 'edit' || !geometry) return;
+  // bug 36: pan and zoom always deserve detail; only a chain change deferred behind an open viewer (bug 19) waits,
+  // and closing the last viewer refreshes the canvas, which reloads this
+  if (page !== 'edit' || !geometry || mainStale) return;
   const stage = $('#stage'), ticket = previewVersion, position = `${scale},${offset.x},${offset.y}`;
   const q = new URLSearchParams({id: state.project.id, view, x: -offset.x, y: -offset.y, w: stage.clientWidth, h: stage.clientHeight, scale});
+  const render = trackRender('Detail'); q.set('rid', render.rid);
   try {
     const r = await fetch('/api/viewport?' + q); if (!r.ok) return;
     const url = URL.createObjectURL(await r.blob());
@@ -475,6 +618,7 @@ async function loadDetail() {
     im.onload = () => { if (old) URL.revokeObjectURL(old); im.dataset.url = url; im.hidden = false; };
     im.src = url;
   } catch (e) { /* keep the preview while disconnected */ }
+  finally { render.finish(); }
 }
 
 function zoom(factor, x, y) {
@@ -508,6 +652,8 @@ async function poll() {
     if (page === 'edit' && now && (was?.id !== now.id || was?.revision !== now.revision)) { scheduleRefresh(); loadAnalysis(); }
     if (old.job.state === 'running' && state.job.state !== 'running') {
       if (state.job.error) message(state.job.error);
+      // bugs.md bug 33: the export used to only report failure; a finished one now says where the file went
+      else if (state.job.state === 'done' && state.job.action === 'Export image' && state.job.result?.path) message(`Exported to ${state.job.result.path}.`);
       if (page === 'edit') refreshPreview(false);
       if (page === 'import') loadEstimate();
     }
@@ -545,29 +691,48 @@ function wire() {
   $('#home').onclick = () => showPage('projects');
   $('#close-project').onclick = async () => { if (await action('close')) showPage('import'); };
   $('#create').onclick = async () => { if (await action('new', {folder: $('#project-folder').value, name: $('#project-name').value})) showPage('import'); };
+  $('#project-folder-browse').onclick = () => browse('save', $('#project-folder'), `${$('#project-name').value || 'Untitled Moon'}.lunarmosaic`);
   $('#open-project').onclick = async () => { if (await action('open', {folder: $('#open-folder').value})) showPage(landingPage()); };
+  $('#open-folder-browse').onclick = () => browse('folder', $('#open-folder'));
   $('#recent-clear').onclick = async () => { if (await action('recent-clear')) loadRecent(); };
   $('#add-lum-set').onclick = () => mutate('sets', {op: 'create', set: {stream: 'luminance'}}).catch(e => message(e.message));
   $('#colour-both').onchange = () => mutate('sets', {op: 'update', set: {id: 'RGB', stream: $('#colour-both').checked ? 'both' : 'colour'}}).then(loadEstimate).catch(e => { message(e.message); render(); });
   $('#build-both').onclick = () => build(['L', 'RGB']);
   $('#build-lum').onclick = () => build(['L']);
   $('#cancel-job').onclick = () => action('cancel');
+  $('#cancel-export').onclick = () => action('cancel');
   $('#go-edit').onclick = async () => { await poll(); showPage('edit'); };      // with the finished build's state
   $('#match').onclick = () => action('match');
   $('#check-match').onclick = () => action('check-match');
   $('#north-up').onclick = () => { fitted = true; action('north-up'); };
+  $('#atlas-open').onclick = async () => {
+    if (await action('atlas')) message('Opening LunarAtlas…');
+  };
   $('#match-chip').onclick = openPlacement;
   $('#match-popover-close').onclick = () => { $('#match-popover').hidden = true; $('#match-chip').setAttribute('aria-expanded', 'false'); $('#match-chip').focus(); };
   $('#show-error-map').onclick = () => { $('[data-view="errors"]').click(); $('#match-popover-close').click(); };
   $$('[data-visible]').forEach(el => { el.onchange = () => mutate('geometry', {view: {[el.dataset.visible]: el.checked}}).then(() => refreshPreview(false)).catch(e => { message(e.message); render(); }); });
   const turn = g => { fitted = true; mutate('geometry', {geometry: g}).then(() => refreshPreview()).catch(e => { message(e.message); render(); }); };
   $('#coverage').onchange = () => turn({coverage: $('#coverage').value});
-  $('#rotation').onchange = () => turn({rotation: Number($('#rotation').value)});
+  $('#rotation').onchange = () => {
+    const input = $('#rotation'), value = decimalValue(input.value);
+    if (!Number.isFinite(value) || value < -180 || value > 180) { input.value = decimalText(state.project.geometry.rotation); message('Rotation must be between −180 and 180 degrees.'); return; }
+    input.value = decimalText(value); turn({rotation: value});
+  };
+  $('#rotation').insertAdjacentElement('afterend', spinner($('#rotation'), {step: 0.1, min: -180, max: 180}));
   $('#mirror').onchange = () => turn({mirror: $('#mirror').checked});
   $$('[data-view]').forEach(b => { b.onclick = () => { view = b.dataset.view; $$('[data-view]').forEach(x => x.classList.toggle('active', x === b)); refreshPreview(false); }; });
   $('#fit').onclick = fit; $('#zoom-in').onclick = () => zoom(1.4); $('#zoom-out').onclick = () => zoom(1 / 1.4); $('#one-to-one').onclick = () => zoom(1 / scale);
   $('#preview-tool').onclick = () => previews.add().catch(e => message(e.message));
-  $('#preview-close').onclick = () => previews.close();
+  // BUGS.md 38: one person's display preference, like a viewer's layout, so it stays in this browser
+  const BG_KEY = 'lunarmosaic.canvas-background', background = value => {
+    document.documentElement.style.setProperty('--canvas-bg', value); $('#canvas-bg').value = value;
+  };
+  try { const saved = localStorage.getItem(BG_KEY); if (/^#[0-9a-f]{6}$/i.test(saved || '')) background(saved); } catch (_) { /* storage denied */ }
+  $('#canvas-bg').oninput = () => {
+    background($('#canvas-bg').value);
+    try { localStorage.setItem(BG_KEY, $('#canvas-bg').value); } catch (_) { /* storage denied */ }
+  };
   const stage = $('#stage');
   stage.onwheel = e => { e.preventDefault(); const r = stage.getBoundingClientRect(); zoom(e.deltaY < 0 ? 1.15 : 1 / 1.15, e.clientX - r.left, e.clientY - r.top); };
   let drag = null;
@@ -576,22 +741,57 @@ function wire() {
   stage.onpointerup = () => { drag = null; }; stage.onpointercancel = () => { drag = null; };
   window.onresize = () => { if (fitted) fit(); else positionImage(); };
   // export, with the chain as a file
+  $('#export-path-browse').onclick = () => browse('save', $('#export-path'), $('#export-path').value.split(/[\\/]/).pop());
   $('#export-open').onclick = async () => {
     try {
       await chainSave.flush().catch(() => {}); await queue;
-      $('#export-path').value = state.project.folder.replace(/[/\\]$/, '') + '/exports/Moon-LRGB.' + $('#format').value;
-      $('#export-coverage').value = state.project.geometry.coverage;
-      $('#export-coverage').disabled = !state.project.match;
-      $('#export-layer option[value=colour]').disabled = !state.project.match;
-      if (!state.project.match && $('#export-layer').value === 'colour') $('#export-layer').value = 'composite';
+      const p = state.project, hasColour = !!p.match;
+      // BUGS.md bug 26: stamp the default name with the panels' own capture time, the way LunarAtlas reads it
+      const STAMP = /\d{4}-\d{2}-\d{2}-\d{4}_\d/;
+      const stamps = p.sets.filter(x => x.stream !== 'colour').flatMap(x => x.inputs)
+        .map(x => (x.split(/[\\/]/).pop().match(STAMP) || [])[0]).filter(Boolean).sort();
+      const base = stamps.length ? `${stamps[Math.floor(stamps.length / 2)]}-Moon` : 'Moon';
+      $('#export-path').value = p.folder.replace(/[/\\]$/, '') + `/exports/${base}${hasColour ? '-LRGB' : ''}.` + $('#format').value;
+      // bug 25: a luminance-only project has no colour coverage or layer choice to make
+      $('#export-title').textContent = hasColour ? 'Export from both layers' : 'Export the luminance';
+      $('#export-coverage-row').hidden = !hasColour;
+      $('#export-layer-row').hidden = !hasColour;
+      $('#export-coverage').value = p.geometry.coverage;
+      $('#export-layer').value = hasColour ? $('#export-layer').value : 'luminance';
+      $('#export-layer option[value=colour]').disabled = !hasColour;
+      // bugs-codex.md CODEX-04: exporting the previous colour after a failed re-placement needs an explicit yes
+      $('#export-stale-row').hidden = !colourStale;
+      $('#export-stale-ack').checked = false;
+      $('#export-replace-row').hidden = true;
       $('#export-dialog').showModal(); exportPreview();
     } catch (e) { message(e.message); }
   };
   $('#format').onchange = () => { $('#export-path').value = $('#export-path').value.replace(/\.[^./\\]+$/, '.' + $('#format').value); exportPreview(); };
-  for (const sel of ['#export-scale', '#export-layer', '#export-coverage']) $(sel).onchange = exportPreview;
+  for (const sel of ['#export-scale', '#export-layer', '#export-coverage', '#export-canvas', '#export-position', '#export-pad-left', '#export-pad-right', '#export-pad-top', '#export-pad-bottom']) $(sel).onchange = exportPreview;
+  $('#export-stale-ack').onchange = () => exportPreview();
   $('#export-run').onclick = async () => {
-    if (await action('export', {output: $('#export-path').value, factor: Number($('#export-scale').value), layer: $('#export-layer').value, coverage: $('#export-coverage').value})) { $('#export-dialog').close(); showPage('build'); }
+    if (!$('#export-stale-row').hidden && !$('#export-stale-ack').checked) { message('Acknowledge the stale colour placement first, or cancel the export.'); return; }
+    // bugs.md bug 33: an export used to jump to the Build page; its progress now stays in the workspace it was asked from
+    const fromPage = page;
+    // an existing file is replaced only after a yes in the dialog itself: the server refuses first, with
+    // `exists`, and the row below asks (a native confirm() would stack behind this dialog, CODEX-02)
+    const overwrite = !$('#export-replace-row').hidden && $('#export-replace').checked;
+    if (!$('#export-replace-row').hidden && !overwrite) { message('Tick “replace it”, or choose another file name.'); return; }
+    try {
+      await chainSave.flush().catch(() => {}); await queue;
+      state = await api('export', payload({output: $('#export-path').value, overwrite, factor: Number($('#export-scale').value), layer: $('#export-layer').value, coverage: $('#export-coverage').value, canvas: $('#export-canvas').value, position: $('#export-position').value, padding: exportPadding()}));
+      render();
+    } catch (e) {
+      if (e.exists) { $('#export-replace-text').textContent = `${e.message} Replace it.`; $('#export-replace').checked = false; $('#export-replace-row').hidden = false; }
+      else message(e.message);
+      return;
+    }
+    $('#export-dialog').close();
+    if (fromPage !== 'edit') showPage('build');
   };
+  // a different name needs its own answer
+  $('#export-path').addEventListener('input', () => { $('#export-replace-row').hidden = true; });
+  $('#export-path').addEventListener('change', () => { $('#export-replace-row').hidden = true; });
   $('#export-dialog form').onsubmit = e => { e.preventDefault(); };
   $$('[data-export-close]').forEach(b => { b.onclick = () => $('#export-dialog').close(); });
   $('#chain-export').onclick = async () => {
@@ -609,10 +809,19 @@ function wire() {
     if (!file) return;
     try {
       const doc = JSON.parse(await file.text());
+      const blockCount = d => ['luminance', 'colour', 'final'].reduce((n, k) => n + (d?.chains?.[k]?.length || 0), 0);
+      const now = blockCount(chainSave.working), next = blockCount(doc);
+      const previous = JSON.parse(JSON.stringify(chainSave.working));
       await chainSave.flush().catch(() => {});
       await mutate('chain-file', {chain: doc});
       shownChain = ''; render(); scheduleRefresh(); loadAnalysis(); exportPreview();
-      message('Chain loaded; your previews were kept.');
+      // bugs-codex.md CODEX-02: applied at once (nothing blocks on a dialog), but named and reversible right
+      // after, the same as a deleted block or preview — not a native confirm(), which a dialog already open
+      // (the export dialog, here) would stack behind, unseen, and which blocks the whole page meanwhile
+      undoToast(`Chain loaded: ${now} block${now === 1 ? '' : 's'} replaced with ${next} from the file.`,
+        () => mutate('chain', {chain: previous}).then(() => {
+          shownChain = ''; render(); scheduleRefresh(); loadAnalysis(); exportPreview();
+        }).catch(err => message(err.message)));
     } catch (err) { message(err instanceof SyntaxError ? 'This file is not a chain document (not JSON).' : err.message); }
   };
   // control points for a single-image colour set: luminance points in mosaic px, colour points in the image's px
@@ -644,17 +853,24 @@ function wire() {
 
 function clearPoints() { points.L = []; points.RGB = []; $$('.point-dot').forEach(el => el.remove()); $('#point-count').textContent = 'Choose point 1 in luminance.'; }
 
+function exportPadding() {
+  return Object.fromEntries(['left', 'right', 'top', 'bottom'].map(side => [side, $(`#export-pad-${side}`).value]));
+}
+
 async function exportPreview() {
   if (!$('#export-dialog').open) return;
   const ticket = ++exportVersion; $('#export-run').disabled = true; $('#export-summary').textContent = 'Preparing preview…'; $('#export-preview').hidden = true;
-  const q = new URLSearchParams({id: state.project.id, coverage: $('#export-coverage').value, factor: $('#export-scale').value, layer: $('#export-layer').value});
+  const padding = exportPadding();
+  const q = new URLSearchParams({id: state.project.id, coverage: $('#export-coverage').value, factor: $('#export-scale').value, layer: $('#export-layer').value, canvas: $('#export-canvas').value, position: $('#export-position').value, pad_left: padding.left, pad_right: padding.right, pad_top: padding.top, pad_bottom: padding.bottom});
   try {
     const info = await api('export-preview?' + q); if (ticket !== exportVersion) return;
     $('#export-preview').src = info.preview; $('#export-preview').hidden = false;
     const format = $('#format').value;
     const jpegOK = format !== 'jpg' || (info.width * info.height <= info.jpeg_max_pixels && Math.max(info.width, info.height) <= info.jpeg_max_side);
-    $('#export-summary').textContent = `${info.width.toLocaleString('en-US')} × ${info.height.toLocaleString('en-US')} px · ${info.composition} · ${format === 'jpg' ? '8' : '16'}-bit · ${info.missing_colour.toFixed(1)} % of the luminance without colour. ${format === 'tif' ? `About ${fileSize(info.raw_bytes)} uncompressed.` : 'The compressed size depends on the image.'} The preview approximates sharpening; judge detail in a preview at 1:1.${jpegOK ? '' : ' Too large for JPEG: choose TIFF or PNG, or a smaller size.'}`;
-    $('#export-run').disabled = !jpegOK;
+    const north = state.project.orientation && Math.abs(state.project.geometry.rotation - state.project.orientation.rotation) < .001 && state.project.geometry.mirror === state.project.orientation.mirror;
+    $('#export-summary').textContent = `${info.width.toLocaleString('en-US')} × ${info.height.toLocaleString('en-US')} px · ${info.composition} · ${format === 'jpg' ? '8' : '16'}-bit · ${north ? 'lunar north up' : 'current editable orientation'} · ${info.missing_colour.toFixed(1)} % of the luminance without colour. ${format === 'tif' ? `About ${fileSize(info.raw_bytes)} uncompressed.` : 'The compressed size depends on the image.'} ${info.moon_placed === 'mosaic' ? 'No clear lunar limb was found, so the mosaic itself is placed, not the whole disk. ' : ''}The preview approximates sharpening; judge detail in a preview at 1:1.${jpegOK ? '' : ' Too large for JPEG: choose TIFF or PNG, or a smaller size.'}`;
+    const staleBlocked = !$('#export-stale-row').hidden && !$('#export-stale-ack').checked;
+    $('#export-run').disabled = !jpegOK || staleBlocked;
   } catch (e) { if (ticket === exportVersion) $('#export-summary').textContent = e.message; }
 }
 
@@ -665,14 +881,20 @@ async function start() {
     state = first;
     editor = new ChainEditor({root: $('#chains'), catalog: catalog.blocks,
       onChange: doc => { chainSave.change(doc); },
+      onNotice: (text, undo) => undoToast(text, undo),
+      onBrowse: (kind, input) => browse(kind, input),
       onDraw: async (which, done) => {
         const rect = await previews.draw(`Drag the ${which} reference on the mosaic · Esc cancels`);
         if (rect) done(toCanvas(rect));
         else { shownChain = ''; render(); }               // the choice goes back to what it was
       }});
-    previews = new Previews({stage: $('#stage'), layer: $('#overlay'), strip: $('#preview-strip'), viewer: $('#preview-viewer'),
+    previews = new Previews({stage: $('#stage'), layer: $('#overlay'), strip: $('#preview-strip'), viewerHost: $('#preview-viewers'),
       api: (route, body) => mutate(route, body), project: () => state.project, onError: e => message(e.message),
+      onNotice: (text, undo) => undoToast(text, undo),
+      onRenderStart: label => trackRender(label),
+      onClose: () => { if (!previews?.hasOpen && mainStale) { mainStale = false; scheduleRefresh(); } },
       view: () => ({scale, offset, box: geometry?.box || [0, 0, 0, 0]})});
+    histogram = new Histogram($('#histogram-inspector'));
     render(); showPage(landingPage());
   } catch (e) { message(e.message); }
   setInterval(poll, 1200);

@@ -11,20 +11,27 @@ import hashlib
 import json
 import math
 import os
+import errno
 import struct
 import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
+import sys
 import zlib
 import cv2
 import numpy as np
 import tifffile
 import chain
+import tool_settings
 
 # Single source of truth for the JPEG ceiling: the server enforces it in Scene.export(),
 # and /api/export-preview publishes it so the UI can warn before the click.
 JPEG_MAX_SIDE = 65000
 JPEG_MAX_PIXELS = 80_000_000
+# Canvas choices are deliberately export-only.  Their integer units make the advertised aspect ratio exact while
+# only adding pixels around the existing view; no lunar pixel is resampled or cropped to make a frame fit.
+CANVAS_PRESETS = {'native': (0, 0), 'custom': (0, 0), 'square': (1, 1), '16:9': (16, 9), '3:2': (3, 2),
+                  '4:5': (4, 5), '9:16': (9, 16)}
 VIEWS = ('composite', 'luminance', 'colour', 'overlay', 'coverage', 'errors', 'resolution')
 STAGE_OF = dict(composite='final', luminance='luminance', colour='colour', overlay='overlay', coverage='final',
                 errors='final', resolution='final')
@@ -34,6 +41,10 @@ TILE = 768            # output px per side of a view tile at full scale: bounds 
 TILE_WORKERS = max(1, min(4, os.cpu_count() or 1))     # tiles rendered at once: memory grows with each
 STATS_KEEP = 4        # statistics kept per scene (each holds proxy-sized maps)
 _TILES = ThreadPoolExecutor(TILE_WORKERS, thread_name_prefix='tile')
+
+
+class ExportExists(ValueError):
+    """The export file is already there and replacing it was not confirmed: the interface asks, then resends."""
 
 
 class Image:
@@ -296,6 +307,7 @@ class Scene:
         self._stats, self._running = OrderedDict(), set()
         self._base, self._base_busy = (None, None), False
         self._prefix = chain.PrefixCache()       # per block: a changed block restarts the statistics there
+        self._disk = False                        # not yet looked for; None when there is no clean limb
 
     def read_sets(self):
         """For the resolution view: an RGBA tint at label resolution (which luminance set supplied each region) and
@@ -380,7 +392,7 @@ class Scene:
         return hashlib.sha1(json.dumps([self.signature(), doc['protect_space'], doc['chains']],
                                        sort_keys=True).encode()).hexdigest()
 
-    def stats(self, doc, check=None):
+    def stats(self, doc, check=None, progress=None):
         """chain.prepare for this chain document, computed once: a caller asking while another computes the same
         statistics waits for them. check() may raise chain.Stale to abandon the computation (the worker)."""
         doc = chain.normalised(doc)
@@ -397,7 +409,7 @@ class Scene:
         result = None
         try:
             result = chain.prepare(self.lum, doc, colour=self.colour_source(), check=check, base=self.base(),
-                                   cache=self._prefix, tag=json.dumps(self.signature()))
+                                   cache=self._prefix, tag=json.dumps(self.signature()), progress=progress)
         finally:
             with self._cond:
                 self._running.discard(key)
@@ -448,6 +460,108 @@ class Scene:
         m = np.array([[factor, 0, -(1-factor)/2], [0, factor, -(1-factor)/2], [0, 0, 1.]]) @ m
         return m, (max(1, round(w*factor)), max(1, round(h*factor))), bbox
 
+    def disk(self):
+        """The lunar disk on the luminance canvas, (cx, cy, R) in canvas px, or None without a clean limb.
+
+        LunarAtlas's limb fit on a preview: a RANSAC circle through the sunlit limb, which the terminator cannot pull
+        inwards, so a crescent still gives the whole disk.  The export canvas places this circle, not the mosaic's
+        bounding box (BUGS.md bug 42).  Computed once per scene; a second caller racing the first only repeats it.
+        """
+        if self._disk is not False:
+            return self._disk
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent/'moon_atlas'))
+        from atlas_geo import NoUsableLimb, fit_limb
+        rgb, spacing = self.l.preview(1800)
+        try:
+            cx, cy, r, share, span = fit_limb(cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY), arc=True)
+        except NoUsableLimb:
+            cx = None
+        h, w = rgb.shape[:2]
+        # a quarter of the limb at least, a fifth of the lit outline on it (a crescent has about half, the rest is
+        # terminator and panel edges; a texture without a Moon still yields a wide, sparse circle, ~4 %), and a
+        # circle no wider than twice the mosaic's longer side: a spurious fit would inflate the canvas around a
+        # Moon that is not there
+        step = float(spacing[0, 0])
+        ok = cx is not None and span >= 90 and share >= .2 and r <= max(w, h)
+        self._disk = (cx*step, cy*step, r*step) if ok else None
+        return self._disk
+
+    def canvas_geometry(self, geometry, factor=1, canvas='native', position='centre', padding=None):
+        """The export view plus optional canvas padding around the Moon.
+
+        Padding is calculated after the chosen export scale, so the selected output dimensions are exact and the
+        source view lands on integral output pixels.  This is intentionally separate from ``geometry``: it is an
+        export presentation choice, never a saved project edit.
+        """
+        if canvas not in CANVAS_PRESETS:
+            raise ValueError('Choose an available export canvas.')
+        if position not in ('left', 'centre', 'right'):
+            raise ValueError('Choose left, centre or right Moon placement.')
+        padding = padding or {}
+        if not isinstance(padding, dict) or set(padding)-{'left', 'right', 'top', 'bottom'}:
+            raise ValueError('Invalid export padding.')
+        try:
+            padding = {side: int(padding.get(side, 0)) for side in ('left', 'right', 'top', 'bottom')}
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError('Export padding must be whole pixels.') from None
+        if any(value < 0 or value > 100000 for value in padding.values()):
+            raise ValueError('Export padding must be between 0 and 100,000 pixels.')
+        matrix, (w, h), bbox = self.geometry(geometry, factor)
+        ratio = CANVAS_PRESETS[canvas]
+        if ratio == (0, 0):
+            ow, oh, left, top = w, h, 0, 0
+        else:
+            rw, rh = ratio
+            disk = self.disk()
+            if disk is None:
+                units = max(math.ceil(w/rw), math.ceil(h/rh))
+                ow, oh = rw*units, rh*units
+                # A small 10% inset retains deliberate breathing room at the selected side: touching the frame is
+                # almost never a useful composition.
+                spare = ow-w
+                left = round(spare * {'left': .1, 'centre': .5, 'right': .9}[position])
+                top = (oh-h)//2
+            else:
+                # The whole disk's centre goes at the middle (or a third, two thirds) of the frame, as if the Moon
+                # were full: a crescent gets the room of its dark side too.  The frame holds the whole disk and
+                # every mosaic pixel, which may overhang the limb.
+                px, py = (matrix @ [disk[0], disk[1], 1])[:2]
+                r = disk[2]*math.sqrt(abs(np.linalg.det(matrix[:2, :2])))
+                f = {'left': 1/3, 'centre': .5, 'right': 2/3}[position]
+                need_w = max(max(px, r)/f, max(w-px, r)/(1-f))
+                need_h = 2*max(py, h-py, r)
+                units = max(math.ceil(need_w/rw - 1e-6), math.ceil(need_h/rh - 1e-6), 1)
+                ow, oh = rw*units, rh*units
+                # px, py are pixel centres: output pixel j spans [j-1/2, j+1/2), so the frame's fraction f is f·ow−1/2
+                left = min(max(round(ow*f-.5-px), 0), ow-w)
+                top = min(max(round(oh/2-.5-py), 0), oh-h)
+        left += padding['left']; top += padding['top']
+        ow += padding['left'] + padding['right']; oh += padding['top'] + padding['bottom']
+        padded = np.array([[1., 0., left], [0., 1., top], [0., 0., 1.]]) @ matrix
+        return padded, (ow, oh), bbox, (left, top, w, h)
+
+    @staticmethod
+    def background_from_render(rgb, coverage):
+        """Estimate the existing sky from the outer edge of a finished render.
+
+        The renderer preserves space by default, but this also follows a user's colour/background blocks.  Taking
+        the darker part of the edge avoids using the lunar limb when a frame is tight around a gibbous Moon.
+        """
+        valid = coverage > .5
+        if not valid.any():
+            return np.zeros(3, np.float32)
+        h, w = valid.shape
+        border = np.zeros_like(valid)
+        band = max(1, min(h, w)//20)
+        border[:band] = border[-band:] = True
+        border[:, :band] = border[:, -band:] = True
+        sample = rgb[valid & border]
+        if len(sample) < 16:
+            sample = rgb[valid]
+        light = sample @ np.array([.2126, .7152, .0722], np.float32)
+        # Keep a stable, representative low-background slice rather than a single noisy darkest pixel.
+        return np.median(sample[light <= np.quantile(light, .35)], axis=0).astype(np.float32)
+
     def missing_colour(self, geometry):
         """Share (%) of the luminance-covered view with no colour, from the coverage masks at 400 px at most."""
         if self.match is None:
@@ -461,7 +575,7 @@ class Scene:
         valid = lm > .5
         return float(np.mean(cm[valid] <= .5))*100 if valid.any() else 100.0
 
-    def render_view(self, matrix, size, doc, view='composite', precise=True, stats=None, origin=(0, 0)):
+    def render_view(self, matrix, size, doc, view='composite', precise=True, stats=None, origin=(0, 0), progress=None):
         """Output pixels [ox, ox + w) × [oy, oy + h) of the output that `matrix` (canvas px -> output px) defines.
 
         The chains run on the canvas grid and their result is resampled into the output with Lanczos-4. An exact
@@ -474,7 +588,9 @@ class Scene:
         stage = 'final' if view == 'overlay' and self.match is None else STAGE_OF[view]
         if stage != 'overlay':
             doc = chain.normalised(doc)
-            stats = stats or self.stats(doc)
+            if progress:
+                progress('statistics', None)
+            stats = stats or self.stats(doc, progress=lambda kind, entry: progress and progress('statistics', entry))
         w, h = size
         s = float(np.hypot(matrix[0, 0], matrix[1, 0]))
         r = max(1, math.ceil(1/s-1e-9)) if precise and s < 1 else 1
@@ -485,15 +601,31 @@ class Scene:
         rgb, lm, cm = np.empty((h, w, 3), np.float32), np.empty((h, w), np.float32), np.empty((h, w), np.float32)
         t = max(1, TILE//r)
 
+        jobs = [(ty, tx) for ty in range(0, h, t) for tx in range(0, w, t)]
+        lum_e, col_e, fin_e = (chain.enabled(doc, p) for p in chain.PATHS) if stage != 'overlay' else ([], [], [])
+        colour = self.colour_source()
+        entries = lum_e if stage == 'luminance' else (col_e if colour is not None else lum_e) if stage == 'colour' \
+            else lum_e + (col_e if colour is not None else []) + fin_e if stage == 'final' else []
+        total = max(1, len(jobs) * len(entries))
+        completed, progress_lock = 0, threading.Lock()
+        if progress:
+            progress('render', None, 0, total)
+
         def tile(ty, tx):
+            nonlocal completed
             th, tw = min(t, h-ty), min(t, w-tx)
             U = r*(ox+tx)+np.arange(r*tw, dtype=np.float64)
             V = r*(oy+ty)+np.arange(r*th, dtype=np.float64)
-            parts = self._tile(inv, U, V, step, stage, stats, doc, tint=view == 'resolution')
+            def hook(entry, block, pixels, domain):
+                nonlocal completed
+                if progress:
+                    with progress_lock:
+                        completed += 1
+                        progress('render', entry, completed, total)
+            parts = self._tile(inv, U, V, step, stage, stats, doc, tint=view == 'resolution', hook=hook)
             if r > 1:
                 parts = [cv2.resize(v, (tw, th), interpolation=cv2.INTER_AREA) for v in parts]
             rgb[ty:ty+th, tx:tx+tw], lm[ty:ty+th, tx:tx+tw], cm[ty:ty+th, tx:tx+tw] = parts
-        jobs = [(ty, tx) for ty in range(0, h, t) for tx in range(0, w, t)]
         # tiles are independent (T-TILE): render them side by side; a tile's own work is mostly single-threaded
         if len(jobs) == 1 or threading.current_thread().name.startswith('tile'):
             for job in jobs:
@@ -501,6 +633,8 @@ class Scene:
         else:
             for f in [_TILES.submit(tile, *job) for job in jobs]:
                 f.result()
+        if progress:
+            progress('encoding', None, total, total)
         result = rgb
         if view == 'coverage':
             result = result*.35
@@ -526,12 +660,12 @@ class Scene:
                     cv2.circle(result, tuple(np.round(p[:2]).astype(int)), 5, colour, -1)
         valid = lm > .5
         missing = float(np.mean(cm[valid] <= .5))*100 if valid.any() else 100
-        info = dict(missing_colour=missing, matched=self.match is not None)
+        info = dict(missing_colour=missing, matched=self.match is not None, coverage=lm)
         if view == 'resolution':
             info['sets'] = self.set_legend
         return result, info
 
-    def _tile(self, inv, U, V, step, stage, stats, doc, tint=False):
+    def _tile(self, inv, U, V, step, stage, stats, doc, tint=False, hook=None):
         """One tile of output grid U × V: its canvas region rendered and resampled; returns (rgb × L coverage, L
         coverage, colour coverage) on that grid — multiplied before any reduction, so a reduced render is the mean
         of the full one."""
@@ -545,7 +679,7 @@ class Scene:
         if i1 <= i0 or j1 <= j0:
             return np.zeros(gx.shape+(3,), np.float32), np.zeros(gx.shape, np.float32), np.zeros(gx.shape, np.float32)
         cover = {}
-        img = self._canvas(stage, stats, doc, i0*step, j0*step, i1-i0, j1-j0, step, cover)
+        img = self._canvas(stage, stats, doc, i0*step, j0*step, i1-i0, j1-j0, step, cover, hook=hook)
         mx, my = (gx-j0).astype(np.float32), (gy-i0).astype(np.float32)
         # outside the canvas any value will do: the coverage below is zero there
         rgb = np.clip(cv2.remap(img, mx, my, cv2.INTER_LANCZOS4, borderMode=cv2.BORDER_REPLICATE), 0, 1)
@@ -560,14 +694,14 @@ class Scene:
         lm, cm = (cv2.remap(ones if cover[k] is None else cover[k], mx, my, cv2.INTER_LINEAR) for k in ('luminance', 'colour'))
         return rgb*lm[..., None], lm, cm
 
-    def _canvas(self, stage, stats, doc, y0, x0, h, w, step, cover):
+    def _canvas(self, stage, stats, doc, y0, x0, h, w, step, cover, hook=None):
         if stage == 'overlay':                     # the unprocessed layers: luminance in red, colour in green and blue
             l, cl = self.lum.read(y0, x0, h, w, step)
             c, cc = self.col.read(y0, x0, h, w, step)
             cover.update(luminance=cl, colour=cc)
             return np.dstack([l[..., 0], c[..., 1], c[..., 2]])
         return chain.render(self.lum, stats, doc, y0, x0, h, w, colour=self.colour_source(), stage=stage, step=step,
-                            coverage=cover)
+                            coverage=cover, hook=hook)
 
     # ---------------------------------------------------------------- layers, previews, exports
 
@@ -583,31 +717,36 @@ class Scene:
                 view = 'luminance'
         return view, empty
 
-    def render(self, matrix, size, doc, layers, view='composite', precise=True, stats=None, origin=(0, 0)):
+    def render(self, matrix, size, doc, layers, view='composite', precise=True, stats=None, origin=(0, 0), progress=None):
         """render_view with the layer switches applied."""
         view, empty = self.visible(layers, view)
-        rgb, info = self.render_view(matrix, size, doc, view, precise, stats, origin)
+        rgb, info = self.render_view(matrix, size, doc, view, precise, stats, origin, progress)
         if empty:
             rgb[:] = 0
         return rgb, info
 
-    def preview(self, doc, geometry, layers, view='composite'):
+    def preview(self, doc, geometry, layers, view='composite', progress=None, canvas='native', position='centre', padding=None):
         """The whole oriented view, at most 1400 px: approximate below scale 1 (plan §4.5)."""
-        matrix, size, _ = self.geometry(geometry)
+        matrix, size, _, _ = self.canvas_geometry(geometry, canvas=canvas, position=position, padding=padding)
         scale = min(1, 1400/max(size))
         matrix = np.diag([scale, scale, 1]) @ matrix
         small = (max(1, round(size[0]*scale)), max(1, round(size[1]*scale)))
-        rgb, info = self.render(matrix, small, doc, layers, view, precise=False)
+        rgb, info = self.render(matrix, small, doc, layers, view, precise=False, progress=progress)
+        if view != 'coverage' and view != 'errors' and not self.visible(layers, view)[1]:
+            rgb[info['coverage'] <= .5] = self.background_from_render(rgb, info['coverage'])
         info.update(width=size[0], height=size[1], preview_scale=scale)
         return rgb, info
 
     def export(self, output, doc, geometry, layers, factor=1, layer='composite', progress=lambda x: None,
-               cancelled=lambda: False, stats=None):
+               cancelled=lambda: False, stats=None, canvas='native', position='centre', padding=None, overwrite=False):
         """Write the view at export scale `factor` (1, 1/2, 1/4), tile by tile. The chain document and its
-        statistics are fixed when the export starts, so later edits never reach a running export (T-WORKER)."""
+        statistics are fixed when the export starts, so later edits never reach a running export (T-WORKER).
+        An existing file is replaced only with `overwrite`, and only once the new one is complete."""
         output = Path(output).expanduser().resolve()
-        if output.exists():
-            raise ValueError('The export file already exists. Choose another name.')
+        if output.is_dir():
+            raise ValueError('The export path is a folder. Add a file name, such as Moon.tif.')
+        if output.exists() and not overwrite:
+            raise ExportExists(f'{output.name} already exists.')
         protected = {Path(p) for s in self.project.data['sets'] for p in self.project.input_paths(s['id'])}
         protected.update(self.project.path(self.project.stream(n)['mosaic']) for n in ('luminance', 'colour')
                          if self.project.stream(n).get('mosaic'))
@@ -615,7 +754,7 @@ class Scene:
             raise ValueError('Choose an export outside the built mosaics and source files.')
         if factor not in (1, .5, .25):
             raise ValueError('Export scale must be 1, 1/2 or 1/4.')
-        matrix, (w, h), _ = self.geometry(geometry, factor)
+        matrix, (w, h), _, _ = self.canvas_geometry(geometry, factor, canvas, position, padding)
         suffix = output.suffix.lower()
         if suffix not in ('.tif', '.tiff', '.png', '.jpg', '.jpeg'):
             raise ValueError('Choose TIFF, PNG or JPEG.')
@@ -623,8 +762,22 @@ class Scene:
             raise ValueError('This JPEG is too large. Choose a smaller scale or TIFF/PNG.')
         view, empty = self.visible(layers, layer)
         doc = chain.normalised(doc)
+        halo = chain.margin(doc)
+        if halo > 1024:
+            raise ValueError(f'The chain halo is {halo} px. Reduce blur or detail radii below 1024 px before exporting.')
         if STAGE_OF[view] != 'overlay' and stats is None:
             stats = self.stats(doc)
+        background = None
+        if not empty:
+            # A compact real render retains the active chain's background treatment; it lets the full tiled export
+            # start with the right fill instead of black, including PNG's streaming encoder.
+            estimate_matrix, estimate_size, _, _ = self.canvas_geometry(geometry, canvas=canvas, position=position, padding=padding)
+            estimate_scale = min(1, 512/max(estimate_size))
+            estimate_matrix = np.diag([estimate_scale, estimate_scale, 1]) @ estimate_matrix
+            estimate_size = tuple(max(1, round(v*estimate_scale)) for v in estimate_size)
+            estimate, estimate_info = self.render(estimate_matrix, estimate_size, doc, layers, layer,
+                                                  precise=False, stats=stats)
+            background = self.background_from_render(estimate, estimate_info['coverage'])
         output.parent.mkdir(parents=True, exist_ok=True)
         fd, temp = tempfile.mkstemp(prefix='.'+output.stem+'-', suffix=suffix, dir=output.parent)
         os.close(fd)
@@ -649,7 +802,8 @@ class Scene:
                 n = min(t, h-y)
                 pixels = np.zeros((n, w, 3), np.uint16)
                 if not empty:
-                    rgb, _ = self.render_view(matrix, (w, n), doc, view, True, stats, origin=(0, y))
+                    rgb, info = self.render_view(matrix, (w, n), doc, view, True, stats, origin=(0, y))
+                    rgb[info['coverage'] <= .5] = background
                     pixels[:] = np.round(rgb*65535).astype(np.uint16)
                 if suffix in ('.png',):
                     for row in pixels:
@@ -664,7 +818,8 @@ class Scene:
                 chunk(b'IEND', b'')
                 png.close()
             elif suffix in ('.jpg', '.jpeg'):
-                ok, encoded = cv2.imencode('.jpg', dest[..., ::-1], [cv2.IMWRITE_JPEG_QUALITY, 92])
+                quality = int(tool_settings.get('LUNARATLAS_JPEG_QUALITY', 92))
+                ok, encoded = cv2.imencode('.jpg', dest[..., ::-1], [cv2.IMWRITE_JPEG_QUALITY, max(0, min(100, quality))])
                 if not ok:
                     raise OSError('JPEG could not be written.')
                 encoded.tofile(temp)
@@ -672,8 +827,22 @@ class Scene:
                 dest.flush()
                 del dest
                 dest = None
-            # Exclusive publication never overwrites a file created during export.
-            os.link(temp, output)
+            # Exclusive publication never overwrites a file created during export; a confirmed replacement swaps
+            # the finished file in atomically, so a failed or cancelled export leaves the old one intact.
+            try:
+                if overwrite:
+                    os.replace(temp, output)
+                else:
+                    os.link(temp, output)
+            except FileExistsError:
+                raise ExportExists(f'{output.name} already exists.') from None
+            except OSError as e:
+                if not overwrite and e.errno in (errno.EPERM, errno.EXDEV, errno.ENOSYS, errno.EACCES):
+                    if output.exists():
+                        raise ExportExists(f'{output.name} already exists.') from None
+                    os.replace(temp, output)
+                else:
+                    raise
             return dict(path=str(output), width=w, height=h, bit_depth=8 if suffix in ('.jpg', '.jpeg') else 16)
         finally:
             if 'png' in locals() and not png.closed:

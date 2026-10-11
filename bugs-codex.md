@@ -6,10 +6,33 @@ Scope: the already-running local app at `http://localhost:8768` in Safari, using
 
 | ID | Severity | Status | Summary |
 |---|---|---|---|
-| CODEX-01 | Critical | Confirmed live | A quoted absolute project path is treated as a relative path and creates the project inside the application checkout. |
-| CODEX-02 | High | Source-traced; destructive journey intentionally not run | Loading a chain replaces all processing settings immediately, with no confirmation, backup, diff, or undo. |
-| CODEX-03 | Medium | Source-traced from the live controls | The `×` controls delete previews and processing blocks immediately and permanently, with no confirmation or undo. |
-| CODEX-04 | Medium | Source-traced recovery defect | A failed colour re-placement leaves the old colour/match active but marks the stream failed, so the workspace can misrepresent stale output as the current placement. |
+| CODEX-01 | Critical | **Fixed 2026-10-07** | A quoted absolute project path is treated as a relative path and creates the project inside the application checkout. |
+| CODEX-02 | High | **Fixed 2026-10-07** | Loading a chain replaces all processing settings immediately, with no confirmation, backup, diff, or undo. |
+| CODEX-03 | Medium | **Fixed 2026-10-07** | The `×` controls delete previews and processing blocks immediately and permanently, with no confirmation or undo. |
+| CODEX-04 | Medium | **Fixed 2026-10-07** | A failed colour re-placement leaves the old colour/match active but marks the stream failed, so the workspace can misrepresent stale output as the current placement. |
+
+**Fixed 2026-10-07** (`impl/phase-8`, not pushed — see BUGS.md's own "Fix notes" section for the fuller
+write-up these four share with its bugs 14–34):
+
+- **CODEX-01.** A pasted quoted path, or a relative or empty one, is now refused at the HTTP boundary
+  (`mosaic/mosaic_common.py`'s `require_absolute_path`), before the project folder is touched. The CLI, which
+  legitimately resolves relative paths against the shell's own working directory, is untouched — the check
+  sits only in `app.py`'s `/api/new` and `/api/open` handling, not in `Application.select()` itself. **The
+  project this finding describes is still on disk inside the checkout** and was left in place rather than
+  moved without being asked.
+- **CODEX-02.** Loading a chain file now applies at once (no blocking confirm — the import control sits
+  inside the export dialog, which was already open, and a native `confirm()` would have stacked unseen
+  behind it, and would have frozen the whole page on any import), but a toast names how many blocks were
+  replaced and carries its own Undo button for about 8 seconds, the same pattern CODEX-03 uses for a deleted
+  block. No on-disk backup file is written; the undo is in memory in the page.
+- **CODEX-03.** Deleting a block or a preview now offers the same kind of Undo toast. A restored preview
+  gets a new id from the server (it is re-added, not revived), so anything that referred to the old id by
+  name elsewhere would not follow it — nothing in this app does.
+- **CODEX-04.** The layers panel and the match chip now show "⚠ the last placement attempt failed; showing
+  the previous result" when this happens, and export requires an explicit checkbox before it will send that
+  stale colour result out. The server-side data (`mosaic`, `report`, `placement`, `match`) is left exactly as
+  this finding described — untouched on failure — since showing it as "what you've got, clearly labelled
+  stale" seemed more useful than discarding it.
 
 ### CODEX-01 — quoted absolute path silently creates a large project tree in the app repository
 
@@ -64,3 +87,43 @@ The checkout now has an untracked directory at that literal path, containing `pr
 - The existing project opened and rendered normally; the composite, luminance, colour and overlay views responded without a crash.
 - Opening and closing a 1:1 preview worked, and the export dialog correctly refused to enable Export until its preview was ready.
 - The server prevents overwriting an existing export file (`mosaic/lrgb.py:604-610`), but that safeguard does not address project-path parsing or destructive editor actions above.
+
+## Code inspection — 2026-10-07
+
+This pass was read-only: the following are newly recorded findings and were deliberately **not** fixed.
+
+| ID | Severity | Status | Summary |
+|---|---|---|---|
+| CODEX-05 | Critical | **Fixed 2026-10-07** | Colour re-placement now publishes a generation-specific canvas/report pair through one atomic project save. |
+| CODEX-06 | High | **Fixed 2026-10-07** | Upload bodies now stream to a private temporary file without holding the application-wide lock. |
+| CODEX-07 | Low | **Fixed 2026-10-07** | Superseded preview responses immediately revoke their unreferenced blob URLs. |
+
+### CODEX-05 — colour canvas and report are not published atomically
+
+**Evidence (confirmed by code path).** `Application.place_colour()` checks only that the partial TIFF exists, then replaces `derived/colour_canvas.tif` first and `derived/colour_place.json` second ([app.py](mosaic/app.py#L774-L779)). If the report is absent, its replace fails, its JSON is malformed, or the process fails before `Project.save()`, the exception handler marks the colour stream failed but removes only the remaining partial files ([app.py](mosaic/app.py#L788-L794)). The previous `colour_canvas.tif` has already been overwritten while the stored match/report still describe the old placement.
+
+**Impact.** The stale-result warning introduced for CODEX-04 can now label a mixture of old metadata and new pixels as the previous result; previews and exports may therefore use a canvas that does not match its placement diagnostics.
+
+**Minimal fix.** Validate both temporary artifacts and parse the report before publishing either. Publish a generation-specific canvas/report pair, then atomically switch a single project pointer to that pair (or retain the old pair until both replacements and the project save have succeeded).
+
+**Fixed 2026-10-07.** `place_colour()` validates the partial TIFF and JSON report, derives the placement summary, and then moves both into UUID-generation filenames. The project document atomically switches to the complete pair only after both moves succeed. Any failure removes only the unpublished generation and restores the prior canvas/report references; the regression test simulates a report-publication failure.
+
+### CODEX-06 — upload I/O monopolises the application lock
+
+**Evidence (confirmed by code path).** The upload handler enters `with self.lock` before reading the HTTP body ([app.py](mosaic/app.py#L1155-L1173)) and holds it through the entire loop that reads up to 8 GiB ([app.py](mosaic/app.py#L1174-L1185)). `status()`, cancellation, render-status updates, project changes, and job progress all use that same lock.
+
+**Impact.** A slow or stalled multi-gigabyte upload makes the live UI appear frozen and prevents cancelling a currently running job until the client finishes or disconnects.
+
+**Minimal fix.** Validate and reserve the destination under the lock, release it while streaming to a uniquely named temporary file, then reacquire it to re-check the project/set state and register the completed upload. Remove the temporary file if the project changed meanwhile.
+
+**Fixed 2026-10-07.** The handler performs its project/set validation under the lock, streams into a dot-prefixed temporary file outside it, then reacquires the lock to validate the still-open project and register the final file. A regression test holds the body reader and proves the application lock remains obtainable while the upload is waiting.
+
+### CODEX-07 — superseded preview fetches retain unreferenced blob URLs
+
+**Evidence (confirmed by code path).** Switching a viewer mode starts a new request and overwrites `this.images[id]` ([previews.js](mosaic/ui/previews.js#L169-L192)). If the first fetch subsequently resolves, it creates an object URL, then returns at the stale-entry guard ([previews.js](mosaic/ui/previews.js#L194-L201)) without storing or revoking that URL. `forget()` cannot revoke it because it was never added to `shown`.
+
+**Impact.** Repeatedly toggling modes on large 1:1 previews consumes browser memory for the remainder of the tab.
+
+**Minimal fix.** Revoke `url` before the stale-entry return, or key pending requests by `(preview id, mode, stamp)` and cancel/revoke superseded entries explicitly.
+
+**Fixed 2026-10-07.** `Previews.load()` revokes the newly created object URL whenever its request has been superseded before the URL enters `shown`.

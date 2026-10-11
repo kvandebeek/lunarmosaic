@@ -19,13 +19,32 @@ Screenshots: `/tmp/muse-shots/*.png` (temporary; recreate with `/tmp/muse_cdp.js
 
 | ID | Severity | Status | Summary |
 |---|---|---|---|
-| MUSE-01 | High | Reproduced in the browser, twice | *03 Match & edit* opens a blank page (only the marketing hero) until the luminance mosaic exists |
-| MUSE-02 | Medium | Reproduced in the browser, live project | Drag-and-drop onto a panel set ignores the set's lock and still tries to import |
-| MUSE-03 | Medium | Reproduced in the browser and via the API | Server errors reach the user as raw Python text (`[Errno 1] Operation not permitted: …`, a bare path) |
-| MUSE-04 | Low | Reproduced in the browser | The marketing hero stays above *01 Import* and *02 Build* in every project |
-| MUSE-05 | Low | Reproduced in the browser | Overlapping previews stack their canvas labels on top of each other |
-| MUSE-06 | Low | Reproduced in the browser | The colour views and *Show the residuals on the mosaic* stay live although no colour is placed |
-| MUSE-07 | Low | Reproduced in the browser, polled to a settled state | After Cancel, the job strip keeps the cancelled stage's title and frozen progress |
+| MUSE-01 | High | **Fixed 2026-10-07** | *03 Match & edit* opens a blank page (only the marketing hero) until the luminance mosaic exists |
+| MUSE-02 | Medium | **Fixed 2026-10-07** | Drag-and-drop onto a panel set ignores the set's lock and still tries to import |
+| MUSE-03 | Medium | **Fixed 2026-10-07** | Server errors reach the user as raw Python text (`[Errno 1] Operation not permitted: …`, a bare path) |
+| MUSE-04 | Low | **Fixed 2026-10-07** | The marketing hero stays above *01 Import* and *02 Build* in every project |
+| MUSE-05 | Low | **Fixed 2026-10-07** | Overlapping previews stack their canvas labels on top of each other |
+| MUSE-06 | Low | **Fixed 2026-10-07** | The colour views and *Show the residuals on the mosaic* stay live although no colour is placed |
+| MUSE-07 | Low | **Fixed 2026-10-07** | After Cancel, the job strip keeps the cancelled stage's title and frozen progress |
+
+**Fixed 2026-10-07** (`impl/phase-8`, not pushed; shares its write-up with BUGS.md's bugs 14–34 and
+bugs-codex.md's CODEX-01..04):
+
+- **MUSE-01.** Clicking *03 Match & edit* before the luminance mosaic exists now lands on Build instead
+  (with a toast saying why), and the nav button itself is disabled until then — the second of the two
+  options this finding suggested.
+- **MUSE-02.** The drop zone now checks the same lock the file picker and *Use folder* already checked, and
+  dims while locked.
+- **MUSE-03.** A `friendly_error()` at both API exception handlers turns `OSError`'s errno text, a missing
+  JSON field, and the rest into one plain sentence; `ValueError` (already written for people) passes
+  through unchanged, matching how this codebase already raised its own errors.
+- **MUSE-04.** The hero now hides together with the welcome cards whenever a project is open.
+- **MUSE-05.** A preview's canvas label is now just its id (P01, P04, …), which never collides; the strip
+  beside the canvas, and a hover tooltip on the rectangle, still carry the full name.
+- **MUSE-06.** The colour-only view buttons and *Show the residuals on the mosaic* are now disabled
+  until colour is placed, the same way *Check overlapping areas* already was.
+- **MUSE-07.** A cancelled job now reads "`<action>` cancelled · stopped during stage N of 9" instead of
+  the stage title it was cancelled during, and the progress bar dims, so it no longer reads as still running.
 
 ---
 

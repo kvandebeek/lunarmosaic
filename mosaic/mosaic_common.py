@@ -20,6 +20,36 @@ RNG_SEED = 20260925     # fixed seed: identical input gives identical output
 DEFAULT_EXTS = ("tif", "tiff", "png", "jpg", "jpeg")
 
 
+def strip_pasted_path(text):
+    """A path typed or pasted into a text box: surrounding whitespace and one matching pair of quotes
+    (' or ", as a terminal-oriented tool pastes a path with a space) are stripped. Raises ValueError for
+    anything that is not a non-empty string once stripped (BUGS.md bug 27 / bugs-codex.md CODEX-01: a
+    quoted path such as "'/Users/name/Desktop/My Moon'" must not be resolved as a literal relative path)."""
+    if not isinstance(text, str):
+        raise ValueError('Expected a text path.')
+    t = text.strip()
+    if len(t) >= 2 and t[0] == t[-1] and t[0] in ('"', "'"):
+        t = t[1:-1].strip()
+    if not t:
+        raise ValueError('Choose a path.')
+    return t
+
+
+def require_absolute_path(text, what='path'):
+    """strip_pasted_path(text), then require it to be absolute (after ~ expansion) -> the expanded str.
+    The server's own working directory means nothing to the user, so a relative path is refused rather
+    than silently resolved against it."""
+    from pathlib import Path
+    t = strip_pasted_path(text)
+    p = Path(t).expanduser()
+    windows_absolute = len(t) >= 3 and t[0].isalpha() and t[1] == ':' and t[2] in '/\\'
+    unc_absolute = t.startswith('\\\\')
+    if not p.is_absolute() and not windows_absolute and not unc_absolute:
+        forms = ' /, ~, a drive letter, or a UNC prefix' if os.name == 'nt' else ' / or ~'
+        raise ValueError(f'Use a full {what}, starting with{forms} — not {t!r}.')
+    return str(p)
+
+
 def physical_memory():
     """Physical RAM in bytes on the supported desktop platforms."""
     if sys.platform == 'win32':
@@ -112,9 +142,11 @@ def find_images(inputs, recursive=False, exts=DEFAULT_EXTS):
     for item in inputs:
         if os.path.isdir(item):
             pattern = os.path.join(item, "**", "*") if recursive else os.path.join(item, "*")
-            out += [p for p in glob.glob(pattern, recursive=recursive) if p.lower().endswith(exts)]
+            out += [p for p in glob.glob(pattern, recursive=recursive) if p.lower().endswith(exts)
+                    and not re.search(r'-LunarMosaic(?: \(\d+\))?\.(?:tif|tiff|png|jpe?g)$', os.path.basename(p), re.I)]
         elif os.path.isfile(item):
-            out.append(item)
+            if not re.search(r'-LunarMosaic(?: \(\d+\))?\.(?:tif|tiff|png|jpe?g)$', os.path.basename(item), re.I):
+                out.append(item)
         else:
             raise FileNotFoundError(item)
     return sorted({os.path.abspath(p) for p in out}, key=lambda p: (os.path.basename(p), p))
@@ -182,10 +214,10 @@ def check_outputs(outputs, inputs):
     for i, o in enumerate(outs):
         for p in inputs:
             if same_path(o, p):
-                sys.exit(f"refusing to overwrite the input {p}: choose another output name")
+                raise ValueError(f"refusing to overwrite the input {p}: choose another output name")
         for o2 in outs[:i]:
             if same_path(o, o2):
-                sys.exit(f"two outputs of this run would be the same file: {o}")
+                raise ValueError(f"two outputs of this run would be the same file: {o}")
 
 
 class Staging:

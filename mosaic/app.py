@@ -39,6 +39,65 @@ sys.path.insert(0, str(ROOT / 'moon_atlas'))
 from atlas_view import start_server
 from atlas_paths import file_lock
 
+def friendly_error(e):
+    """A sentence for the user from an exception caught at the API boundary (muse-bugs.md MUSE-03): a
+    ValueError already carries one, by this codebase's convention, so it passes through unchanged; the
+    others — a missing JSON field, an OS error with its errno text and a bare path, a cv2 failure — are
+    rewritten so the page never shows raw Python text."""
+    if isinstance(e, ValueError):
+        return str(e)
+    if isinstance(e, KeyError):
+        field = e.args[0] if e.args else 'a required field'
+        return f'The request is missing {field!r}.'
+    if isinstance(e, OSError):
+        reason = e.strerror or str(e) or 'that failed'
+        where = f': {e.filename}' if e.filename else ''
+        return f'{reason}{where}.'
+    if isinstance(e, TypeError):
+        return 'That request was not understood.'
+    return 'The image could not be processed.'
+
+
+def canvas_png(rgb, coverage):
+    """8-bit RGBA for the workspace canvas: where the mosaic has no data it is transparent, so the background the
+    page chooses shows there instead of a black that looks like sky (BUGS.md 38). The renderer's rgb is
+    premultiplied by coverage; PNG alpha is straight."""
+    a = np.clip(coverage, 0, 1)[..., None]
+    straight = np.where(a > 0, rgb/np.maximum(a, 1e-6), 0)
+    _, png = cv2.imencode('.png', np.round(np.clip(np.dstack([straight[..., ::-1], a]), 0, 1)*255).astype(np.uint8))
+    return png.tobytes()
+
+
+def choose_path(kind, start='', name=''):
+    """The macOS "choose folder / file / file name" dialog, via osascript (BUGS.md bug 14: a path box with no way
+    to browse for one). Returns (path, supported): path is None when the dialog isn't available here or the user
+    cancelled it (osascript exits non-zero either way, so the two aren't told apart); supported is False only when
+    this isn't macOS, or osascript itself could not be run."""
+    if sys.platform != 'darwin' or not shutil.which('osascript'):
+        return None, False
+    default = ''
+    if start:
+        try:
+            start_path = Path(start).expanduser()
+            # a 'save' start is usually a not-yet-existing file; its parent folder is the useful default then
+            location = start_path if start_path.exists() else start_path.parent if kind == 'save' else None
+            if location is not None and location.exists():
+                default = f' default location (POSIX file {json.dumps(str(location))})'
+        except (OSError, ValueError):
+            pass
+    if kind == 'folder':
+        script = f'POSIX path of (choose folder{default})'
+    elif kind == 'file':
+        script = f'POSIX path of (choose file{default})'
+    else:
+        script = f'POSIX path of (choose file name{default} default name {json.dumps(name or "Untitled")})'
+    try:
+        out = subprocess.run(['osascript', '-e', script], capture_output=True, text=True, timeout=300)
+    except (OSError, subprocess.TimeoutExpired):
+        return None, False
+    return (out.stdout.strip() or None) if out.returncode == 0 else None, True
+
+
 UI = ROOT / 'mosaic' / 'ui'
 UI_FILES = {'mosaic.css': 'text/css', 'mosaic.js': 'text/javascript', 'chains.js': 'text/javascript',
             'previews.js': 'text/javascript', 'save.js': 'text/javascript'}
@@ -113,9 +172,32 @@ class Application:
         self.thread = None
         self.process = None
         self.cancel = threading.Event()
+        # Short-lived status for synchronous image requests.  It is separate from self.job: a preview must never
+        # look like, block, or replace a build/export job.
+        self.render_status = {}
         self.history = RecentProjects(history_path) if history_path else None
         self.history_error = None
         self.echo = None                      # called with each log line (lunarmosaic.py prints them)
+        self.last_request = time.monotonic()
+        self.session_idle_seconds = 90
+
+    def touch_request(self):
+        with self.lock:
+            self.last_request = time.monotonic()
+
+    def expire_idle_project(self):
+        """Release a project whose browser disappeared, while keeping the local home page server alive."""
+        with self.lock:
+            if not self.project or time.monotonic() - self.last_request < self.session_idle_seconds:
+                return False
+            if self.job.get('state') == 'running':
+                return False
+            if self.lease:
+                self.lease.__exit__(None, None, None)
+            self.worker.cancel()
+            self.project = self.lease = self.scene = None
+            self.job = dict(state='idle')
+            return True
 
     def close(self):
         self.worker.cancel()
@@ -204,6 +286,40 @@ class Application:
         with self.lock:
             return dict(project=self.project.public() if self.project else None, job=copy.deepcopy(self.job))
 
+    def start_render_status(self, rid, label):
+        """Return a callback for Scene's real statistics/block/tile events, keyed by one browser request."""
+        if not rid:
+            return lambda *args, **kwargs: None
+        if not isinstance(rid, str) or not re.fullmatch(r'[A-Za-z0-9_-]{6,96}', rid):
+            raise ValueError('Invalid render status id.')
+        with self.lock:
+            now = time.time()
+            self.render_status = {k: v for k, v in self.render_status.items() if now-v['updated'] < 90}
+            self.render_status[rid] = dict(state='running', message=f'{label} · preparing image statistics', done=0, total=0,
+                                           updated=now)
+
+        def update(phase, entry=None, done=0, total=0):
+            block = entry.get('type', '').replace('_', ' ') if isinstance(entry, dict) else ''
+            if phase == 'statistics':
+                message = f'{label} · statistics' + (f' · {block}' if block else '')
+                done, total = 0, 0
+            elif phase == 'render':
+                message = f'{label} · rendering {done}/{total}' + (f' · {block}' if block else '')
+            else:
+                message, done, total = f'{label} · encoding image', total or done, total or done
+            with self.lock:
+                if rid in self.render_status:
+                    self.render_status[rid].update(message=message, done=int(done), total=int(total), updated=time.time())
+        return update
+
+    def finish_render_status(self, rid, error=None):
+        if not rid:
+            return
+        with self.lock:
+            current = self.render_status.get(rid)
+            if current:
+                current.update(state='failed' if error else 'done', message=(str(error) if error else current['message']), updated=time.time())
+
     def update_job(self, **values):
         with self.lock:
             self.job.update(values)
@@ -251,6 +367,7 @@ class Application:
             raise ValueError('Unknown panel set.') from None
         if not isinstance(paths, list) or not paths or any(not isinstance(x, str) or not x.strip() for x in paths):
             raise ValueError('Choose one or more source folders or files.')
+        paths = [mc.strip_pasted_path(x) for x in paths]
         if optics is not None and not isinstance(optics, dict):
             raise ValueError('Invalid optics values.')
         stream = self.project.stream_of(key)
@@ -482,6 +599,8 @@ class Application:
             return
         self.idle()
         if op == 'create':
+            if data.get('stream', 'luminance') == 'luminance' and p.stream('luminance').get('mosaic'):
+                raise ValueError('This set is already built. Create a new project to replace its panels.')
             key = p.add_set(data.get('stream', 'luminance'), data.get('label'))
             if data.get('optics'):
                 p.set(key)['optics'] = clean_optics(data['optics'])
@@ -631,7 +750,7 @@ class Application:
         placed = [v for v in doc['panels'].values() if v['state'] == 'placed']
         held = np.array([e for v in placed for _, _, e in v.get('samples', [])])
         return dict(matrix=K_matrix(doc['k']).tolist(), method='placement', scale=doc['k'],
-                    rotation=float(np.median([v['rotation_deg'] for v in placed])) if placed else 0.0,
+                    rotation=float(np.degrees(np.arctan2(np.median(np.sin(np.radians([v['rotation_deg'] for v in placed]))), np.median(np.cos(np.radians([v['rotation_deg'] for v in placed])))))) if placed else 0.0,
                     inliers=len(placed), candidates=len(doc['panels']),
                     median=float(np.median(held)) if len(held) else 0.0,
                     p95=float(np.percentile(held, 95)) if len(held) else 0.0,
@@ -655,10 +774,12 @@ class Application:
             if not paths:
                 raise ValueError('Add colour panels first.')
             both = p.set('RGB')['stream'] == 'both'
+            previous = copy.deepcopy(s)
             s.update(state='building', error=None, started=time.time())
             p.save()
         derived = p.folder/'derived'
         partial, partial_report = derived/'.colour_canvas.partial.tif', derived/'.colour_place.partial.json'
+        canvas = report_path = None
         try:
             if both:
                 doc, mosaic, report = None, lum['mosaic'], None
@@ -684,12 +805,19 @@ class Application:
                 code, failure = self.run_process(command, progress)
                 if self.cancel.is_set():
                     raise InterruptedError('Colour placement cancelled; the previous colour was kept.')
-                if code != 0 or not partial.is_file():
+                if code != 0 or not partial.is_file() or not partial_report.is_file():
                     raise ValueError((failure[0].upper()+failure[1:]+'.') if failure else 'Colour placement failed. See the log below.')
-                os.replace(partial, derived/'colour_canvas.tif')
-                os.replace(partial_report, derived/'colour_place.json')
-                doc = json.loads((derived/'colour_place.json').read_text('utf-8'))
-                mosaic, report, placement = 'derived/colour_canvas.tif', 'derived/colour_place.json', self.placement_summary(doc)
+                # Validate the complete pair before making either half visible.  Generation-specific files let the
+                # atomic project save below publish one canvas/report pair in a single step; an old pair remains
+                # usable if anything fails before that save.
+                doc = json.loads(partial_report.read_text('utf-8'))
+                placement = self.placement_summary(doc)
+                generation = uuid.uuid4().hex
+                canvas = derived/f'colour_canvas.{generation}.tif'
+                report_path = derived/f'colour_place.{generation}.json'
+                os.replace(partial, canvas)
+                os.replace(partial_report, report_path)
+                mosaic, report = str(canvas.relative_to(p.folder)), str(report_path.relative_to(p.folder))
             size = doc['colour_canvas_size'] if doc else [lum.get('width'), lum.get('height')]
             with self.lock:
                 s.update(state='built', mosaic=mosaic, report=report, k=doc['k'] if doc else 1.0, width=size[0], height=size[1],
@@ -699,13 +827,20 @@ class Application:
                 self.scene = None
                 p.save()
         except Exception as e:
-            for f in (partial, partial_report):
+            for f in (partial, partial_report, canvas, report_path):
+                if f is None:
+                    continue
                 f.unlink(missing_ok=True)
             with self.lock:
-                s.update(state='interrupted' if self.cancel.is_set() else 'failed', error=str(e),
-                         duration=time.time()-s['started'])
+                # Keep the last fully published pair attached to the project.  In particular, do not leave a
+                # newly-written canvas paired with the old report after a failed re-placement.
+                duration = time.time()-s.get('started', time.time())
+                s.clear()
+                s.update(previous, state='interrupted' if self.cancel.is_set() else 'failed', error=str(e),
+                         duration=duration)
                 p.save()
             raise
+        # Keep old generations while previews and exports may still have open readers.
         try:                                                       # the independent check, on the placed result
             diagnostics = self.measure_scene(Scene(p))
             with self.lock:
@@ -776,6 +911,48 @@ class Application:
             p.save()
         return result
 
+    def open_in_lunaratlas(self):
+        """Export the current luminance/composite into the panel source folder and open the bundled atlas viewer.
+
+        The source panels remain untouched.  The exported handoff is deliberately a new TIFF beside the original
+        inputs, so LunarAtlas can keep its edits and annotated export there without coupling the two project files.
+        """
+        p = self.project
+        if not p.stream('luminance').get('mosaic'):
+            raise ValueError('Build luminance before opening LunarAtlas.')
+        paths = [Path(x).resolve() for st in p.feeding('luminance') for x in p.input_paths(st['id'])]
+        if not paths:
+            raise ValueError('No source panels are available for the LunarAtlas handoff.')
+        try:
+            folder = Path(os.path.commonpath([str(x.parent) for x in paths]))
+        except ValueError:
+            folder = p.folder
+        if not folder.is_dir() or folder == Path('/') or not os.access(folder, os.W_OK):
+            folder = p.folder
+        stem = re.sub(r'[^A-Za-z0-9._-]+', '-', p.name).strip('-') or 'Moon'
+        output = folder / f'{stem}-LunarMosaic.tif'
+        n = 2
+        while output.exists():
+            output = folder / f'{stem}-LunarMosaic ({n}).tif'
+            n += 1
+        scene, doc, layers = self.get_scene(), p.chain_doc(), p.layers
+        geometry, layer, factor, canvas, position, padding = self.export_options(p.data['geometry'], layers, {})
+        scene.export(str(output), doc, geometry, layers, factor, layer, cancelled=self.cancel.is_set,
+                     canvas=canvas, position=position, padding=padding)
+        if sys.platform == 'darwin' and shutil.which('open'):
+            # The installed LunarAtlas app owns its runtime and reference data.  `--args` is handled by its
+            # packaged launcher, which forwards --ingest to the already-running instance when necessary.
+            if subprocess.run(['open', '-Ra', 'LunarAtlas'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
+                raise ValueError('LunarAtlas.app is not installed. Install the rebuilt LunarAtlas app first.')
+            command = ['open', '-a', 'LunarAtlas', '--args', '--ingest', str(output)]
+            subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True)
+        else:
+            command = [sys.executable, '-u', str(ROOT/'moon_atlas'/'lunaratlas.py'), 'view', str(output)]
+            subprocess.Popen(command, cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=(os.name != 'nt'))
+        return dict(output=str(output), viewer='LunarAtlas')
+
     def move_previews(self, old, new):
         """When rotation or mirror change, each preview keeps its size and follows its centre (plan §4.2)."""
         p = self.project
@@ -804,7 +981,11 @@ class Application:
             return
         if op == 'add':
             taken = {x['id'] for x in previews}
-            v = dict(v, id=next(f'p{n:02d}' for n in range(1, 1000) if f'p{n:02d}' not in taken))
+            try:
+                pid = next(f'p{n:02d}' for n in range(1, 1000) if f'p{n:02d}' not in taken)
+            except StopIteration:
+                raise ValueError('Preview limit reached (999). Delete one first.') from None
+            v = dict(v, id=pid)
             v.setdefault('name', f'Preview {len(previews) + 1}')
         elif op == 'update':
             old = next((x for x in previews if x['id'] == v.get('id')), None)
@@ -840,6 +1021,7 @@ class Application:
             scene, doc = self.get_scene(), chain.normalised(self.project.chain_doc())
         st = scene.stats(doc)
         keys = dict(highlights=('knee', 'top', 'affected'), contrast=('m',), curves=('histogram',),
+                    levels=('histogram', 'sky_level', 'shadow_level', 'highlight_level'),
                     white_balance=('B', 'W', 'g', 'ratios', 'pixels', 'note'), rgb_shift=('crops', 'estimates', 'r', 'b'),
                     deconvolution=('mono', 'dering_threshold', 'first_dark_ring_px'),
                     wavelets=('noise', 'cutoff', 'suggested_layer'))
@@ -880,16 +1062,34 @@ class Application:
             geometry['coverage'] = options['coverage']
         Project.validate_geometry(geometry)
         layer = options.get('layer', 'composite')
-        factor = float(options.get('factor', 1))
+        try:
+            factor = float(options.get('factor', 1))
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError('Export scale must be 1, 1/2 or 1/4.') from None
+        canvas = options.get('canvas', 'native')
+        position = options.get('position', 'centre')
+        padding = options.get('padding', {})
         if layer not in ('composite', 'luminance', 'colour'):
             raise ValueError('Unknown export layer.')
         if factor not in (1, .5, .25):
             raise ValueError('Export scale must be 1, 1/2 or 1/4.')
+        if canvas not in lrgb.CANVAS_PRESETS:
+            raise ValueError('Choose an available export canvas.')
+        if position not in ('left', 'centre', 'right'):
+            raise ValueError('Choose left, centre or right Moon placement.')
+        if not isinstance(padding, dict) or set(padding)-{'left', 'right', 'top', 'bottom'}:
+            raise ValueError('Invalid export padding.')
+        try:
+            padding = {side: int(padding.get(side, 0)) for side in ('left', 'right', 'top', 'bottom')}
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError('Export padding must be whole pixels.') from None
+        if any(value < 0 or value > 100000 for value in padding.values()):
+            raise ValueError('Export padding must be between 0 and 100,000 pixels.')
         if layer == 'colour' and self.get_scene().match is None:
             raise ValueError('Match the colour mosaic before exporting this layer.')
         if layer == 'composite' and not layers['l_visible'] and (not layers['rgb_visible'] or self.get_scene().match is None):
             raise ValueError('Enable a layer in the workspace before exporting the combined image.')
-        return geometry, layer, factor
+        return geometry, layer, factor, canvas, position, padding
 
     def get(self, h, path):
         parsed = urlsplit(h.path)
@@ -901,6 +1101,12 @@ class Application:
                 h.file(str(UI/path[1:]), UI_FILES[path[1:]])
             elif path == '/api/blocks':
                 h.json(dict(blocks=block_catalog.catalog(), paths=list(chain.PATHS)))
+            elif path == '/api/choose':
+                kind = query.get('kind', ['folder'])[0]
+                if kind not in ('folder', 'file', 'save'):
+                    raise ValueError('Unknown chooser kind.')
+                chosen, supported = choose_path(kind, query.get('start', [''])[0], query.get('name', [''])[0])
+                h.json(dict(path=chosen, supported=supported))
             elif path == '/api/analysis':
                 self.require(dict(id=query.get('id', [''])[0]))
                 h.json(self.analysis())
@@ -914,21 +1120,31 @@ class Application:
                 h.reply(json.dumps(doc, indent=2).encode(), 'application/json')
             elif path == '/api/state':
                 h.json(self.status())
+            elif path == '/api/render-status':
+                self.require(dict(id=query.get('id', [''])[0]))
+                rid = query.get('rid', [''])[0]
+                if not re.fullmatch(r'[A-Za-z0-9_-]{6,96}', rid):
+                    raise ValueError('Invalid render status id.')
+                with self.lock:
+                    h.json(dict(status=copy.deepcopy(self.render_status.get(rid))))
             elif path == '/api/recent':
                 h.json(dict(projects=self.history.summaries() if self.history else [],
                             warning=self.history_error, enabled=self.history is not None))
             elif path == '/api/export-preview':
                 with self.lock:
                     p = self.require(dict(id=query.get('id', [''])[0]))
-                    options = {key:query[key][0] for key in ('coverage', 'layer', 'factor') if key in query}
+                    options = {key:query[key][0] for key in ('coverage', 'layer', 'factor', 'canvas', 'position') if key in query}
+                    options['padding'] = {side:query.get(f'pad_{side}', ['0'])[0] for side in ('left', 'right', 'top', 'bottom')}
                     layers, doc = p.layers, p.chain_doc()
-                    geometry, layer, factor = self.export_options(p.data['geometry'], layers, options)
+                    geometry, layer, factor, canvas, position, padding = self.export_options(p.data['geometry'], layers, options)
                     scene = self.get_scene()
-                rgb, info = scene.preview(doc, geometry, layers, layer)
-                _, (w, height), _ = scene.geometry(geometry, factor)
+                rgb, info = scene.preview(doc, geometry, layers, layer, canvas=canvas, position=position, padding=padding)
+                _, (w, height), _, _ = scene.canvas_geometry(geometry, factor, canvas, position, padding)
                 _, png = cv2.imencode('.png', np.round(rgb[..., ::-1]*255).astype(np.uint8))
                 h.json(dict(width=w, height=height, raw_bytes=w*height*6,
                             missing_colour=info['missing_colour'],
+                            # what a ratio canvas places: the fitted lunar disk, or the mosaic when no limb was found
+                            moon_placed=None if lrgb.CANVAS_PRESETS[canvas] == (0, 0) else 'disk' if scene.disk() else 'mosaic',
                             jpeg_max_side=lrgb.JPEG_MAX_SIDE, jpeg_max_pixels=lrgb.JPEG_MAX_PIXELS,
                             composition=layer if layer != 'composite' else 'LRGB' if layers['l_visible'] and layers['rgb_visible'] and scene.match is not None else 'luminance' if layers['l_visible'] else 'colour',
                             preview='data:image/png;base64,'+base64.b64encode(png).decode('ascii')))
@@ -939,9 +1155,15 @@ class Application:
                 view = query.get('view', ['composite'])[0]
                 if view not in lrgb.VIEWS:
                     raise ValueError('Unknown view.')
-                rgb, info = scene.preview(doc, geometry, layers, view)
-                ok, png = cv2.imencode('.png', np.round(rgb[..., ::-1]*255).astype(np.uint8))
-                h.reply(png.tobytes(), 'image/png')
+                rid = query.get('rid', [''])[0]
+                progress = self.start_render_status(rid, 'Canvas')
+                try:
+                    rgb, info = scene.preview(doc, geometry, layers, view, progress=progress)
+                except Exception as e:
+                    self.finish_render_status(rid, e)
+                    raise
+                self.finish_render_status(rid)
+                h.reply(canvas_png(rgb, info['coverage']), 'image/png')
             elif path == '/api/geometry':
                 with self.lock:
                     p = self.require(dict(id=query.get('id', [''])[0]))
@@ -964,9 +1186,15 @@ class Application:
                     raise ValueError('Unknown view.')
                 matrix, _, _ = scene.geometry(geometry)
                 transform = np.array([[scale, 0, -x], [0, scale, -y], [0, 0, 1]]) @ matrix
-                rgb, _ = scene.render(transform, (w, height), doc, layers, view, precise=scale >= .75)
-                _, png = cv2.imencode('.png', np.round(rgb[..., ::-1]*255).astype(np.uint8))
-                h.reply(png.tobytes(), 'image/png')
+                rid = query.get('rid', [''])[0]
+                progress = self.start_render_status(rid, 'Detail')
+                try:
+                    rgb, info = scene.render(transform, (w, height), doc, layers, view, precise=scale >= .75, progress=progress)
+                except Exception as e:
+                    self.finish_render_status(rid, e)
+                    raise
+                self.finish_render_status(rid)
+                h.reply(canvas_png(rgb, info['coverage']), 'image/png')
             elif path == '/api/canvas-estimate':
                 with self.lock:
                     p = self.require(dict(id=query.get('id', [''])[0]))
@@ -995,8 +1223,15 @@ class Application:
                 if not 1 <= w <= 4096 or not 1 <= height <= 4096 or w*height > 8_000_000:
                     raise ValueError('Invalid render region.')
                 matrix, _, _ = scene.geometry(dict(geometry, coverage='full'))
-                rgb, _ = scene.render_view(matrix, (w, height), doc, dict(final='composite').get(stage, stage),
-                                           origin=(x, y))
+                rid = query.get('rid', [''])[0]
+                progress = self.start_render_status(rid, f'Preview {query.get("preview", ["region"])[0].upper()}')
+                try:
+                    rgb, _ = scene.render_view(matrix, (w, height), doc, dict(final='composite').get(stage, stage),
+                                               origin=(x, y), progress=progress)
+                except Exception as e:
+                    self.finish_render_status(rid, e)
+                    raise
+                self.finish_render_status(rid)
                 top = 65535 if depth == '16' else 255
                 _, png = cv2.imencode('.png', np.round(rgb[..., ::-1]*top).astype(np.uint16 if depth == '16' else np.uint8))
                 h.reply(png.tobytes(), 'image/png')
@@ -1024,7 +1259,7 @@ class Application:
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             pass                              # the page went away (a reload, a superseded preview): no one to answer
         except (ValueError, OSError, TypeError, KeyError, cv2.error) as e:
-            h.json(dict(error=str(e)), 400)
+            h.json(dict(error=friendly_error(e)), 400)
         return True
 
     def post(self, h, path):
@@ -1033,6 +1268,7 @@ class Application:
         try:
             if path == '/api/upload':
                 q = parse_qs(urlsplit(h.path).query)
+                temporary = target = None
                 with self.lock:
                     p = self.require(dict(id=q.get('id', [''])[0]))
                     self.idle()
@@ -1048,19 +1284,37 @@ class Application:
                     if n < 1 or shutil.disk_usage(folder).free < n+(128 << 20):
                         raise ValueError('Empty upload or insufficient free disk space.')
                     target = folder/(uuid.uuid4().hex[:12]+'-'+name)
-                    try:
-                        with open(target, 'xb') as f:
-                            left = n
-                            while left:
-                                data = h.rfile.read(min(left, 1 << 20))
-                                if not data:
-                                    raise ValueError('Upload interrupted.')
-                                f.write(data)
-                                left -= len(data)
-                        self.inputs(key, p.set(key)['inputs']+[str(target)])
-                    except BaseException:
+                    temporary = folder/f'.{target.name}.upload'
+                try:
+                    # Do not hold the application lock while a browser trickles a multi-gigabyte file.  The final
+                    # lock below rechecks the project and set before registering the completed, private temp file.
+                    with open(temporary, 'xb') as f:
+                        left = n
+                        while left:
+                            data = h.rfile.read(min(left, 1 << 20))
+                            if not data:
+                                raise ValueError('Upload interrupted.')
+                            f.write(data)
+                            left -= len(data)
+                    with self.lock:
+                        p = self.require(dict(id=q.get('id', [''])[0]))
+                        self.idle()
+                        if key not in {x['id'] for x in p.data['sets']} or p.stream_of(key).get('mosaic'):
+                            raise ValueError('The panel set changed while this upload was in progress.')
+                        os.replace(temporary, target)
+                        current = p.set(key)['inputs']
+                        if str(target) not in current:
+                            current.append(str(target))
+                        stream_name = 'colour' if p.set(key)['stream'] == 'both' else p.set(key)['stream']
+                        p.refresh_state(stream_name)
+                        p.save()
+                except BaseException:
+                    if temporary is not None:
+                        temporary.unlink(missing_ok=True)
+                    if target is not None:
                         target.unlink(missing_ok=True)
-                        raise
+                    raise
+                with self.lock:
                     h.json(self.status())
                 return True
             o = h.body()
@@ -1081,7 +1335,9 @@ class Application:
                     self.project = self.lease = self.scene = None
                     self.job = dict(state='idle')
                 elif path in ('/api/new', '/api/open'):
-                    self.select(o['folder'], path == '/api/new', o.get('name', 'Untitled Moon'))
+                    # BUGS.md bug 27 / bugs-codex.md CODEX-01: a browser text box has no cwd of its own to resolve
+                    # a relative path against, unlike the CLI, which also calls select() with paths from the shell
+                    self.select(mc.require_absolute_path(o['folder'], 'project folder'), path == '/api/new', o.get('name', 'Untitled Moon'))
                 else:
                     p = self.require(o)
                     if path == '/api/inputs':
@@ -1100,6 +1356,8 @@ class Application:
                         self.start('Check alignment', self.check_alignment)
                     elif path == '/api/north-up':
                         self.start('Find lunar north', self.north_up)
+                    elif path == '/api/atlas':
+                        self.start('Open in LunarAtlas', self.open_in_lunaratlas)
                     elif path == '/api/manual':
                         self.idle()
                         if not p.stream('luminance').get('mosaic'):
@@ -1143,10 +1401,16 @@ class Application:
                         self.cancel_job()
                     elif path == '/api/export':
                         scene, doc, layers = self.get_scene(), p.chain_doc(), p.layers
-                        geometry, layer, factor = self.export_options(p.data['geometry'], layers, o)
-                        self.start('Export image', lambda: scene.export(o['output'], doc, geometry, layers, factor, layer,
+                        geometry, layer, factor, canvas, position, padding = self.export_options(p.data['geometry'], layers, o)
+                        output = mc.require_absolute_path(o['output'], 'output file')
+                        overwrite = o.get('overwrite') is True
+                        # asked here, before the job starts, so the dialog can offer to replace the file
+                        if Path(output).is_file() and not overwrite:
+                            raise lrgb.ExportExists(f'{Path(output).name} already exists.')
+                        self.start('Export image', lambda: scene.export(output, doc, geometry, layers, factor, layer,
                             progress=lambda f: self.update_job(progress=f, title=f'Writing image · {f:.0%}'),
-                            cancelled=self.cancel.is_set))
+                            cancelled=self.cancel.is_set, canvas=canvas, position=position, padding=padding,
+                            overwrite=overwrite))
                     else:
                         h.json(dict(error='Unknown operation.'), 404)
                         return True
@@ -1154,12 +1418,17 @@ class Application:
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             pass                              # the page went away before the answer
         except (ValueError, OSError, TypeError, KeyError, cv2.error) as e:
-            h.json(dict(error=str(e)), 400)
+            h.json(dict(error=friendly_error(e), exists=isinstance(e, lrgb.ExportExists)), 400)
         return True
 
 
 def serve(app, port=8768, browser=True):
     srv = start_server(port, app=app, token=secrets.token_urlsafe(32))
+    def reap_idle_project():
+        while not getattr(srv, 'shutdown_requested', False):
+            time.sleep(15)
+            app.expire_idle_project()
+    threading.Thread(target=reap_idle_project, daemon=True).start()
     # Keep the redirect private and separate from LunarAtlas's own launcher state.
     fd, handoff = tempfile.mkstemp(prefix='lunarmosaic-', suffix='.html')
     with os.fdopen(fd, 'w') as f:

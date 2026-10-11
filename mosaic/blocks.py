@@ -243,11 +243,31 @@ def _levels_apply(x, p, st, ctx):
     return ob + (ow - ob) * np.clip((x - b) / (w - b), 0, 1) ** (1 / g)
 
 
+def _levels_prepare(kind, x, p, ctx):
+    # BUGS.md bug 24: candidate black and white points from the image arriving at this block, for the editor's
+    # "set from image" buttons. The sky background and the disk's own extremes, as white_balance already finds
+    # them (its own background mask, since ctx.stats.space is not the sky).
+    if kind != 'proxy':
+        return {}
+    st, v = ctx.stats, x.mean(axis=2)
+    near = cv2.dilate(st.filled.astype(np.uint8), np.ones((7, 7), np.uint8)) > 0
+    sky = ~near & (x.max(axis=2) > 0)
+    # The editor overlays this on the levels transfer graph.  It is the image reaching this block (not the
+    # adjusted output), so black/white and gamma are set against the pixels they will actually transform.
+    out = {'histogram': np.histogram(x.mean(axis=2), 256, (0, 1))[0].tolist()}
+    if sky.any():
+        out['sky_level'] = float(np.percentile(v[sky], 99.5) * 255)
+    if st.disk.any():
+        out['shadow_level'] = float(np.percentile(v[st.disk], 0.5) * 255)
+        out['highlight_level'] = float(np.percentile(v[st.disk], 99.9) * 255)
+    return out
+
+
 register(Block('levels', PATHS, {
     'black': Param('float', 0.0, 0, 254), 'white': Param('float', 255.0, 1, 255),
     'gamma': Param('float', 1.0, 0.1, 9.99),
     'out_black': Param('float', 0.0, 0, 255), 'out_white': Param('float', 255.0, 0, 255)},
-    _levels_apply, lambda p: 0, check=_levels_check))
+    _levels_apply, lambda p: 0, check=_levels_check, prepare=_levels_prepare))
 
 
 def _points(name, v):
@@ -361,7 +381,11 @@ def _rect_mask(rect, shape, q):
     """A rectangle in canvas px as a mask on the proxy grid. (From phase 4 rectangles are drawn in the view.)"""
     m = np.zeros(shape[:2], bool)
     x, y, w, h = (v / q for v in rect)
-    m[int(y):int(np.ceil(y + h)), int(x):int(np.ceil(x + w))] = True
+    x0, y0 = max(0, int(np.floor(x))), max(0, int(np.floor(y)))
+    x1, y1 = min(shape[1], int(np.ceil(x + w))), min(shape[0], int(np.ceil(y + h)))
+    if x1 <= x0 or y1 <= y0:
+        return m
+    m[y0:y1, x0:x1] = True
     return m
 
 
@@ -370,12 +394,19 @@ def _wb_prepare(kind, x, p, ctx):
     if kind != 'proxy':
         return {}
     st = ctx.stats
+    def rect_warning(rect):
+        rx, ry, rw, rh = (float(v) / st.q for v in rect)
+        return rx + rw <= 0 or ry + rh <= 0 or rx >= x.shape[1] or ry >= x.shape[0]
     if p['background']['mode'] == 'rect':
+        if rect_warning(p['background']['rect']):
+            return {'B': np.zeros(3, np.float32), 'g': np.ones(3), 'note': 'The background reference rectangle lies outside the image.'}
         bg = _rect_mask(p['background']['rect'], x.shape, st.q)
     else:            # outside the lit disk, kept clear of the limb glow, without no-data (exact zeros)
         near = cv2.dilate(st.filled.astype(np.uint8), np.ones((7, 7), np.uint8)) > 0
         bg = ~near & (x.max(axis=2) > 0)
     B = np.median(x[bg], axis=0) if bg.any() else np.zeros(3, np.float32)
+    if p['white']['mode'] == 'rect' and rect_warning(p['white']['rect']):
+        return {'B': B, 'g': np.ones(3), 'note': 'The white reference rectangle lies outside the image.'}
     wm = _rect_mask(p['white']['rect'], x.shape, st.q) if p['white']['mode'] == 'rect' else st.disk.copy()
     wm &= ((x >= p['white_low']) & (x <= p['white_high'])).all(axis=2)
     if not wm.any():
@@ -451,9 +482,12 @@ def _psf(name, v):
     if not isinstance(v, dict) or v.get('kind') not in ('synthetic', 'file'):
         raise ValueError('The PSF is synthetic (LuckyStackWorker\'s three sliders) or an image file.')
     if v['kind'] == 'file':
-        if not isinstance(v.get('path'), str) or not v['path']:
+        if not isinstance(v.get('path'), str) or not v['path'].strip():
             raise ValueError('A PSF image needs its file path.')
-        return {'kind': 'file', 'path': v['path']}
+        import mosaic_common as mc                          # local: blocks.py otherwise has no path handling
+        # quotes/whitespace only (BUGS.md bug 14): a chain file may legitimately carry a path relative to where
+        # lunar_finish.py --chain is run, so this must not require an absolute path the way the GUI's own box does
+        return {'kind': 'file', 'path': mc.strip_pasted_path(v['path'])}
     spec = {'airy_radius': Param('float', 3.0, 1, 100), 'diffraction_intensity': Param('float', 100.0, 10, 200),
             'seeing_index': Param('float', 3.0, 1, 5)}
     unknown = set(v) - set(spec) - {'kind'}

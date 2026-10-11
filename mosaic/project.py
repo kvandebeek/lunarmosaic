@@ -218,7 +218,7 @@ class Project:
     @classmethod
     def create(cls, folder, name='Untitled Moon'):
         folder = Path(folder).expanduser().resolve()
-        if folder.exists() and any(p.name != 'project.json.lock' for p in folder.iterdir()):
+        if folder.exists() and any(p.name not in ('project.json.lock', 'derived') for p in folder.iterdir()):
             raise ValueError('Choose a new or empty project folder.')
         folder.mkdir(parents=True, exist_ok=True)
         edits = copy.deepcopy(DEFAULT_EDITS)
@@ -227,7 +227,7 @@ class Project:
                              luminance=new_stream(), colour=dict(new_stream(), legacy_match=None), orientation=None,
                              geometry={k: edits[k] for k in GEOMETRY_KEYS}, view={k: edits[k] for k in VIEW_KEYS},
                              chain=chain_part(chain.empty()), notes=[]))
-        (folder / 'derived').mkdir()
+        (folder / 'derived').mkdir(exist_ok=True)
         p.save()
         return p
 
@@ -254,12 +254,29 @@ class Project:
         data = from_phase4(data)
         p = cls(folder, data)
         p.validate()
+        derived = folder / 'derived'
+        if derived.is_dir():
+            current = {data[n].get('mosaic') for n in STREAMS} | {data['colour'].get('report')}
+            generations = sorted(derived.glob('colour_canvas.*.tif'), key=lambda x: x.stat().st_mtime, reverse=True)
+            for old in generations[2:]:
+                report = old.with_name(old.name.replace('colour_canvas.', 'colour_place.').replace('.tif', '.json'))
+                if str(old.relative_to(folder)) not in current:
+                    old.unlink(missing_ok=True); report.unlink(missing_ok=True)
+            for pattern in ('.north-*', '.north-job-*'):
+                for stale in derived.glob(pattern):
+                    if stale.is_dir():
+                        shutil.rmtree(stale, ignore_errors=True)
         for name in STREAMS:
             st = data[name]
             if st['state'] in ('building', 'queued'):
                 st.update(state='interrupted', error='Build interrupted. Restart this set; completed mosaics were kept.')
             if st.get('mosaic') and not p.path(st['mosaic']).is_file():
                 st.update(state='missing', error='The built mosaic is missing.', mosaic=None)
+                for key in ('sets_report', 'canvas_arcsec_px', 'width', 'height', 'build_facts'):
+                    st.pop(key, None)
+                if name == 'colour':
+                    for key in ('report', 'k', 'summary', 'placement'):
+                        st.pop(key, None)
                 data['colour']['legacy_match'] = data['colour']['placement'] = None
                 data['geometry']['coverage'] = 'full'
                 data['view']['l_visible'] = True
