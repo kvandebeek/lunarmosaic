@@ -190,6 +190,33 @@ def process_region(bgr, y0, x0, ctx, p):
 
 # ---------------------------------------------------------------- north up
 
+def centred_crop(lo, hi, margin_frac=0.03, block=8):
+    """A canvas that holds [lo, hi] (per axis) with an equal margin on every side, rounded up to a multiple
+    of `block` px (cv2 likes even sizes). Returns (size, o): size is the canvas (w, h)-style tuple, and o is
+    the offset such that a source point at position r lands at r - o on the canvas.
+
+    Rounding size up to a multiple of `block` leaves 0 to block-1 spare px per axis beyond the Moon and its
+    margin; that slack must be split evenly between both sides, by moving the window's start outward by half
+    of it (o -= slack / 2). Moving it the other way (o += slack / 2) was tried once and is wrong: it shrinks
+    the margin on one side by half the slack while growing the other by one and a half times it, which is
+    what put more black space on one side of the Moon than the other."""
+    lo, hi = np.asarray(lo, float), np.asarray(hi, float)
+    m = margin_frac * float((hi - lo).max())
+    ideal = hi - lo + 2 * m
+    size = tuple(int(-(-v // block) * block) for v in ideal)
+    o = lo - m - (np.array(size) - ideal) / 2
+    return size, o
+
+
+def fold_in_disk(lo, hi, centre, radius):
+    """Expand the lit-pixel crop box [lo, hi] to also hold the Moon's full circle (centre, radius), but only
+    when the lit content already spans at least half the disk's diameter -- a genuine close-up, which covers
+    much less than that, is left on its own tight crop rather than framed on a mostly-black whole Moon."""
+    if np.min(hi - lo) >= radius:
+        return np.minimum(lo, centre - radius), np.maximum(hi, centre + radius)
+    return lo, hi
+
+
 def north_up(small_final, F, input_path=None):
     """Where lunar north is in the finished image (moon_atlas on the reduced copy), and the turn that puts it up:
     dict(M, rot, mirror, north_was, identity, T full-resolution affine, size), or a reason string."""
@@ -199,10 +226,12 @@ def north_up(small_final, F, input_path=None):
     except ImportError as e:
         return f"moon_atlas not available ({e})"
     grey = small_final.mean(axis=2).astype(np.float32)
+    closeup = False
     try:
         geo, _ = atlas_geo.locate(grey, log=lambda *a: None)
     except SystemExit as e:
         # no limb (a close-up mosaic): search the input blind, lit by the Sun at its panels' capture time
+        closeup = True
         from atlas_ephem import capture_time
         when = capture_time(input_path) if input_path else None
         if when is None:
@@ -222,9 +251,20 @@ def north_up(small_final, F, input_path=None):
     p = (np.stack([xs[::step], ys[::step]], 1) + 0.5) * F - 0.5
     r = (p - c) @ M.T
     lo, hi = r.min(0) - F, r.max(0) + F
-    m = 0.03 * float((hi - lo).max())          # a little black space around the Moon
-    size = tuple(int(-(-(v + 2 * m) // 8) * 8) for v in (hi - lo))
-    o = lo - m + ((np.array(size) - (hi - lo + 2 * m)) / 2)
+
+    # geo.t and geo.radius_px are the Moon's true centre and radius -- known even for a crescent, since
+    # locate()/locate_closeup() fit against the actual lunar terrain, not against brightness. The lit-pixel
+    # bbox above has no such guarantee: the unlit limb casts no pixels to threshold on, so for anything less
+    # than a full Moon it is centred on the sunlit shape, not on the disk (2026-10-11: a 14-panel near-full
+    # mosaic came out with 221 px of black above the crescent and 48 px below it -- same code, no rounding
+    # bug, just a crescent that isn't lit symmetrically). fold_in_disk() fixes that by folding the known
+    # disk circle into the crop -- skipped for a genuine close-up (a crater crop covering a small, usually
+    # off-centre, part of the disk), where framing *that* on the whole Moon would be mostly black.
+    centre = (geo.t + 0.5) * (1.0 if closeup else F) - 0.5    # locate_closeup works on the full-res input;
+    radius = geo.radius_px * (1.0 if closeup else F)          # atlas_geo.locate works on the reduced copy
+    lo, hi = fold_in_disk(lo, hi, (centre - c) @ M.T, radius)
+
+    size, o = centred_crop(lo, hi)
     T = np.hstack([M, (-M @ c - o)[:, None]])
     return dict(M=M, rot=rot, mirror=mirror, north_was=geo.north_angle, T=T, size=size, c=c, o=o, F=F,
                 pivot_s=np.array([xs.mean(), ys.mean()]), identity=abs(rot) < 0.05 and not mirror)

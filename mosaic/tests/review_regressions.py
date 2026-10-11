@@ -183,6 +183,42 @@ def sky_pedestal_neutralised():
     assert abs(out[600, 600].mean() - (0.30 - 0.072)) < 0.02, "disk not kept"
 
 
+def north_up_crop_is_centred():
+    """centred_crop(): the Moon keeps an equal margin on every side (2026-10-11: a sign error gave it 113 px
+    above and 23 px below on a real mosaic -- the size-rounding slack was all pushed to one side instead of
+    split evenly)."""
+    rng = np.random.default_rng(7)
+    for _ in range(50):
+        lo = rng.uniform(-50, 50, 2)
+        hi = lo + rng.uniform(100, 3000, 2)                 # an asymmetric, non-square, non-multiple-of-8 box
+        size, o = lf.centred_crop(lo, hi)
+        before, after = lo - o, np.array(size) - (hi - o)   # margin on the low side and the high side, per axis
+        assert np.abs(before - after).max() < 1.0, f"lo={lo} hi={hi}: margins {before} vs {after}"
+        assert all(s % 8 == 0 for s in size), size
+
+
+def fold_in_disk_centres_a_crescent():
+    """fold_in_disk(): a near-full mosaic (most of the disk's diameter already lit) is framed on the whole
+    Moon, so a crescent/gibbous mosaic gets the same even margin a full Moon would (2026-10-11: a 14-panel
+    near-full mosaic, lit content only, came out with 221 px above the crescent and 48 px below it -- the
+    crop was centred on the sunlit shape, not on the disk). A genuine close-up (a crater crop, far smaller
+    than the disk) is left exactly as it was: folding in a 2786 px lunar radius around a crop a few hundred
+    px wide would be almost entirely black."""
+    radius, centre = 2786.1, np.array([1926.0, 3048.0])
+    # the real case (lunar_finish.py, 2026-10-11): lit content spans 60 % of the disk's width, 101 % of its
+    # height -- a crescent whose horns reach pole to pole, off-centre only because the dark limb is unlit
+    lo, hi = np.array([252.0, 222.0]), np.array([3600.0, 5874.0])
+    flo, fhi = lf.fold_in_disk(lo, hi, centre, radius)
+    size, o = lf.centred_crop(flo, fhi)
+    before, after = flo - o, np.array(size) - (fhi - o)
+    assert np.abs(before - after).max() < 1.0, f"not centred on the disk: margins {before} vs {after}"
+
+    # a close-up: content under half the disk's diameter must be left untouched
+    lo, hi = np.array([1700.0, 2900.0]), np.array([2100.0, 3200.0])
+    flo, fhi = lf.fold_in_disk(lo, hi, centre, radius)
+    assert np.array_equal(flo, lo) and np.array_equal(fhi, hi), "a close-up must not be framed on the whole Moon"
+
+
 def mesh_model_round_trip():
     """poly3+mesh: a zero mesh equals poly3; with a smooth mesh, from_canvas inverts to_canvas; the layout row
     (padded to the longest panel) still decodes."""
@@ -208,7 +244,7 @@ def mesh_model_round_trip():
 
 for fn in (bridge_drop, fine_all_fallback, photometry_no_overlap, pyramid_levels_and_border0, proxy_non_divisible, finish_cancel,
            contrast_curve_monotonic, no_gaps_at_panel_edges, lit_peaks_beyond_terminator_kept, json_safe_and_bounded_map,
-           mesh_model_round_trip, sky_pedestal_neutralised):
+           north_up_crop_is_centred, fold_in_disk_centres_a_crescent, mesh_model_round_trip, sky_pedestal_neutralised):
     test(fn)
 print(f"\n{'ALL OK' if not FAILED else 'FAILED: ' + ', '.join(FAILED)}")
 sys.exit(1 if FAILED else 0)
